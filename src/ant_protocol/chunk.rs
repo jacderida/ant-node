@@ -4,9 +4,8 @@
 //! is the SHA256 hash of the content. Maximum size is 4MB.
 //!
 //! This module defines the wire protocol messages for chunk operations
-//! using bincode serialization for compact, fast encoding.
+//! using postcard serialization for compact, fast encoding.
 
-use bincode::Options;
 use serde::{Deserialize, Serialize};
 
 /// Protocol identifier for chunk operations.
@@ -18,13 +17,12 @@ pub const PROTOCOL_VERSION: u16 = 1;
 /// Maximum chunk size in bytes (4MB).
 pub const MAX_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
-/// Maximum wire message size for deserialization.
+/// Maximum wire message size in bytes (5MB).
 ///
-/// Set to `MAX_CHUNK_SIZE` + 1 MB headroom for the envelope (`request_id`,
-/// enum discriminants, address, payment proof, etc.).  This prevents a
-/// malicious peer from sending a length-prefixed `Vec` that causes an
-/// unbounded allocation.
-const MAX_WIRE_MESSAGE_SIZE: u64 = (MAX_CHUNK_SIZE + 1024 * 1024) as u64;
+/// Limits the input buffer accepted by [`ChunkMessage::decode`] to prevent
+/// unbounded allocation from malicious or corrupted payloads. Set slightly
+/// above [`MAX_CHUNK_SIZE`] to accommodate message envelope overhead.
+pub const MAX_WIRE_MESSAGE_SIZE: usize = 5 * 1024 * 1024;
 
 /// Data type identifier for chunks.
 pub const DATA_TYPE_CHUNK: u32 = 0;
@@ -66,30 +64,33 @@ pub struct ChunkMessage {
 }
 
 impl ChunkMessage {
-    /// Encode the message to bytes using bincode.
+    /// Encode the message to bytes using postcard.
     ///
     /// # Errors
     ///
     /// Returns an error if serialization fails.
     pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
-        bincode::DefaultOptions::new()
-            .with_limit(MAX_WIRE_MESSAGE_SIZE)
-            .allow_trailing_bytes()
-            .serialize(self)
-            .map_err(|e| ProtocolError::SerializationFailed(e.to_string()))
+        postcard::to_stdvec(self).map_err(|e| ProtocolError::SerializationFailed(e.to_string()))
     }
 
-    /// Decode a message from bytes using bincode.
+    /// Decode a message from bytes using postcard.
+    ///
+    /// Rejects payloads larger than [`MAX_WIRE_MESSAGE_SIZE`] before
+    /// attempting deserialization.
     ///
     /// # Errors
     ///
-    /// Returns an error if deserialization fails.
+    /// Returns [`ProtocolError::MessageTooLarge`] if the input exceeds the
+    /// size limit, or [`ProtocolError::DeserializationFailed`] if postcard
+    /// cannot parse the data.
     pub fn decode(data: &[u8]) -> Result<Self, ProtocolError> {
-        bincode::DefaultOptions::new()
-            .with_limit(MAX_WIRE_MESSAGE_SIZE)
-            .allow_trailing_bytes()
-            .deserialize(data)
-            .map_err(|e| ProtocolError::DeserializationFailed(e.to_string()))
+        if data.len() > MAX_WIRE_MESSAGE_SIZE {
+            return Err(ProtocolError::MessageTooLarge {
+                size: data.len(),
+                max_size: MAX_WIRE_MESSAGE_SIZE,
+            });
+        }
+        postcard::from_bytes(data).map_err(|e| ProtocolError::DeserializationFailed(e.to_string()))
     }
 }
 
@@ -241,6 +242,13 @@ pub enum ProtocolError {
     SerializationFailed(String),
     /// Message deserialization failed.
     DeserializationFailed(String),
+    /// Wire message exceeds the maximum allowed size.
+    MessageTooLarge {
+        /// Actual size of the message in bytes.
+        size: usize,
+        /// Maximum allowed size.
+        max_size: usize,
+    },
     /// Chunk exceeds maximum size.
     ChunkTooLarge {
         /// Size of the chunk in bytes.
@@ -270,6 +278,9 @@ impl std::fmt::Display for ProtocolError {
         match self {
             Self::SerializationFailed(msg) => write!(f, "serialization failed: {msg}"),
             Self::DeserializationFailed(msg) => write!(f, "deserialization failed: {msg}"),
+            Self::MessageTooLarge { size, max_size } => {
+                write!(f, "message size {size} exceeds maximum {max_size}")
+            }
             Self::ChunkTooLarge { size, max_size } => {
                 write!(f, "chunk size {size} exceeds maximum {max_size}")
             }
@@ -432,6 +443,18 @@ mod tests {
         };
         let display = err.to_string();
         assert!(display.contains("address mismatch"));
+    }
+
+    #[test]
+    fn test_decode_rejects_oversized_payload() {
+        let oversized = vec![0u8; MAX_WIRE_MESSAGE_SIZE + 1];
+        let result = ChunkMessage::decode(&oversized);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ProtocolError::MessageTooLarge { .. }),
+            "expected MessageTooLarge, got {err:?}"
+        );
     }
 
     #[test]

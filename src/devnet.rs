@@ -17,7 +17,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
@@ -63,8 +64,6 @@ const STABILIZATION_MIN_CONNECTIONS_CAP: usize = 3;
 /// Health monitor check interval (seconds).
 const HEALTH_CHECK_INTERVAL_SECS: u64 = 5;
 
-/// Shutdown broadcast channel capacity.
-const SHUTDOWN_CHANNEL_CAPACITY: usize = 1;
 
 // =============================================================================
 // AntProtocol Devnet Configuration
@@ -293,7 +292,7 @@ impl DevnetNode {
 pub struct Devnet {
     config: DevnetConfig,
     nodes: Vec<DevnetNode>,
-    shutdown_tx: broadcast::Sender<()>,
+    shutdown: CancellationToken,
     state: Arc<RwLock<NetworkState>>,
     health_monitor: Option<JoinHandle<()>>,
 }
@@ -348,12 +347,10 @@ impl Devnet {
 
         tokio::fs::create_dir_all(&config.data_dir).await?;
 
-        let (shutdown_tx, _) = broadcast::channel(SHUTDOWN_CHANNEL_CAPACITY);
-
         Ok(Self {
             config,
             nodes: Vec::new(),
-            shutdown_tx,
+            shutdown: CancellationToken::new(),
             state: Arc::new(RwLock::new(NetworkState::Uninitialized)),
             health_monitor: None,
         })
@@ -396,24 +393,33 @@ impl Devnet {
         info!("Shutting down devnet");
         *self.state.write().await = NetworkState::ShuttingDown;
 
-        let _ = self.shutdown_tx.send(());
+        self.shutdown.cancel();
 
         if let Some(handle) = self.health_monitor.take() {
             handle.abort();
         }
 
+        let mut shutdown_futures = Vec::with_capacity(self.nodes.len());
         for node in self.nodes.iter_mut().rev() {
             debug!("Stopping node {}", node.index);
             if let Some(handle) = node.protocol_task.take() {
                 handle.abort();
             }
-            if let Some(ref p2p) = node.p2p_node {
-                if let Err(e) = p2p.shutdown().await {
-                    warn!("Error shutting down node {}: {}", node.index, e);
+
+            let node_index = node.index;
+            let node_state = Arc::clone(&node.state);
+            let p2p_node = node.p2p_node.take();
+
+            shutdown_futures.push(async move {
+                if let Some(p2p) = p2p_node {
+                    if let Err(e) = p2p.shutdown().await {
+                        warn!("Error shutting down node {}: {}", node_index, e);
+                    }
                 }
-            }
-            *node.state.write().await = NodeState::Stopped;
+                *node_state.write().await = NodeState::Stopped;
+            });
         }
+        futures::future::join_all(shutdown_futures).await;
 
         if self.config.cleanup_data_dir {
             if let Err(e) = tokio::fs::remove_dir_all(&self.config.data_dir).await {
@@ -687,17 +693,17 @@ impl Devnet {
             .iter()
             .filter_map(|n| n.p2p_node.clone())
             .collect();
-        let mut shutdown_rx = self.shutdown_tx.subscribe();
+        let shutdown = self.shutdown.clone();
 
         self.health_monitor = Some(tokio::spawn(async move {
             let check_interval = Duration::from_secs(HEALTH_CHECK_INTERVAL_SECS);
 
             loop {
                 tokio::select! {
-                    _ = shutdown_rx.recv() => break,
+                    () = shutdown.cancelled() => break,
                     () = tokio::time::sleep(check_interval) => {
                         for (i, node) in nodes.iter().enumerate() {
-                            if !node.is_running().await {
+                            if !node.is_running() {
                                 warn!("Node {} appears unhealthy", i);
                             }
                         }
@@ -710,7 +716,7 @@ impl Devnet {
 
 impl Drop for Devnet {
     fn drop(&mut self) {
-        let _ = self.shutdown_tx.send(());
+        self.shutdown.cancel();
         if let Some(handle) = self.health_monitor.take() {
             handle.abort();
         }

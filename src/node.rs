@@ -19,8 +19,8 @@ use saorsa_core::{
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 /// Maximum number of records for quoting metrics.
@@ -55,8 +55,8 @@ impl NodeBuilder {
         // Ensure root directory exists
         std::fs::create_dir_all(&self.config.root_dir)?;
 
-        // Create shutdown channel
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        // Create shutdown token
+        let shutdown = CancellationToken::new();
 
         // Create event channel
         let (events_tx, events_rx) = create_event_channel();
@@ -97,8 +97,7 @@ impl NodeBuilder {
         let node = RunningNode {
             config: self.config,
             p2p_node: Arc::new(p2p_node),
-            shutdown_tx,
-            shutdown_rx,
+            shutdown,
             events_tx,
             events_rx: Some(events_rx),
             upgrade_monitor,
@@ -272,8 +271,7 @@ impl NodeBuilder {
 pub struct RunningNode {
     config: NodeConfig,
     p2p_node: Arc<P2PNode>,
-    shutdown_tx: watch::Sender<bool>,
-    shutdown_rx: watch::Receiver<bool>,
+    shutdown: CancellationToken,
     events_tx: NodeEventsSender,
     events_rx: Option<NodeEventsChannel>,
     upgrade_monitor: Option<Arc<UpgradeMonitor>>,
@@ -336,17 +334,15 @@ impl RunningNode {
         if let Some(ref monitor) = self.upgrade_monitor {
             let monitor = Arc::clone(monitor);
             let events_tx = self.events_tx.clone();
-            let mut shutdown_rx = self.shutdown_rx.clone();
+            let shutdown = self.shutdown.clone();
 
             tokio::spawn(async move {
                 let upgrader = AutoApplyUpgrader::new();
 
                 loop {
                     tokio::select! {
-                        _ = shutdown_rx.changed() => {
-                            if *shutdown_rx.borrow() {
-                                break;
-                            }
+                        () = shutdown.cancelled() => {
+                            break;
                         }
                         result = monitor.check_for_updates() => {
                             if let Ok(Some(upgrade_info)) = result {
@@ -435,11 +431,9 @@ impl RunningNode {
 
         loop {
             tokio::select! {
-                _ = self.shutdown_rx.changed() => {
-                    if *self.shutdown_rx.borrow() {
-                        info!("Shutdown signal received");
-                        break;
-                    }
+                () = self.shutdown.cancelled() => {
+                    info!("Shutdown signal received");
+                    break;
                 }
                 _ = tokio::signal::ctrl_c() => {
                     info!("Received SIGINT (Ctrl-C), initiating shutdown");
@@ -465,11 +459,9 @@ impl RunningNode {
     async fn run_event_loop(&mut self) -> Result<()> {
         loop {
             tokio::select! {
-                _ = self.shutdown_rx.changed() => {
-                    if *self.shutdown_rx.borrow() {
-                        info!("Shutdown signal received");
-                        break;
-                    }
+                () = self.shutdown.cancelled() => {
+                    info!("Shutdown signal received");
+                    break;
                 }
                 _ = tokio::signal::ctrl_c() => {
                     info!("Received Ctrl-C, initiating shutdown");
@@ -533,9 +525,7 @@ impl RunningNode {
 
     /// Request the node to shut down.
     pub fn shutdown(&self) {
-        if let Err(e) = self.shutdown_tx.send(true) {
-            warn!("Failed to send shutdown signal: {e}");
-        }
+        self.shutdown.cancel();
     }
 }
 

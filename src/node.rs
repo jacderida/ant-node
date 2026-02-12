@@ -425,7 +425,7 @@ impl RunningNode {
 
     /// Run the main event loop, handling shutdown and signals.
     #[cfg(unix)]
-    async fn run_event_loop(&mut self) -> Result<()> {
+    async fn run_event_loop(&self) -> Result<()> {
         let mut sigterm = signal(SignalKind::terminate())?;
         let mut sighup = signal(SignalKind::hangup())?;
 
@@ -456,7 +456,7 @@ impl RunningNode {
 
     /// Run the main event loop, handling shutdown signals (non-Unix version).
     #[cfg(not(unix))]
-    async fn run_event_loop(&mut self) -> Result<()> {
+    async fn run_event_loop(&self) -> Result<()> {
         loop {
             tokio::select! {
                 () = self.shutdown.cancelled() => {

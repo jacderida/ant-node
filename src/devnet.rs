@@ -18,9 +18,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use tokio_util::sync::CancellationToken;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 // =============================================================================
@@ -63,7 +63,6 @@ const STABILIZATION_MIN_CONNECTIONS_CAP: usize = 3;
 
 /// Health monitor check interval (seconds).
 const HEALTH_CHECK_INTERVAL_SECS: u64 = 5;
-
 
 // =============================================================================
 // AntProtocol Devnet Configuration

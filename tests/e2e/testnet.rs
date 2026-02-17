@@ -15,6 +15,7 @@
 
 use ant_evm::RewardsAddress;
 use bytes::Bytes;
+use futures::future::join_all;
 use rand::Rng;
 use saorsa_core::{NodeConfig as CoreNodeConfig, P2PEvent, P2PNode};
 use saorsa_node::ant_protocol::{
@@ -82,6 +83,12 @@ const SMALL_STABILIZATION_TIMEOUT_SECS: u64 = 60;
 
 /// Default timeout for chunk operations (seconds).
 const DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS: u64 = 30;
+
+/// Short node-level network timeout for E2E test harness.
+///
+/// This bounds DHT leave/request waits during shutdown so tests do not spend
+/// most of their runtime in graceful teardown.
+const TEST_CORE_CONNECTION_TIMEOUT_SECS: u64 = 2;
 
 // =============================================================================
 // AntProtocol Test Configuration
@@ -987,6 +994,7 @@ impl TestNetwork {
         core_config.listen_addr = node.address;
         core_config.listen_addrs = vec![node.address];
         core_config.enable_ipv6 = false; // Disable IPv6 for local testing to avoid dual-stack binding issues
+        core_config.connection_timeout = Duration::from_secs(TEST_CORE_CONNECTION_TIMEOUT_SECS);
         core_config
             .bootstrap_peers
             .clone_from(&node.bootstrap_addrs);
@@ -1165,17 +1173,30 @@ impl TestNetwork {
             handle.abort();
         }
 
-        // Stop all nodes in reverse order
+        // Stop all nodes in reverse order.
+        // We shutdown nodes concurrently to avoid serially accumulating DHT
+        // graceful-leave waits across every node.
+        let mut shutdown_futures = Vec::with_capacity(self.nodes.len());
         for node in self.nodes.iter_mut().rev() {
             debug!("Stopping node {}", node.index);
             if let Some(handle) = node.protocol_task.take() {
                 handle.abort();
             }
-            if let Some(ref p2p) = node.p2p_node {
-                if let Err(e) = p2p.shutdown().await {
-                    warn!("Error shutting down node {}: {}", node.index, e);
-                }
+            *node.state.write().await = NodeState::Stopping;
+
+            if let Some(p2p) = node.p2p_node.clone() {
+                let node_index = node.index;
+                shutdown_futures.push(async move { (node_index, p2p.shutdown().await) });
             }
+        }
+
+        for (node_index, result) in join_all(shutdown_futures).await {
+            if let Err(e) = result {
+                warn!("Error shutting down node {}: {}", node_index, e);
+            }
+        }
+
+        for node in &self.nodes {
             *node.state.write().await = NodeState::Stopped;
         }
 

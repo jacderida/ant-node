@@ -15,8 +15,17 @@ use std::path::{Path, PathBuf};
 use tokio::task::spawn_blocking;
 use tracing::{debug, trace, warn};
 
-/// Default LMDB map size: 1 TiB virtual address space (costs nothing until used).
-const DEFAULT_MAX_MAP_SIZE: usize = 1_099_511_627_776;
+/// Default LMDB map size.
+///
+/// On Unix the mmap is a lazy virtual-address reservation — 1 TiB costs nothing
+/// until pages are faulted in. On Windows the mapping is backed by the paging
+/// file, so we use a conservative 1 GiB to avoid exhausting commit charge on CI
+/// runners and small VMs.
+#[cfg(not(target_os = "windows"))]
+const DEFAULT_MAX_MAP_SIZE: usize = 1_099_511_627_776; // 1 TiB
+
+#[cfg(target_os = "windows")]
+const DEFAULT_MAX_MAP_SIZE: usize = 1_073_741_824; // 1 GiB
 
 /// Configuration for LMDB storage.
 #[derive(Debug, Clone)]

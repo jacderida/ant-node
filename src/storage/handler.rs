@@ -303,7 +303,6 @@ mod tests {
     use super::*;
     use crate::payment::metrics::QuotingMetricsTracker;
     use crate::payment::{EvmVerifierConfig, PaymentVerifierConfig};
-    use crate::storage::lmdb::TEST_MAP_SIZE;
     use crate::storage::LmdbStorageConfig;
     use ant_evm::RewardsAddress;
     use tempfile::TempDir;
@@ -315,7 +314,6 @@ mod tests {
             root_dir: temp_dir.path().to_path_buf(),
             verify_on_read: true,
             max_chunks: 0,
-            max_map_size: TEST_MAP_SIZE,
         };
         let storage = Arc::new(
             LmdbStorage::new(storage_config)

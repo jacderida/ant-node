@@ -955,7 +955,6 @@ impl TestNetwork {
             root_dir: data_dir.to_path_buf(),
             verify_on_read: true,
             max_chunks: 0, // Unlimited for tests
-            ..LmdbStorageConfig::default()
         };
         let storage = LmdbStorage::new(storage_config)
             .await

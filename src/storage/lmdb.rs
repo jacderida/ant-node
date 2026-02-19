@@ -18,10 +18,6 @@ use tracing::{debug, trace, warn};
 /// Default LMDB map size: 1 TiB virtual address space (costs nothing until used).
 const DEFAULT_MAX_MAP_SIZE: usize = 1_099_511_627_776;
 
-/// LMDB map size for tests: 100 MiB.
-#[cfg(test)]
-pub(crate) const TEST_MAP_SIZE: usize = 100 * 1024 * 1024;
-
 /// Configuration for LMDB storage.
 #[derive(Debug, Clone)]
 pub struct LmdbStorageConfig {
@@ -31,8 +27,6 @@ pub struct LmdbStorageConfig {
     pub verify_on_read: bool,
     /// Maximum number of chunks to store (0 = unlimited).
     pub max_chunks: usize,
-    /// LMDB maximum map size in bytes (default: 1 TiB).
-    pub max_map_size: usize,
 }
 
 impl Default for LmdbStorageConfig {
@@ -41,7 +35,6 @@ impl Default for LmdbStorageConfig {
             root_dir: PathBuf::from(".saorsa/chunks"),
             verify_on_read: true,
             max_chunks: 0,
-            max_map_size: DEFAULT_MAX_MAP_SIZE,
         }
     }
 }
@@ -91,7 +84,6 @@ impl LmdbStorage {
     #[allow(unsafe_code)]
     pub async fn new(config: LmdbStorageConfig) -> Result<Self> {
         let env_dir = config.root_dir.join("chunks.mdb");
-        let max_map_size = config.max_map_size;
 
         // Create the directory synchronously before opening LMDB
         std::fs::create_dir_all(&env_dir)
@@ -107,7 +99,7 @@ impl LmdbStorage {
             // `--root-dir` must not point multiple nodes at the same directory.
             let env = unsafe {
                 EnvOpenOptions::new()
-                    .map_size(max_map_size)
+                    .map_size(DEFAULT_MAX_MAP_SIZE)
                     .max_dbs(1)
                     .open(&env_dir_clone)
                     .map_err(|e| Error::Storage(format!("Failed to open LMDB env: {e}")))?
@@ -398,7 +390,6 @@ mod tests {
             root_dir: temp_dir.path().to_path_buf(),
             verify_on_read: true,
             max_chunks: 0,
-            max_map_size: TEST_MAP_SIZE,
         };
         let storage = LmdbStorage::new(config).await.expect("create storage");
         (storage, temp_dir)
@@ -492,7 +483,6 @@ mod tests {
             root_dir: temp_dir.path().to_path_buf(),
             verify_on_read: true,
             max_chunks: 2,
-            max_map_size: TEST_MAP_SIZE,
         };
         let storage = LmdbStorage::new(config).await.expect("create storage");
 
@@ -569,7 +559,6 @@ mod tests {
             root_dir: temp_dir.path().to_path_buf(),
             verify_on_read: true,
             max_chunks: 1,
-            max_map_size: TEST_MAP_SIZE,
         };
         let storage = LmdbStorage::new(config).await.expect("create storage");
 
@@ -600,7 +589,6 @@ mod tests {
                 root_dir: temp_dir.path().to_path_buf(),
                 verify_on_read: true,
                 max_chunks: 0,
-                max_map_size: TEST_MAP_SIZE,
             };
             let storage = LmdbStorage::new(config).await.expect("create storage");
             storage.put(&address, content).await.expect("put");
@@ -612,7 +600,6 @@ mod tests {
                 root_dir: temp_dir.path().to_path_buf(),
                 verify_on_read: true,
                 max_chunks: 0,
-                max_map_size: TEST_MAP_SIZE,
             };
             let storage = LmdbStorage::new(config).await.expect("reopen storage");
             assert_eq!(storage.current_chunks(), 1);

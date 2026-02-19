@@ -310,7 +310,6 @@ impl NodeBuilder {
             root_dir: config.root_dir.clone(),
             verify_on_read: config.storage.verify_on_read,
             max_chunks: config.storage.max_chunks,
-            ..LmdbStorageConfig::default()
         };
         let storage = LmdbStorage::new(storage_config)
             .await

@@ -337,7 +337,7 @@ pub struct TestNode {
     ///
     /// Populated once the node starts and the protocol router is spawned.
     /// Dropped (and aborted) during teardown so tests don't leave tasks behind.
-    protocol_task: Option<JoinHandle<()>>,
+    pub protocol_task: Option<JoinHandle<()>>,
 }
 
 impl TestNode {
@@ -949,7 +949,11 @@ impl TestNetwork {
     /// - LMDB storage with verification enabled
     /// - Payment verification disabled (for testing without Anvil)
     /// - Quote generator with a test rewards address
-    async fn create_ant_protocol(data_dir: &std::path::Path) -> Result<AntProtocol> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if LMDB storage initialisation fails.
+    pub async fn create_ant_protocol(data_dir: &std::path::Path) -> Result<AntProtocol> {
         // Create LMDB storage
         let storage_config = LmdbStorageConfig {
             root_dir: data_dir.to_path_buf(),

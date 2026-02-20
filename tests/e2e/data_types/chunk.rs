@@ -60,7 +60,9 @@ impl ChunkTestFixture {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TestHarness;
+    use std::sync::Arc;
+
+    use crate::{TestHarness, TestNetwork};
     use rand::seq::SliceRandom;
 
     /// Test 1: Content address computation is deterministic
@@ -321,6 +323,91 @@ mod tests {
             result.is_err(),
             "Storing oversized chunk should fail, but got: {result:?}"
         );
+
+        harness
+            .teardown()
+            .await
+            .expect("Failed to teardown harness");
+    }
+
+    /// Test: Chunks persist across node restarts.
+    ///
+    /// Validates the full persistence lifecycle:
+    /// 1. Stores multiple chunks on a node via the protocol layer
+    /// 2. Drops the node's `AntProtocol` (simulating shutdown)
+    /// 3. Recreates it from the same data directory (simulating restart)
+    /// 4. Verifies all chunks are still retrievable with correct content
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_chunk_persist_across_restart() {
+        let mut harness = TestHarness::setup_minimal()
+            .await
+            .expect("Failed to setup test harness");
+
+        let fixture = ChunkTestFixture::new();
+        let chunks: &[(&str, &[u8])] = &[
+            ("small", &fixture.small),
+            ("medium", &fixture.medium),
+            ("large", &fixture.large),
+        ];
+
+        // Store all chunks on node 0
+        let mut addresses = Vec::new();
+        {
+            let node = harness.test_node(0).expect("Node 0 should exist");
+            for (_label, data) in chunks {
+                let addr = node.store_chunk(data).await.expect("Failed to store chunk");
+                addresses.push(addr);
+            }
+        }
+
+        // Shut down node 0's storage (simulates node restart):
+        // 1. Abort the protocol task that holds an Arc<AntProtocol>
+        // 2. Drop the node's own Arc<AntProtocol>
+        // This ensures the LMDB env is fully closed before reopening.
+        let data_dir = {
+            let node = harness
+                .network_mut()
+                .node_mut(0)
+                .expect("Node 0 should exist");
+            if let Some(handle) = node.protocol_task.take() {
+                handle.abort();
+            }
+            let dir = node.data_dir.clone();
+            node.ant_protocol = None;
+            dir
+        };
+
+        // Recreate AntProtocol from the same data directory (simulates restart)
+        let new_protocol = TestNetwork::create_ant_protocol(&data_dir)
+            .await
+            .expect("Failed to recreate AntProtocol");
+        {
+            let node = harness
+                .network_mut()
+                .node_mut(0)
+                .expect("Node 0 should exist");
+            node.ant_protocol = Some(Arc::new(new_protocol));
+        }
+
+        // Verify all chunks survived the restart
+        let node = harness.test_node(0).expect("Node 0 should exist");
+        for (i, (label, data)) in chunks.iter().enumerate() {
+            let retrieved = node
+                .get_chunk(&addresses[i])
+                .await
+                .expect("Failed to retrieve chunk after restart");
+
+            let chunk = retrieved.expect("Chunk should still exist after restart");
+            assert_eq!(
+                chunk.content.as_ref(),
+                *data,
+                "{label} chunk content should match after restart"
+            );
+            assert_eq!(
+                chunk.address, addresses[i],
+                "{label} chunk address should match after restart"
+            );
+        }
 
         harness
             .teardown()

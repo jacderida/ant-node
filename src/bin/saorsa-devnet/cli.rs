@@ -24,9 +24,9 @@ pub struct Cli {
     #[arg(long)]
     pub data_dir: Option<PathBuf>,
 
-    /// Remove data directory on shutdown.
-    #[arg(long, default_value_t = true)]
-    pub cleanup: bool,
+    /// Keep node data directories on shutdown instead of removing them.
+    #[arg(long)]
+    pub no_cleanup: bool,
 
     /// Spawn delay in milliseconds.
     #[arg(long)]

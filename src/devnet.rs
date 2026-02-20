@@ -4,7 +4,7 @@
 //! multi-node networks on a single machine.
 
 use crate::ant_protocol::CHUNK_PROTOCOL_ID;
-use crate::config::NODE_IDENTITY_FILENAME;
+use crate::config::{default_root_dir, NODES_SUBDIR, NODE_IDENTITY_FILENAME};
 use crate::payment::{
     EvmVerifierConfig, PaymentVerifier, PaymentVerifierConfig, QuoteGenerator,
     QuotingMetricsTracker,
@@ -170,14 +170,11 @@ impl Default for DevnetConfig {
         let max_base_port = DEVNET_PORT_RANGE_MAX.saturating_sub(DEFAULT_NODE_COUNT as u16);
         let base_port = rng.gen_range(DEVNET_PORT_RANGE_MIN..max_base_port);
 
-        let suffix: u64 = rng.gen();
-        let data_dir = std::env::temp_dir().join(format!("saorsa_devnet_{suffix:x}"));
-
         Self {
             node_count: DEFAULT_NODE_COUNT,
             base_port,
             bootstrap_count: DEFAULT_BOOTSTRAP_COUNT,
-            data_dir,
+            data_dir: default_root_dir(),
             spawn_delay: Duration::from_millis(DEFAULT_SPAWN_DELAY_MS),
             stabilization_timeout: Duration::from_secs(DEFAULT_STABILIZATION_TIMEOUT_SECS),
             node_startup_timeout: Duration::from_secs(DEFAULT_NODE_STARTUP_TIMEOUT_SECS),
@@ -495,15 +492,16 @@ impl Devnet {
             .map_err(|_| DevnetError::Config(format!("Node index {index} exceeds u16::MAX")))?;
         let port = self.config.base_port + index_u16;
         let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-        let node_id = format!("devnet_node_{index}");
-        let data_dir = self.config.data_dir.join(&node_id);
 
-        tokio::fs::create_dir_all(&data_dir).await?;
-
-        // Generate and persist a stable identity for this devnet node
+        // Generate identity first so we can use peer_id as the directory name
         let identity = NodeIdentity::generate()
             .map_err(|e| DevnetError::Core(format!("Failed to generate node identity: {e}")))?;
         let peer_id = hex::encode(identity.node_id().0);
+        let node_id = format!("devnet_node_{index}");
+        let data_dir = self.config.data_dir.join(NODES_SUBDIR).join(&peer_id);
+
+        tokio::fs::create_dir_all(&data_dir).await?;
+
         identity
             .save_to_file(&data_dir.join(NODE_IDENTITY_FILENAME))
             .await

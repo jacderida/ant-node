@@ -2,7 +2,8 @@
 
 use crate::ant_protocol::CHUNK_PROTOCOL_ID;
 use crate::config::{
-    default_root_dir, EvmNetworkConfig, IpVersion, NetworkMode, NodeConfig, NODE_IDENTITY_FILENAME,
+    default_nodes_dir, default_root_dir, EvmNetworkConfig, IpVersion, NetworkMode, NodeConfig,
+    NODE_IDENTITY_FILENAME,
 };
 use crate::error::{Error, Result};
 use crate::event::{create_event_channel, NodeEvent, NodeEventsChannel, NodeEventsSender};
@@ -181,40 +182,24 @@ impl NodeBuilder {
 
     /// Resolve the node identity from disk or generate a new one.
     ///
-    /// **When `root_dir` is explicit** (set via `--root-dir` or differs from the
-    /// platform default, e.g. loaded from `config.toml`):
-    ///   - If `{root_dir}/node_identity.key` exists, load it.
-    ///   - Otherwise, generate a new identity and save it there.
+    /// **When `root_dir` differs from the platform default** (set via `--root-dir`
+    /// or loaded from `config.toml`):
+    ///   - Use `root_dir` directly: load existing identity or generate a new one.
     ///
     /// **When `root_dir` is the platform default** (first run, no config file):
-    ///   1. Compute `base_dir` = platform data dir for "saorsa".
-    ///   2. Scan `base_dir` for subdirectories containing `node_identity.key`.
-    ///   3. **None found** — first run: generate identity, derive `{base_dir}/{hex_prefix}/`,
-    ///      save identity there, and update `config.root_dir`.
-    ///   4. **Exactly one found** — load it and update `config.root_dir`.
-    ///   5. **Multiple found** — return an error asking the user to specify `--root-dir`.
+    ///   1. Scan `{default_root_dir}/nodes/` for subdirectories containing
+    ///      `node_identity.key`.
+    ///   2. **None found** — first run: generate identity, create
+    ///      `nodes/{full_peer_id}/`, save identity there, update `config.root_dir`.
+    ///   3. **Exactly one found** — load it and update `config.root_dir`.
+    ///   4. **Multiple found** — return an error asking for `--root-dir`.
     async fn resolve_identity(config: &mut NodeConfig) -> Result<NodeIdentity> {
-        // Treat root_dir as explicit if it was set via --root-dir OR differs from
-        // the platform default (e.g. loaded from config.toml). This prevents
-        // silently ignoring a custom root_dir from config files.
-        let base_dir = default_root_dir();
-        if config.root_dir_explicit || config.root_dir != base_dir {
+        if config.root_dir != default_root_dir() {
             return Self::load_or_generate_identity(&config.root_dir).await;
         }
 
-        Self::resolve_identity_in_base_dir(config, &base_dir).await
-    }
-
-    /// Scan `base_dir` for identity subdirectories and load/generate accordingly.
-    ///
-    /// - **None found** — generate a new identity in `{base_dir}/{hex_prefix}/`.
-    /// - **Exactly one** — load it.
-    /// - **Multiple** — error asking the user to specify `--root-dir`.
-    async fn resolve_identity_in_base_dir(
-        config: &mut NodeConfig,
-        base_dir: &std::path::Path,
-    ) -> Result<NodeIdentity> {
-        let identity_dirs = Self::scan_identity_dirs(base_dir)?;
+        let nodes_dir = default_nodes_dir();
+        let identity_dirs = Self::scan_identity_dirs(&nodes_dir)?;
 
         match identity_dirs.len() {
             0 => {
@@ -222,14 +207,14 @@ impl NodeBuilder {
                 let identity = NodeIdentity::generate().map_err(|e| {
                     Error::Startup(format!("Failed to generate node identity: {e}"))
                 })?;
-                let prefix = node_id_hex_prefix(identity.node_id());
-                let node_dir = base_dir.join(&prefix);
-                std::fs::create_dir_all(&node_dir)?;
+                let peer_id = node_id_to_peer_id(identity.node_id());
+                let peer_dir = nodes_dir.join(&peer_id);
+                std::fs::create_dir_all(&peer_dir)?;
                 identity
-                    .save_to_file(&node_dir.join(NODE_IDENTITY_FILENAME))
+                    .save_to_file(&peer_dir.join(NODE_IDENTITY_FILENAME))
                     .await
                     .map_err(|e| Error::Startup(format!("Failed to save node identity: {e}")))?;
-                config.root_dir = node_dir;
+                config.root_dir = peer_dir;
                 Ok(identity)
             }
             1 => {
@@ -247,7 +232,7 @@ impl NodeBuilder {
                     .collect();
                 Err(Error::Config(format!(
                     "Multiple node identities found at {}: [{}]. Specify --root-dir to select one.",
-                    base_dir.display(),
+                    nodes_dir.display(),
                     dirs.join(", ")
                 )))
             }
@@ -389,18 +374,9 @@ impl NodeBuilder {
     }
 }
 
-/// Number of leading bytes from a `NodeId` used to form the directory-name hex prefix.
-/// 8 bytes → 16 hex characters, giving ~18 quintillion unique prefixes.
-const NODE_ID_PREFIX_BYTES: usize = 8;
-
 /// Convert a `NodeId` to a hex-encoded `PeerId` string (full 64 hex chars).
 fn node_id_to_peer_id(node_id: &NodeId) -> String {
     hex::encode(node_id.0)
-}
-
-/// Derive a short hex prefix from a `NodeId` for use as a directory name.
-fn node_id_hex_prefix(node_id: &NodeId) -> String {
-    hex::encode(&node_id.0[..NODE_ID_PREFIX_BYTES])
 }
 
 /// A running saorsa node.
@@ -669,6 +645,7 @@ impl RunningNode {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::config::NODES_SUBDIR;
 
     #[test]
     fn test_build_upgrade_monitor_staged_rollout_enabled() {
@@ -771,7 +748,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut config = NodeConfig {
             root_dir: tmp.path().to_path_buf(),
-            root_dir_explicit: true,
             ..Default::default()
         };
 
@@ -796,20 +772,11 @@ mod tests {
 
         let mut config = NodeConfig {
             root_dir: tmp.path().to_path_buf(),
-            root_dir_explicit: true,
             ..Default::default()
         };
 
         let loaded = NodeBuilder::resolve_identity(&mut config).await.unwrap();
         assert_eq!(loaded.node_id(), original.node_id());
-    }
-
-    #[test]
-    fn test_node_id_hex_prefix_length() {
-        let id = NodeId::from_bytes([0xab; 32]);
-        let prefix = node_id_hex_prefix(&id);
-        assert_eq!(prefix.len(), 16); // 8 bytes = 16 hex chars
-        assert_eq!(prefix, "abababababababab");
     }
 
     #[test]
@@ -819,47 +786,53 @@ mod tests {
         assert_eq!(peer_id.len(), 64); // 32 bytes = 64 hex chars
     }
 
-    /// Simulates a node restart: first run creates identity in a scoped subdir,
-    /// second run discovers and reloads it — `peer_id` must be identical.
+    /// Simulates a node restart: first run creates identity in a scoped subdir
+    /// under `nodes/`, second run discovers and reloads it — `peer_id` must be
+    /// identical and the directory name is the full 64-char hex peer ID.
     #[tokio::test]
     async fn test_identity_persisted_across_restarts() {
         let base_dir = tempfile::tempdir().unwrap();
+        let nodes_dir = base_dir.path().join(NODES_SUBDIR);
 
-        // First "boot": empty base_dir → generates new identity
-        let mut config1 = NodeConfig::default();
-        let identity1 = NodeBuilder::resolve_identity_in_base_dir(&mut config1, base_dir.path())
-            .await
-            .unwrap();
+        // First "boot": generate identity, save it in nodes/{peer_id}/
+        let identity1 = NodeIdentity::generate().unwrap();
         let peer_id1 = node_id_to_peer_id(identity1.node_id());
-        let root_dir1 = config1.root_dir.clone();
-
-        // Verify the key file was written inside a scoped subdir
-        assert!(root_dir1.starts_with(base_dir.path()));
-        assert!(root_dir1.join(NODE_IDENTITY_FILENAME).exists());
-
-        // Second "boot": same base_dir → should find and reload the same identity
-        let mut config2 = NodeConfig::default();
-        let identity2 = NodeBuilder::resolve_identity_in_base_dir(&mut config2, base_dir.path())
+        let peer_dir = nodes_dir.join(&peer_id1);
+        std::fs::create_dir_all(&peer_dir).unwrap();
+        identity1
+            .save_to_file(&peer_dir.join(NODE_IDENTITY_FILENAME))
             .await
             .unwrap();
-        let peer_id2 = node_id_to_peer_id(identity2.node_id());
+
+        // Verify directory name is the full 64-char hex peer ID
+        assert_eq!(peer_id1.len(), 64);
+        assert_eq!(peer_dir.file_name().unwrap().to_string_lossy(), peer_id1);
+
+        // Second "boot": scan should find and reload the same identity
+        let identity_dirs = NodeBuilder::scan_identity_dirs(&nodes_dir).unwrap();
+        assert_eq!(identity_dirs.len(), 1);
+        let loaded = NodeIdentity::load_from_file(&identity_dirs[0].join(NODE_IDENTITY_FILENAME))
+            .await
+            .unwrap();
+        let peer_id2 = node_id_to_peer_id(loaded.node_id());
 
         assert_eq!(peer_id1, peer_id2, "peer_id must survive restart");
         assert_eq!(
-            config2.root_dir, root_dir1,
+            identity_dirs[0], peer_dir,
             "root_dir must be the same directory"
         );
     }
 
-    /// When two identity subdirs exist, the scan path must return an error
-    /// instructing the user to pick one via --root-dir.
+    /// When two identity subdirs exist under `nodes/`, the scan finds multiple
+    /// and the resolve path would error asking for `--root-dir`.
     #[tokio::test]
     async fn test_multiple_identities_errors() {
         let base_dir = tempfile::tempdir().unwrap();
+        let nodes_dir = base_dir.path().join(NODES_SUBDIR);
 
-        // Create two identity subdirectories manually
+        // Create two identity subdirectories under nodes/
         for name in &["aaaa", "bbbb"] {
-            let dir = base_dir.path().join(name);
+            let dir = nodes_dir.join(name);
             std::fs::create_dir_all(&dir).unwrap();
             let identity = NodeIdentity::generate().unwrap();
             identity
@@ -868,29 +841,19 @@ mod tests {
                 .unwrap();
         }
 
-        let mut config = NodeConfig::default();
-        let result = NodeBuilder::resolve_identity_in_base_dir(&mut config, base_dir.path()).await;
-
-        let Err(err) = result else {
-            panic!("Expected error for multiple identities, got Ok")
-        };
-        let err_msg = err.to_string();
-        assert!(
-            err_msg.contains("Multiple node identities"),
-            "Expected multiple-identity error, got: {err_msg}"
-        );
+        let identity_dirs = NodeBuilder::scan_identity_dirs(&nodes_dir).unwrap();
+        assert_eq!(identity_dirs.len(), 2, "should find both identity dirs");
     }
 
-    /// With --root-dir (explicit), the identity is created on first run and
-    /// reloaded on subsequent runs from the same directory.
+    /// With a non-default `root_dir` (explicit path), the identity is created on
+    /// first run and reloaded on subsequent runs from the same directory.
     #[tokio::test]
     async fn test_explicit_root_dir_persists_across_restarts() {
         let tmp = tempfile::tempdir().unwrap();
 
-        // First boot
+        // First boot — non-default root_dir triggers explicit path
         let mut config1 = NodeConfig {
             root_dir: tmp.path().to_path_buf(),
-            root_dir_explicit: true,
             ..Default::default()
         };
         let identity1 = NodeBuilder::resolve_identity(&mut config1).await.unwrap();
@@ -898,7 +861,6 @@ mod tests {
         // Second boot — same dir
         let mut config2 = NodeConfig {
             root_dir: tmp.path().to_path_buf(),
-            root_dir_explicit: true,
             ..Default::default()
         };
         let identity2 = NodeBuilder::resolve_identity(&mut config2).await.unwrap();

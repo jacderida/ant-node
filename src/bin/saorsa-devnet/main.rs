@@ -45,7 +45,7 @@ async fn main() -> color_eyre::Result<()> {
     if let Some(dir) = cli.data_dir {
         config.data_dir = dir;
     }
-    config.cleanup_data_dir = cli.cleanup;
+    config.cleanup_data_dir = !cli.no_cleanup;
     if let Some(delay_ms) = cli.spawn_delay_ms {
         config.spawn_delay = std::time::Duration::from_millis(delay_ms);
     }

@@ -7,6 +7,9 @@ use std::path::PathBuf;
 /// Filename for the persisted node identity keypair.
 pub const NODE_IDENTITY_FILENAME: &str = "node_identity.key";
 
+/// Subdirectory under the root dir that contains per-node data directories.
+pub const NODES_SUBDIR: &str = "nodes";
+
 /// IP version configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -95,11 +98,6 @@ pub struct NodeConfig {
     /// Root directory for node data.
     #[serde(default = "default_root_dir")]
     pub root_dir: PathBuf,
-
-    /// Whether `root_dir` was explicitly set (e.g. via `--root-dir`).
-    /// When false, the node builder scans the base directory for existing identities.
-    #[serde(skip)]
-    pub root_dir_explicit: bool,
 
     /// Listening port (0 for auto-select).
     #[serde(default)]
@@ -241,7 +239,6 @@ impl Default for NodeConfig {
     fn default() -> Self {
         Self {
             root_dir: default_root_dir(),
-            root_dir_explicit: false,
             port: 0,
             ip_version: IpVersion::default(),
             bootstrap: Vec::new(),
@@ -341,6 +338,15 @@ pub fn default_root_dir() -> PathBuf {
         || PathBuf::from(".saorsa"),
         |dirs| dirs.data_dir().to_path_buf(),
     )
+}
+
+/// Default directory containing per-node data subdirectories.
+///
+/// Each node gets `{default_root_dir}/nodes/{peer_id}/` where `peer_id` is the
+/// full 64-character hex-encoded node ID.
+#[must_use]
+pub fn default_nodes_dir() -> PathBuf {
+    default_root_dir().join(NODES_SUBDIR)
 }
 
 fn default_log_level() -> String {

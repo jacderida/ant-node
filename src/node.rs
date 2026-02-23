@@ -145,6 +145,9 @@ impl NodeBuilder {
         // Add bootstrap peers
         core_config.bootstrap_peers.clone_from(&config.bootstrap);
 
+        // Forward max_message_size to the transport layer.
+        core_config.max_message_size = Some(config.max_message_size);
+
         // Propagate network-mode tuning into saorsa-core where supported.
         match config.network_mode {
             NetworkMode::Production => {

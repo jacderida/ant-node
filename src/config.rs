@@ -136,6 +136,15 @@ pub struct NodeConfig {
     #[serde(default)]
     pub storage: StorageConfig,
 
+    /// Maximum application-layer message size in bytes.
+    ///
+    /// Tunes the QUIC stream receive window and per-stream read buffer.
+    /// Default: [`MAX_WIRE_MESSAGE_SIZE`](crate::ant_protocol::MAX_WIRE_MESSAGE_SIZE)
+    /// (5 MiB — sufficient for 4 MiB data chunks plus serialization
+    /// envelope overhead).
+    #[serde(default = "default_max_message_size")]
+    pub max_message_size: usize,
+
     /// Log level.
     #[serde(default = "default_log_level")]
     pub log_level: String,
@@ -248,6 +257,7 @@ impl Default for NodeConfig {
             payment: PaymentConfig::default(),
             bootstrap_cache: BootstrapCacheConfig::default(),
             storage: StorageConfig::default(),
+            max_message_size: default_max_message_size(),
             log_level: default_log_level(),
         }
     }
@@ -347,6 +357,10 @@ pub fn default_root_dir() -> PathBuf {
 #[must_use]
 pub fn default_nodes_dir() -> PathBuf {
     default_root_dir().join(NODES_SUBDIR)
+}
+
+fn default_max_message_size() -> usize {
+    crate::ant_protocol::MAX_WIRE_MESSAGE_SIZE
 }
 
 fn default_log_level() -> String {

@@ -1003,6 +1003,9 @@ impl TestNetwork {
         core_config
             .bootstrap_peers
             .clone_from(&node.bootstrap_addrs);
+        // Override the transport-layer message size to accommodate max-size
+        // chunks (4 MiB payload + serialization overhead = 5 MiB wire).
+        core_config.max_message_size = Some(saorsa_node::ant_protocol::MAX_WIRE_MESSAGE_SIZE);
 
         // Create and start the P2P node
         let p2p_node = P2PNode::new(core_config).await.map_err(|e| {

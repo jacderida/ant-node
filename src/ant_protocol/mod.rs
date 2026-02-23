@@ -52,5 +52,5 @@ pub mod chunk;
 pub use chunk::{
     ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkMessageBody, ChunkPutRequest,
     ChunkPutResponse, ChunkQuoteRequest, ChunkQuoteResponse, ProtocolError, XorName,
-    CHUNK_PROTOCOL_ID, DATA_TYPE_CHUNK, MAX_CHUNK_SIZE, PROTOCOL_VERSION,
+    CHUNK_PROTOCOL_ID, DATA_TYPE_CHUNK, MAX_CHUNK_SIZE, MAX_WIRE_MESSAGE_SIZE, PROTOCOL_VERSION,
 };

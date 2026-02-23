@@ -212,15 +212,16 @@ mod tests {
     // Cross-Node Tests (require P2P network)
     // =========================================================================
 
-    /// Test 8: One node asks another to store a chunk via P2P.
+    /// Test 8: One node asks another to store a max-size chunk (4 MiB) via P2P.
     ///
-    /// This test validates the full cross-node protocol flow:
+    /// This test validates the full cross-node protocol flow with the largest
+    /// allowed payload, exercising QUIC stream flow-control limits:
     /// 1. Spins up a minimal 5-node local testnet
     /// 2. A regular node (node 3) discovers connected peers
-    /// 3. Picks a random peer and sends a `ChunkPutRequest` to it
+    /// 3. Picks a random peer and sends a `ChunkPutRequest` with a 4 MiB chunk
     /// 4. The target node stores the chunk and responds with success
     /// 5. The regular node then sends a `ChunkGetRequest` to retrieve it
-    /// 6. Verifies the data round-trips correctly
+    /// 6. Verifies the 4 MiB data round-trips correctly
     #[tokio::test(flavor = "multi_thread")]
     async fn test_chunk_store_on_remote_node() {
         let harness = TestHarness::setup_minimal()
@@ -240,13 +241,14 @@ mod tests {
         let mut rng = rand::thread_rng();
         let target_peer_id = peers.choose(&mut rng).expect("peers is non-empty");
 
+        // Use the max-size (4 MiB) chunk to exercise QUIC stream limits
         let address = requester
-            .store_chunk_on_peer(target_peer_id, &fixture.small)
+            .store_chunk_on_peer(target_peer_id, &fixture.large)
             .await
-            .expect("Failed to store chunk on remote node");
+            .expect("Failed to store max-size chunk on remote node");
 
         // Verify the returned address matches the expected content hash
-        let expected_address = ChunkTestFixture::compute_address(&fixture.small);
+        let expected_address = ChunkTestFixture::compute_address(&fixture.large);
         assert_eq!(
             address, expected_address,
             "Returned address should match computed content address"
@@ -256,12 +258,17 @@ mod tests {
         let retrieved = requester
             .get_chunk_from_peer(target_peer_id, &address)
             .await
-            .expect("Failed to retrieve chunk from remote node");
+            .expect("Failed to retrieve max-size chunk from remote node");
 
-        let chunk = retrieved.expect("Chunk should exist on remote storage node");
+        let chunk = retrieved.expect("Max-size chunk should exist on remote storage node");
+        assert_eq!(
+            chunk.content.len(),
+            fixture.large.len(),
+            "Retrieved chunk size should match original (4 MiB)"
+        );
         assert_eq!(
             chunk.content.as_ref(),
-            fixture.small.as_slice(),
+            fixture.large.as_slice(),
             "Retrieved data should match original"
         );
         assert_eq!(

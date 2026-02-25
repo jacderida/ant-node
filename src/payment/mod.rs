@@ -34,11 +34,13 @@
 mod cache;
 pub mod metrics;
 pub mod quote;
+pub mod single_node;
 mod verifier;
 pub mod wallet;
 
 pub use cache::{CacheStats, VerifiedCache};
 pub use metrics::QuotingMetricsTracker;
 pub use quote::{verify_quote_content, QuoteGenerator, XorName};
+pub use single_node::SingleNodePayment;
 pub use verifier::{EvmVerifierConfig, PaymentStatus, PaymentVerifier, PaymentVerifierConfig};
 pub use wallet::{is_valid_address, parse_rewards_address, WalletConfig};

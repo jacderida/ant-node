@@ -155,18 +155,27 @@ impl SingleNodePayment {
         )?;
 
         // Collect transaction hashes for all quotes
-        let mut result_hashes = Vec::new();
-        for quote_info in &self.quotes {
-            let tx_hash = tx_hashes.get(&quote_info.quote_hash).ok_or_else(|| {
-                Error::Payment(format!(
-                    "Missing transaction hash for quote {}",
-                    quote_info.quote_hash
-                ))
-            })?;
-            result_hashes.push(*tx_hash);
-        }
+        // Note: wallet may not return tx_hash for zero-amount payments
+        let result_hashes: Vec<_> = self
+            .quotes
+            .iter()
+            .filter_map(|quote_info| {
+                if let Some(&tx_hash) = tx_hashes.get(&quote_info.quote_hash) {
+                    Some(Ok(tx_hash))
+                } else if quote_info.amount != Amount::ZERO {
+                    // Non-zero amount should have a transaction hash
+                    Some(Err(Error::Payment(format!(
+                        "Missing transaction hash for non-zero quote {} (amount: {})",
+                        quote_info.quote_hash, quote_info.amount
+                    ))))
+                } else {
+                    // Zero-amount payments may not get a transaction
+                    None
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
 
-        info!("Payment successful: {} transactions", result_hashes.len());
+        info!("Payment successful: {} transactions (expected 1-5)", result_hashes.len());
 
         Ok(result_hashes)
     }

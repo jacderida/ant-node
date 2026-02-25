@@ -267,7 +267,7 @@ mod tests {
     /// The default timeout is 10 seconds which can be insufficient in CI.
     /// This helper uses a 60-second timeout and random port assignment
     /// to handle slower CI environments and parallel test execution.
-    #[allow(clippy::expect_used)]
+    #[allow(clippy::expect_used, clippy::panic)]
     fn start_node_with_timeout() -> (AnvilInstance, Url) {
         const ANVIL_TIMEOUT_MS: u64 = 60_000; // 60 seconds for CI
 
@@ -278,9 +278,7 @@ mod tests {
         let anvil = Anvil::new()
             .timeout(ANVIL_TIMEOUT_MS)
             .try_spawn()
-            .expect(&format!(
-                "Could not spawn Anvil node after {ANVIL_TIMEOUT_MS}ms"
-            ));
+            .unwrap_or_else(|_| panic!("Could not spawn Anvil node after {ANVIL_TIMEOUT_MS}ms"));
 
         let url = Url::parse(&format!("http://{host}:{}", anvil.port()))
             .expect("Failed to parse Anvil URL");

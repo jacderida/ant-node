@@ -41,9 +41,7 @@ pub async fn send_and_await_chunk_response<T, E>(
     // Subscribe before sending so we don't miss the response
     let mut events = node.subscribe_events();
 
-    let target_peer_id = *target_peer;
-
-    node.send_message(&target_peer_id, CHUNK_PROTOCOL_ID, message_bytes)
+    node.send_message(target_peer, CHUNK_PROTOCOL_ID, message_bytes)
         .await
         .map_err(|e| send_error(e.to_string()))?;
 
@@ -56,7 +54,7 @@ pub async fn send_and_await_chunk_response<T, E>(
                 topic,
                 source: Some(source),
                 data,
-            })) if topic == CHUNK_PROTOCOL_ID && source == target_peer_id => {
+            })) if topic == CHUNK_PROTOCOL_ID && source == target_peer => {
                 let response = match ChunkMessage::decode(&data) {
                     Ok(r) => r,
                     Err(e) => {

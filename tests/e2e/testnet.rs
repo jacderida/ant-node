@@ -1285,6 +1285,14 @@ impl TestNetwork {
         // Override the transport-layer message size to accommodate max-size
         // chunks (4 MiB payload + serialization overhead = 5 MiB wire).
         core_config.max_message_size = Some(saorsa_node::ant_protocol::MAX_WIRE_MESSAGE_SIZE);
+        // Generate a node identity so auto identity announce works on connect.
+        let identity = NodeIdentity::generate().map_err(|e| {
+            TestnetError::Core(format!(
+                "Failed to generate identity for node {}: {e}",
+                node.index
+            ))
+        })?;
+        core_config.node_identity = Some(Arc::new(identity));
 
         // Allow localhost peers in DHT routing for test environments
         // This prevents diversity filters from excluding peers on 127.0.0.1

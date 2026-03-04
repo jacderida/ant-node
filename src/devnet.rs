@@ -531,7 +531,7 @@ impl Devnet {
         // Generate identity first so we can use peer_id as the directory name
         let identity = NodeIdentity::generate()
             .map_err(|e| DevnetError::Core(format!("Failed to generate node identity: {e}")))?;
-        let peer_id = identity.peer_id().clone();
+        let peer_id = *identity.peer_id();
         let label = format!("devnet_node_{index}");
         let data_dir = self
             .config

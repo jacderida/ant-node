@@ -13,7 +13,7 @@ WORKERS=(
 )
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BINARY_URL="https://github.com/dirvine/saorsa-node/releases/download/v0.2.0/saorsa-node-cli-linux-x64.tar.gz"
+BINARY_URL="https://github.com/saorsa-labs/saorsa-node/releases/download/v0.2.0/saorsa-node-cli-linux-x64.tar.gz"
 
 echo "=== Saorsa Testnet Deployment ==="
 echo "Deploying to ${#WORKERS[@]} droplets"

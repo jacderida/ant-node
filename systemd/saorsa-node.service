@@ -1,6 +1,6 @@
 [Unit]
 Description=Saorsa Node - Quantum-proof decentralized network node
-Documentation=https://github.com/dirvine/saorsa-node
+Documentation=https://github.com/saorsa-labs/saorsa-node
 After=network-online.target
 Wants=network-online.target
 

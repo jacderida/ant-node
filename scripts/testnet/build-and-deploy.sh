@@ -50,7 +50,7 @@ ssh -o StrictHostKeyChecking=no "root@${BUILD_HOST}" "
         git fetch origin
         git reset --hard origin/main
     else
-        git clone https://github.com/dirvine/saorsa-node.git /root/saorsa-node
+        git clone https://github.com/saorsa-labs/saorsa-node.git /root/saorsa-node
         cd /root/saorsa-node
     fi
 

@@ -726,7 +726,7 @@ saorsa-node --auto-upgrade --upgrade-channel beta
 enabled = true
 channel = "stable"
 check_interval_hours = 1
-github_repo = "dirvine/saorsa-node"
+github_repo = "saorsa-labs/saorsa-node"
 # max_random_delay_hours = 24  # For staged rollout
 ```
 
@@ -778,7 +778,7 @@ saorsa-node
 
 ```bash
 # Clone the repository
-git clone https://github.com/dirvine/saorsa-node
+git clone https://github.com/saorsa-labs/saorsa-node
 cd saorsa-node
 
 # Build release binary
@@ -913,7 +913,7 @@ bootstrap = [
 enabled = true
 channel = "stable"
 check_interval_hours = 1
-github_repo = "dirvine/saorsa-node"
+github_repo = "saorsa-labs/saorsa-node"
 
 [migration]
 auto_detect = true

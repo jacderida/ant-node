@@ -23,8 +23,8 @@
 
         <Icon Id="SaorsaIcon" SourceFile="wix\saorsa.ico"/>
         <Property Id="ARPPRODUCTICON" Value="SaorsaIcon"/>
-        <Property Id="ARPHELPLINK" Value="https://github.com/dirvine/saorsa-node"/>
-        <Property Id="ARPURLINFOABOUT" Value="https://github.com/dirvine/saorsa-node"/>
+        <Property Id="ARPHELPLINK" Value="https://github.com/saorsa-labs/saorsa-node"/>
+        <Property Id="ARPURLINFOABOUT" Value="https://github.com/saorsa-labs/saorsa-node"/>
 
         <Feature Id="MainFeature" Title="Saorsa Node" Level="1">
             <ComponentGroupRef Id="BinariesGroup"/>

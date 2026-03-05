@@ -153,10 +153,6 @@ pub struct NodeConfig {
 /// Auto-upgrade configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpgradeConfig {
-    /// Enable automatic upgrades.
-    #[serde(default)]
-    pub enabled: bool,
-
     /// Release channel.
     #[serde(default)]
     pub channel: UpgradeChannel,
@@ -320,7 +316,6 @@ impl NodeConfig {
 impl Default for UpgradeConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             channel: UpgradeChannel::default(),
             check_interval_hours: default_check_interval(),
             github_repo: default_github_repo(),

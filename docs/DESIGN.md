@@ -391,7 +391,7 @@ pub struct NodeLifecycle {
 - [ ] ML-DSA-65 signature verification for binaries
 - [ ] Process replacement with state preservation
 - [ ] Rollback functionality (backup current binary)
-- [ ] CLI flags: `--auto-upgrade`, `--upgrade-channel`
+- [ ] CLI flag: `--upgrade-channel`
 
 ### Phase 3: ant-node Data Migration
 

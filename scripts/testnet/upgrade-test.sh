@@ -28,19 +28,14 @@ get_all_versions() {
     echo ""
 }
 
-# Check if auto-upgrade is enabled
+# Check node count on each worker
 check_upgrade_config() {
-    echo "--- Checking Upgrade Configuration ---"
+    echo "--- Checking Node Configuration ---"
     for i in "${!WORKERS[@]}"; do
         IP="${WORKERS[$i]}"
         echo -n "Worker $((i+1)) ($IP): "
-        # Check if nodes have auto-upgrade enabled (look for --auto-upgrade in service files)
-        HAS_UPGRADE=$(ssh -o StrictHostKeyChecking=no root@$IP "grep -l 'auto-upgrade' /etc/systemd/system/saorsa-node-*.service 2>/dev/null | wc -l" || echo "0")
-        if [ "$HAS_UPGRADE" -gt "0" ]; then
-            echo "Auto-upgrade enabled ($HAS_UPGRADE services)"
-        else
-            echo "Auto-upgrade NOT enabled"
-        fi
+        RUNNING=$(ssh -o StrictHostKeyChecking=no root@$IP "pgrep -c saorsa-node 2>/dev/null" || echo "0")
+        echo "$RUNNING nodes running (auto-upgrade always enabled)"
     done
     echo ""
 }

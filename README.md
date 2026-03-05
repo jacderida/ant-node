@@ -713,10 +713,10 @@ This enables node operators to deploy and forget, knowing their nodes will stay 
 
 ```bash
 # Use stable channel (default)
-saorsa-node --auto-upgrade --upgrade-channel stable
+saorsa-node --upgrade-channel stable
 
 # Use beta channel for testing
-saorsa-node --auto-upgrade --upgrade-channel beta
+saorsa-node --upgrade-channel beta
 ```
 
 ### Configuration
@@ -820,7 +820,6 @@ cargo build --release
     --root-dir ~/.saorsa \
     --port 12000 \
     --ip-version dual \
-    --auto-upgrade \
     --upgrade-channel stable \
     --migrate-ant-data auto \
     --log-level info
@@ -853,9 +852,6 @@ Options:
     --migrate-ant-data <PATH>
         Path to ant-node data directory to migrate
         Use 'auto' for automatic detection
-
-    --auto-upgrade
-        Enable automatic upgrades from GitHub releases
 
     --upgrade-channel <CHANNEL>
         Release channel: stable, beta

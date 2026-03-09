@@ -14,7 +14,7 @@ use ant_evm::RewardsAddress;
 use evmlib::Network as EvmNetwork;
 use rand::Rng;
 use saorsa_core::identity::NodeIdentity;
-use saorsa_core::{NodeConfig as CoreNodeConfig, P2PEvent, P2PNode, PeerId};
+use saorsa_core::{IPDiversityConfig, NodeConfig as CoreNodeConfig, P2PEvent, P2PNode, PeerId};
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -639,6 +639,7 @@ impl Devnet {
             .bootstrap_peers
             .clone_from(&node.bootstrap_addrs);
         core_config.max_message_size = Some(crate::ant_protocol::MAX_WIRE_MESSAGE_SIZE);
+        core_config.diversity_config = Some(IPDiversityConfig::permissive());
 
         let index = node.index;
         let p2p_node = P2PNode::new(core_config)

@@ -639,6 +639,7 @@ impl Devnet {
             .bootstrap_peers
             .clone_from(&node.bootstrap_addrs);
         core_config.max_message_size = Some(crate::ant_protocol::MAX_WIRE_MESSAGE_SIZE);
+        core_config.diversity_config = Some(saorsa_core::security::IPDiversityConfig::permissive());
 
         let index = node.index;
         let p2p_node = P2PNode::new(core_config)

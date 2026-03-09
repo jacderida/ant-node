@@ -361,8 +361,30 @@ impl AutoApplyUpgrader {
         Ok(extracted_binary)
     }
 
-    /// Extract the saorsa-node binary from a tar.gz archive.
+    /// Extract the saorsa-node binary from an archive (tar.gz or zip).
+    ///
+    /// The archive format is detected by magic bytes:
+    /// - `1f 8b` → gzip (tar.gz)
+    /// - `50 4b` → zip
     fn extract_binary(archive_path: &Path, dest_dir: &Path) -> Result<PathBuf> {
+        let mut file = File::open(archive_path)?;
+        let mut magic = [0u8; 2];
+        file.read_exact(&mut magic)
+            .map_err(|e| Error::Upgrade(format!("Failed to read archive header: {e}")))?;
+        drop(file);
+
+        match magic {
+            [0x1f, 0x8b] => Self::extract_from_tar_gz(archive_path, dest_dir),
+            [0x50, 0x4b] => Self::extract_from_zip(archive_path, dest_dir),
+            _ => Err(Error::Upgrade(format!(
+                "Unknown archive format (magic bytes: {:02x} {:02x})",
+                magic[0], magic[1]
+            ))),
+        }
+    }
+
+    /// Extract the saorsa-node binary from a tar.gz archive.
+    fn extract_from_tar_gz(archive_path: &Path, dest_dir: &Path) -> Result<PathBuf> {
         let file = File::open(archive_path)?;
         let decoder = GzDecoder::new(file);
         let mut archive = Archive::new(decoder);
@@ -388,7 +410,7 @@ impl AutoApplyUpgrader {
             if let Some(name) = path.file_name() {
                 let name_str = name.to_string_lossy();
                 if name_str == "saorsa-node" || name_str == "saorsa-node.exe" {
-                    debug!("Found binary in archive: {}", path.display());
+                    debug!("Found binary in tar.gz archive: {}", path.display());
 
                     // Read and write the binary
                     let mut contents = Vec::new();
@@ -413,7 +435,61 @@ impl AutoApplyUpgrader {
         }
 
         Err(Error::Upgrade(
-            "saorsa-node binary not found in archive".to_string(),
+            "saorsa-node binary not found in tar.gz archive".to_string(),
+        ))
+    }
+
+    /// Extract the saorsa-node binary from a zip archive.
+    fn extract_from_zip(archive_path: &Path, dest_dir: &Path) -> Result<PathBuf> {
+        let file = File::open(archive_path)?;
+        let mut archive = zip::ZipArchive::new(file)
+            .map_err(|e| Error::Upgrade(format!("Failed to open zip archive: {e}")))?;
+
+        let binary_name = if cfg!(windows) {
+            "saorsa-node.exe"
+        } else {
+            "saorsa-node"
+        };
+        let extracted_binary = dest_dir.join(binary_name);
+
+        for i in 0..archive.len() {
+            let mut entry = archive
+                .by_index(i)
+                .map_err(|e| Error::Upgrade(format!("Failed to read zip entry: {e}")))?;
+
+            let path = match entry.enclosed_name() {
+                Some(p) => p.clone(),
+                None => continue,
+            };
+
+            if let Some(name) = path.file_name() {
+                let name_str = name.to_string_lossy();
+                if name_str == "saorsa-node" || name_str == "saorsa-node.exe" {
+                    debug!("Found binary in zip archive: {}", path.display());
+
+                    let mut contents = Vec::new();
+                    entry
+                        .read_to_end(&mut contents)
+                        .map_err(|e| Error::Upgrade(format!("Failed to read binary: {e}")))?;
+
+                    fs::write(&extracted_binary, &contents)?;
+
+                    // Make executable on Unix
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let mut perms = fs::metadata(&extracted_binary)?.permissions();
+                        perms.set_mode(0o755);
+                        fs::set_permissions(&extracted_binary, perms)?;
+                    }
+
+                    return Ok(extracted_binary);
+                }
+            }
+        }
+
+        Err(Error::Upgrade(
+            "saorsa-node binary not found in zip archive".to_string(),
         ))
     }
 
@@ -564,5 +640,157 @@ mod tests {
     fn test_default_impl() {
         let upgrader = AutoApplyUpgrader::default();
         assert!(!upgrader.current_version().to_string().is_empty());
+    }
+
+    /// Helper: create a tar.gz archive containing a fake binary.
+    fn create_tar_gz_archive(dir: &Path, binary_name: &str, content: &[u8]) -> PathBuf {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        let archive_path = dir.join("test.tar.gz");
+        let file = File::create(&archive_path).unwrap();
+        let encoder = GzEncoder::new(file, Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, binary_name, content)
+            .unwrap();
+        builder.finish().unwrap();
+
+        archive_path
+    }
+
+    /// Helper: create a zip archive containing a fake binary.
+    fn create_zip_archive(dir: &Path, binary_name: &str, content: &[u8]) -> PathBuf {
+        use std::io::Write;
+
+        let archive_path = dir.join("test.zip");
+        let file = File::create(&archive_path).unwrap();
+        let mut zip_writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip_writer.start_file(binary_name, options).unwrap();
+        zip_writer.write_all(content).unwrap();
+        zip_writer.finish().unwrap();
+
+        archive_path
+    }
+
+    #[test]
+    fn test_extract_binary_from_tar_gz() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = b"fake-binary-content";
+        let archive = create_tar_gz_archive(dir.path(), "saorsa-node", content);
+
+        let dest = tempfile::tempdir().unwrap();
+        let result = AutoApplyUpgrader::extract_binary(&archive, dest.path());
+        assert!(result.is_ok());
+
+        let extracted = result.unwrap();
+        assert!(extracted.exists());
+        assert_eq!(fs::read(&extracted).unwrap(), content);
+    }
+
+    #[test]
+    fn test_extract_binary_from_zip() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = b"fake-binary-content";
+        let archive = create_zip_archive(dir.path(), "saorsa-node", content);
+
+        let dest = tempfile::tempdir().unwrap();
+        let result = AutoApplyUpgrader::extract_binary(&archive, dest.path());
+        assert!(result.is_ok());
+
+        let extracted = result.unwrap();
+        assert!(extracted.exists());
+        assert_eq!(fs::read(&extracted).unwrap(), content);
+    }
+
+    #[test]
+    fn test_extract_binary_from_zip_with_exe() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = b"fake-windows-binary";
+        let archive = create_zip_archive(dir.path(), "saorsa-node.exe", content);
+
+        let dest = tempfile::tempdir().unwrap();
+        let result = AutoApplyUpgrader::extract_binary(&archive, dest.path());
+        assert!(result.is_ok());
+
+        let extracted = result.unwrap();
+        assert!(extracted.exists());
+        assert_eq!(fs::read(&extracted).unwrap(), content);
+    }
+
+    #[test]
+    fn test_extract_binary_from_tar_gz_nested_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = b"nested-binary";
+        let archive =
+            create_tar_gz_archive(dir.path(), "some/nested/path/saorsa-node", content);
+
+        let dest = tempfile::tempdir().unwrap();
+        let result = AutoApplyUpgrader::extract_binary(&archive, dest.path());
+        assert!(result.is_ok());
+
+        let extracted = result.unwrap();
+        assert!(extracted.exists());
+        assert_eq!(fs::read(&extracted).unwrap(), content);
+    }
+
+    #[test]
+    fn test_extract_binary_unknown_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("bad_archive");
+        fs::write(&archive_path, b"XX not a real archive").unwrap();
+
+        let dest = tempfile::tempdir().unwrap();
+        let result = AutoApplyUpgrader::extract_binary(&archive_path, dest.path());
+        assert!(result.is_err());
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Unknown archive format"));
+    }
+
+    #[test]
+    fn test_extract_binary_missing_binary_in_tar_gz() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = b"not-the-binary";
+        let archive = create_tar_gz_archive(dir.path(), "other-file", content);
+
+        let dest = tempfile::tempdir().unwrap();
+        let result = AutoApplyUpgrader::extract_binary(&archive, dest.path());
+        assert!(result.is_err());
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not found in tar.gz archive"));
+    }
+
+    #[test]
+    fn test_extract_binary_missing_binary_in_zip() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = b"not-the-binary";
+        let archive = create_zip_archive(dir.path(), "other-file", content);
+
+        let dest = tempfile::tempdir().unwrap();
+        let result = AutoApplyUpgrader::extract_binary(&archive, dest.path());
+        assert!(result.is_err());
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not found in zip archive"));
+    }
+
+    #[test]
+    fn test_extract_binary_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("empty");
+        fs::write(&archive_path, b"").unwrap();
+
+        let dest = tempfile::tempdir().unwrap();
+        let result = AutoApplyUpgrader::extract_binary(&archive_path, dest.path());
+        assert!(result.is_err());
     }
 }

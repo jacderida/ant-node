@@ -3,7 +3,7 @@
 use crate::ant_protocol::{CHUNK_PROTOCOL_ID, MAX_CHUNK_SIZE};
 use crate::config::{
     default_nodes_dir, default_root_dir, EvmNetworkConfig, IpVersion, NetworkMode, NodeConfig,
-    NODE_IDENTITY_FILENAME,
+    NODE_IDENTITY_FILENAME, TRANSPORT_ALLOW_LOOPBACK_ENV,
 };
 use crate::error::{Error, Result};
 use crate::event::{create_event_channel, NodeEvent, NodeEventsChannel, NodeEventsSender};
@@ -206,6 +206,9 @@ impl NodeBuilder {
                 core_config.diversity_config = Some(CoreDiversityConfig::default());
             }
             NetworkMode::Testnet => {
+                // Allow loopback connections for local testnet deployments.
+                std::env::set_var(TRANSPORT_ALLOW_LOOPBACK_ENV, "true");
+
                 core_config.production_config = Some(CoreProductionConfig::default());
                 let mut diversity = CoreDiversityConfig::testnet();
                 diversity.max_nodes_per_asn = config.testnet.max_nodes_per_asn;
@@ -226,6 +229,9 @@ impl NodeBuilder {
                 }
             }
             NetworkMode::Development => {
+                // Allow loopback connections for local development.
+                std::env::set_var(TRANSPORT_ALLOW_LOOPBACK_ENV, "true");
+
                 core_config.production_config = None;
                 core_config.diversity_config = Some(CoreDiversityConfig::permissive());
             }

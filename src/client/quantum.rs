@@ -291,17 +291,41 @@ impl QuantumClient {
             )));
         }
 
-        // Step 2: Split quotes into peer_quotes (for ProofOfPayment) and
-        // quotes_with_prices (for SingleNodePayment) in a single pass.
+        // Step 2: Fetch prices from the on-chain contract rather than using the
+        // locally-computed estimates. The contract's getQuote() is the authoritative
+        // price source — the verifyPayment() call recomputes prices from QuotingMetrics
+        // using the same formula, so we must use matching prices.
+        let metrics_batch: Vec<_> = quotes_with_peers
+            .iter()
+            .map(|(_, quote, _)| quote.quoting_metrics.clone())
+            .collect();
+
+        let contract_prices =
+            evmlib::contract::payment_vault::get_market_price(wallet.network(), metrics_batch)
+                .await
+                .map_err(|e| {
+                    Error::Payment(format!("Failed to get market prices from contract: {e}"))
+                })?;
+
+        if contract_prices.len() != quotes_with_peers.len() {
+            return Err(Error::Payment(format!(
+                "Contract returned {} prices for {} quotes",
+                contract_prices.len(),
+                quotes_with_peers.len()
+            )));
+        }
+
         let mut peer_quotes: Vec<(EncodedPeerId, PaymentQuote)> =
             Vec::with_capacity(quotes_with_peers.len());
         let mut quotes_with_prices: Vec<(PaymentQuote, Amount)> =
             Vec::with_capacity(quotes_with_peers.len());
 
-        for (peer_id, quote, price) in quotes_with_peers {
+        for ((peer_id, quote, _local_price), contract_price) in
+            quotes_with_peers.into_iter().zip(contract_prices)
+        {
             let encoded_peer_id = hex_node_id_to_encoded_peer_id(&peer_id.to_hex())?;
             peer_quotes.push((encoded_peer_id, quote.clone()));
-            quotes_with_prices.push((quote, price));
+            quotes_with_prices.push((quote, contract_price));
         }
 
         // Step 3: Create SingleNodePayment (sorts by price, selects median, pays 3x)

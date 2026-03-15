@@ -187,11 +187,7 @@ impl NodeBuilder {
             .map_err(|e| Error::Config(format!("Failed to create core config: {e}")))?;
 
         // Set listen address
-        core_config.listen_addr = listen_addr;
-        core_config.listen_addrs = vec![listen_addr];
-
-        // Enable IPv6 if configured
-        core_config.enable_ipv6 = matches!(config.ip_version, IpVersion::Ipv6 | IpVersion::Dual);
+        core_config.listen_addrs = vec![MultiAddr::quic(listen_addr)];
 
         // Add bootstrap peers.
         core_config.bootstrap_peers = config

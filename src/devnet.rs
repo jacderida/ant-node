@@ -634,9 +634,7 @@ impl Devnet {
         .map_err(|e| DevnetError::Core(format!("Failed to load node identity: {e}")))?;
 
         core_config.node_identity = Some(Arc::new(identity));
-        core_config.listen_addr = node.address;
-        core_config.listen_addrs = vec![node.address];
-        core_config.enable_ipv6 = false;
+        core_config.listen_addrs = vec![MultiAddr::quic(node.address)];
         core_config.bootstrap_peers = node.bootstrap_addrs.clone();
         core_config.max_message_size = Some(crate::ant_protocol::MAX_WIRE_MESSAGE_SIZE);
         core_config.diversity_config = Some(IPDiversityConfig::permissive());

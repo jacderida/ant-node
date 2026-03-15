@@ -48,8 +48,7 @@ async fn create_testnet_client() -> P2PNode {
         .collect();
 
     // Use a random port for the client
-    config.listen_addr = "127.0.0.1:0".parse().unwrap();
-    config.listen_addrs = vec![];
+    config.listen_addrs = vec![MultiAddr::quic("127.0.0.1:0".parse().unwrap())];
 
     let node = P2PNode::new(config)
         .await

@@ -16,6 +16,7 @@ use saorsa_node::client::{
 use saorsa_node::devnet::DevnetManifest;
 use saorsa_node::error::Error;
 use std::io::Read as _;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::info;
@@ -340,11 +341,10 @@ async fn create_client_node(
 ) -> Result<Arc<P2PNode>, Error> {
     let mut core_config = saorsa_core::NodeConfig::new()
         .map_err(|e| Error::Config(format!("Failed to create core config: {e}")))?;
-    core_config.listen_addr = "0.0.0.0:0"
+    let listen_addr: SocketAddr = "0.0.0.0:0"
         .parse()
         .map_err(|e| Error::Config(format!("Invalid listen addr: {e}")))?;
-    core_config.listen_addrs = vec![core_config.listen_addr];
-    core_config.enable_ipv6 = false;
+    core_config.listen_addrs = vec![saorsa_core::MultiAddr::quic(listen_addr)];
     core_config.bootstrap_peers = bootstrap;
     core_config.max_message_size = Some(MAX_WIRE_MESSAGE_SIZE);
     core_config.mode = saorsa_core::NodeMode::Client;

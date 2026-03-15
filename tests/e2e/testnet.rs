@@ -1273,9 +1273,7 @@ impl TestNetwork {
         let mut core_config = CoreNodeConfig::new()
             .map_err(|e| TestnetError::Core(format!("Failed to create core config: {e}")))?;
 
-        core_config.listen_addr = node.address;
-        core_config.listen_addrs = vec![node.address];
-        core_config.enable_ipv6 = false; // Disable IPv6 for local testing to avoid dual-stack binding issues
+        core_config.listen_addrs = vec![MultiAddr::quic(node.address)];
         core_config.connection_timeout = Duration::from_secs(TEST_CORE_CONNECTION_TIMEOUT_SECS);
         core_config.bootstrap_peers = node.bootstrap_addrs.clone();
         // Override the transport-layer message size to accommodate max-size

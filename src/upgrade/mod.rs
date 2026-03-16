@@ -8,12 +8,18 @@
 //! - Auto-apply: download, extract, verify, replace, restart
 
 mod apply;
+mod binary_cache;
+mod cache_dir;
 mod monitor;
+mod release_cache;
 mod rollout;
 mod signature;
 
-pub use apply::AutoApplyUpgrader;
+pub use apply::{AutoApplyUpgrader, RESTART_EXIT_CODE};
+pub use binary_cache::BinaryCache;
+pub use cache_dir::upgrade_cache_dir;
 pub use monitor::{find_platform_asset, version_from_tag, Asset, GitHubRelease, UpgradeMonitor};
+pub use release_cache::ReleaseCache;
 pub use rollout::StagedRollout;
 pub use signature::{
     verify_binary_signature, verify_binary_signature_with_key, verify_from_file,
@@ -48,10 +54,13 @@ pub struct UpgradeInfo {
 /// Result of an upgrade operation.
 #[derive(Debug)]
 pub enum UpgradeResult {
-    /// Upgrade was successful.
+    /// Upgrade was successful and the process should exit to complete the restart.
     Success {
         /// The new version.
         version: Version,
+        /// Exit code to use when terminating the process.
+        /// The caller should trigger graceful shutdown, then exit with this code.
+        exit_code: i32,
     },
     /// Upgrade failed, rolled back.
     RolledBack {
@@ -342,14 +351,15 @@ impl Upgrader {
         info!("Successfully upgraded to version {}", info.version);
         Ok(UpgradeResult::Success {
             version: info.version.clone(),
+            exit_code: 0,
         })
     }
 
     /// Whether the current platform supports in-place auto-upgrade.
     ///
-    /// On Windows, replacing a running executable is typically blocked by file locks.
+    /// Supported on Unix (via `exec()`) and Windows (via `self-replace` crate).
     const fn auto_upgrade_supported() -> bool {
-        !cfg!(windows)
+        true
     }
 }
 
@@ -609,6 +619,7 @@ mod tests {
     fn test_upgrade_result_variants() {
         let success = UpgradeResult::Success {
             version: Version::new(1, 0, 0),
+            exit_code: 0,
         };
         assert!(matches!(success, UpgradeResult::Success { .. }));
 
@@ -687,11 +698,7 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_upgrade_supported_flag_matches_platform() {
-        if cfg!(windows) {
-            assert!(!Upgrader::auto_upgrade_supported());
-        } else {
-            assert!(Upgrader::auto_upgrade_supported());
-        }
+    fn test_auto_upgrade_supported_on_all_platforms() {
+        assert!(Upgrader::auto_upgrade_supported());
     }
 }

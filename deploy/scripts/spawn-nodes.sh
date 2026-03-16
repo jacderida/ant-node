@@ -32,7 +32,7 @@ download_binary() {
         *) echo "Unsupported architecture: $arch"; exit 1 ;;
     esac
 
-    local url="https://github.com/dirvine/saorsa-node/releases/download/v${version}/saorsa-node-cli-${PLATFORM}.tar.gz"
+    local url="https://github.com/saorsa-labs/saorsa-node/releases/download/v${version}/saorsa-node-cli-${PLATFORM}.tar.gz"
 
     echo "Downloading saorsa-node v${version} for ${PLATFORM}..."
     curl -L -o /tmp/saorsa-node.tar.gz "$url"

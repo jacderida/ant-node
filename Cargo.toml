@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["David Irvine <david.irvine@maidsafe.net>"]
 description = "Pure quantum-proof network node for the Saorsa decentralized network"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/dirvine/saorsa-node"
+repository = "https://github.com/saorsa-labs/saorsa-node"
 keywords = ["p2p", "decentralized", "quantum-safe", "post-quantum", "dht"]
 categories = ["network-programming", "cryptography"]
 rust-version = "1.75"
@@ -103,9 +103,19 @@ serde_json = "1"
 # Archive extraction for auto-upgrade
 flate2 = "1"
 tar = "0.4"
+zip = "2"
+
+# SHA-256 hashing for binary cache integrity
+sha2 = "0.10"
+
+# Cross-platform file locking for upgrade caches
+fs2 = "0.4"
 
 # Protocol serialization
 postcard = { version = "1.1.3", features = ["use-std"] }
+
+[target.'cfg(windows)'.dependencies]
+self-replace = "1"
 
 [dev-dependencies]
 tokio-test = "0.4"
@@ -182,6 +192,7 @@ assets = [
     { source = "target/release/saorsa-node", dest = "/usr/bin/saorsa-node", mode = "755" },
     { source = "target/release/saorsa-keygen", dest = "/usr/bin/saorsa-keygen", mode = "755" },
     { source = "README.md", dest = "/usr/share/doc/saorsa-node/README.md", mode = "644" },
+    { source = "systemd/saorsa-node.service", dest = "/usr/lib/systemd/system/saorsa-node.service", mode = "644" },
 ]
 
 [package.metadata.generate-rpm.requires]

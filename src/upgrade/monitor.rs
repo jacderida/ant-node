@@ -9,6 +9,7 @@
 
 use crate::config::UpgradeChannel;
 use crate::error::{Error, Result};
+use crate::upgrade::release_cache::ReleaseCache;
 use crate::upgrade::rollout::StagedRollout;
 use crate::upgrade::UpgradeInfo;
 use semver::Version;
@@ -54,6 +55,8 @@ pub struct UpgradeMonitor {
     client: reqwest::Client,
     /// Staged rollout calculator (optional).
     staged_rollout: Option<StagedRollout>,
+    /// Disk cache for GitHub release metadata (shared across instances).
+    release_cache: Option<ReleaseCache>,
     /// When the current pending upgrade was first detected.
     pending_upgrade_detected: Option<Instant>,
     /// The version of the pending upgrade (for tracking rollout state).
@@ -89,9 +92,21 @@ impl UpgradeMonitor {
             current_version,
             client,
             staged_rollout: None,
+            release_cache: None,
             pending_upgrade_detected: None,
             pending_upgrade_version: None,
         }
+    }
+
+    /// Configure a shared disk cache for release metadata.
+    ///
+    /// When set, `check_for_updates` will consult the cache before hitting
+    /// the GitHub API.  Fresh results are written back so that other nodes
+    /// on the same machine can reuse them.
+    #[must_use]
+    pub fn with_release_cache(mut self, cache: ReleaseCache) -> Self {
+        self.release_cache = Some(cache);
+        self
     }
 
     /// Configure staged rollout for this monitor.
@@ -134,6 +149,7 @@ impl UpgradeMonitor {
             current_version,
             client,
             staged_rollout: None,
+            release_cache: None,
             pending_upgrade_detected: None,
             pending_upgrade_version: None,
         }
@@ -179,30 +195,60 @@ impl UpgradeMonitor {
     ///
     /// Returns an error if the GitHub API request fails.
     pub async fn check_for_updates(&self) -> Result<Option<UpgradeInfo>> {
-        let api_url = format!("https://api.github.com/repos/{}/releases", self.repo);
+        // Try the shared disk cache first (lock-free fast path)
+        if let Some(ref cache) = self.release_cache {
+            if let Some(cached_releases) = cache.read_if_valid(&self.repo) {
+                info!(
+                    "Using cached release info ({} releases)",
+                    cached_releases.len()
+                );
+                return Ok(select_upgrade_from_releases(
+                    &cached_releases,
+                    &self.current_version,
+                    self.channel,
+                ));
+            }
 
-        debug!("Checking for updates from: {}", api_url);
+            // Cache stale/missing — acquire lock and re-check so only one
+            // node actually hits the GitHub API while the rest wait.
+            let cache_clone = cache.clone();
+            let repo_clone = self.repo.clone();
+            let (lock_guard, rechecked) =
+                tokio::task::spawn_blocking(move || cache_clone.lock_and_recheck(&repo_clone))
+                    .await
+                    .map_err(|e| Error::Upgrade(format!("Cache lock task failed: {e}")))??;
 
-        let response = self
-            .client
-            .get(&api_url)
-            .header("Accept", "application/vnd.github+json")
-            .send()
-            .await
-            .map_err(|e| Error::Network(format!("GitHub API request failed: {e}")))?;
+            if let Some(cached_releases) = rechecked {
+                info!(
+                    "Using cached release info after lock ({} releases)",
+                    cached_releases.len()
+                );
+                return Ok(select_upgrade_from_releases(
+                    &cached_releases,
+                    &self.current_version,
+                    self.channel,
+                ));
+            }
 
-        if !response.status().is_success() {
-            return Err(Error::Network(format!(
-                "GitHub API returned status: {}",
-                response.status()
-            )));
+            info!("No valid cache under lock, fetching from API");
+
+            // Fetch from API while holding the lock
+            let releases = self.fetch_releases_from_api().await?;
+
+            // Write fresh results under the lock for other nodes
+            if let Err(e) = cache.write_under_lock(lock_guard, &self.repo, &releases) {
+                warn!("Failed to write release cache: {e}");
+            }
+
+            return Ok(select_upgrade_from_releases(
+                &releases,
+                &self.current_version,
+                self.channel,
+            ));
         }
 
-        let releases: Vec<GitHubRelease> = response
-            .json()
-            .await
-            .map_err(|e| Error::Network(format!("Failed to parse releases: {e}")))?;
-
+        // No cache configured — fetch directly
+        let releases = self.fetch_releases_from_api().await?;
         Ok(select_upgrade_from_releases(
             &releases,
             &self.current_version,
@@ -234,6 +280,11 @@ impl UpgradeMonitor {
 
         // If staged rollout is not enabled, return immediately
         let Some(ref rollout) = self.staged_rollout else {
+            let restart_time = chrono::Utc::now();
+            info!(
+                "Node will stop/restart for upgrade at {}",
+                restart_time.to_rfc3339()
+            );
             return Ok(Some(info));
         };
 
@@ -249,11 +300,17 @@ impl UpgradeMonitor {
             self.pending_upgrade_version = Some(info.version.clone());
 
             let delay = rollout.calculate_delay_for_version(&info.version);
+            let restart_time = chrono::Utc::now()
+                + chrono::Duration::from_std(delay).unwrap_or_else(|_| chrono::Duration::hours(1));
             info!(
                 new_version = %info.version,
                 delay_hours = delay.as_secs() / 3600,
                 delay_minutes = (delay.as_secs() % 3600) / 60,
                 "New version detected, staged rollout delay calculated"
+            );
+            info!(
+                "Node will stop/restart for upgrade at {}",
+                restart_time.to_rfc3339()
             );
         }
 
@@ -283,6 +340,32 @@ impl UpgradeMonitor {
             );
             Ok(None)
         }
+    }
+
+    /// Fetch releases from the GitHub API.
+    async fn fetch_releases_from_api(&self) -> Result<Vec<GitHubRelease>> {
+        let api_url = format!("https://api.github.com/repos/{}/releases", self.repo);
+        debug!("Checking for updates from: {}", api_url);
+
+        let response = self
+            .client
+            .get(&api_url)
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await
+            .map_err(|e| Error::Network(format!("GitHub API request failed: {e}")))?;
+
+        if !response.status().is_success() {
+            return Err(Error::Network(format!(
+                "GitHub API returned status: {}",
+                response.status()
+            )));
+        }
+
+        response
+            .json()
+            .await
+            .map_err(|e| Error::Network(format!("Failed to parse releases: {e}")))
     }
 
     /// Get the remaining time until this node should upgrade.
@@ -562,7 +645,7 @@ mod tests {
     #[test]
     fn test_stable_channel_filters_beta() {
         let monitor = UpgradeMonitor::new(
-            "dirvine/saorsa-node".to_string(),
+            "saorsa-labs/saorsa-node".to_string(),
             UpgradeChannel::Stable,
             24,
         );
@@ -577,8 +660,11 @@ mod tests {
     /// Test 6: Channel filtering - beta includes beta
     #[test]
     fn test_beta_channel_accepts_beta() {
-        let monitor =
-            UpgradeMonitor::new("dirvine/saorsa-node".to_string(), UpgradeChannel::Beta, 24);
+        let monitor = UpgradeMonitor::new(
+            "saorsa-labs/saorsa-node".to_string(),
+            UpgradeChannel::Beta,
+            24,
+        );
 
         let beta_version = Version::parse("1.0.0-beta.1").unwrap();
         assert!(monitor.version_matches_channel(&beta_version));
@@ -824,11 +910,11 @@ mod tests {
     #[test]
     fn test_monitor_repo() {
         let monitor = UpgradeMonitor::new(
-            "dirvine/saorsa-node".to_string(),
+            "saorsa-labs/saorsa-node".to_string(),
             UpgradeChannel::Stable,
             24,
         );
-        assert_eq!(monitor.repo(), "dirvine/saorsa-node");
+        assert_eq!(monitor.repo(), "saorsa-labs/saorsa-node");
     }
 
     /// Test 16: Current version getter

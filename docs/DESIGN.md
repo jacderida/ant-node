@@ -353,7 +353,7 @@ pub struct NetworkCoordinator {
 ```rust
 /// Auto-upgrade system (not in saorsa-core)
 pub struct UpgradeMonitor {
-    github_repo: String,                      // "dirvine/saorsa-node"
+    github_repo: String,                      // "saorsa-labs/saorsa-node"
     release_signing_key: MlDsaPublicKey,      // Embedded in binary
     check_interval: Duration,                 // Default: 1 hour
     rollback_dir: PathBuf,                    // For failed upgrades
@@ -395,7 +395,7 @@ pub struct NodeLifecycle {
 
 ### Phase 1: Repository Setup & Core Structure
 
-- [ ] Initialize git repo, push to `dirvine/saorsa-node` on GitHub
+- [ ] Initialize git repo, push to `saorsa-labs/saorsa-node` on GitHub
 - [ ] Create Cargo.toml with saorsa-core, saorsa-pqc dependencies
 - [ ] Create project structure
 - [ ] Implement NodeBuilder that configures and creates NetworkCoordinator
@@ -410,7 +410,7 @@ pub struct NodeLifecycle {
 - [ ] ML-DSA-65 signature verification for binaries
 - [ ] Process replacement with state preservation
 - [ ] Rollback functionality (backup current binary)
-- [ ] CLI flags: `--auto-upgrade`, `--upgrade-channel`
+- [ ] CLI flag: `--upgrade-channel`
 
 ### Phase 3: ant-node Data Migration
 

@@ -1286,7 +1286,7 @@ impl PrometheusFormatter {
             writeln!(
                 out,
                 "p2p_strategy_selections_total{{strategy=\"{}\"}} {}",
-                s.name, s.selections
+                format!("{:?}", s.strategy), s.selections
             )?;
         }
 
@@ -1299,7 +1299,7 @@ impl PrometheusFormatter {
             writeln!(
                 out,
                 "p2p_strategy_successes_total{{strategy=\"{}\"}} {}",
-                s.name, s.successes
+                format!("{:?}", s.strategy), s.successes
             )?;
         }
 
@@ -1312,7 +1312,7 @@ impl PrometheusFormatter {
             writeln!(
                 out,
                 "p2p_strategy_estimated_success_rate{{strategy=\"{}\"}} {:.6}",
-                s.name, s.estimated_success_rate
+                format!("{:?}", s.strategy), s.estimated_success_rate
             )?;
         }
 
@@ -1325,7 +1325,7 @@ impl PrometheusFormatter {
             writeln!(
                 out,
                 "p2p_strategy_alpha{{strategy=\"{}\"}} {:.6}",
-                s.name, s.alpha
+                format!("{:?}", s.strategy), s.alpha
             )?;
         }
 
@@ -1338,7 +1338,7 @@ impl PrometheusFormatter {
             writeln!(
                 out,
                 "p2p_strategy_beta{{strategy=\"{}\"}} {:.6}",
-                s.name, s.beta
+                format!("{:?}", s.strategy), s.beta
             )?;
         }
 
@@ -1430,7 +1430,7 @@ mod tests {
         let mut snapshot = default_snapshot();
         snapshot.strategy_stats = vec![
             StrategyStats {
-                name: "kademlia".to_string(),
+                strategy: saorsa_core::adaptive::StrategyChoice::Kademlia,
                 selections: 100,
                 successes: 90,
                 alpha: 91.0,
@@ -1438,7 +1438,7 @@ mod tests {
                 estimated_success_rate: 0.9,
             },
             StrategyStats {
-                name: "hyperbolic".to_string(),
+                strategy: saorsa_core::adaptive::StrategyChoice::Hyperbolic,
                 selections: 50,
                 successes: 45,
                 alpha: 46.0,
@@ -1450,8 +1450,8 @@ mod tests {
         let output = PrometheusFormatter::format(&agg, &snapshot).await.unwrap();
 
         // Verify contiguous grouping: all selections_total lines together
-        assert!(output.contains("p2p_strategy_selections_total{strategy=\"kademlia\"} 100"));
-        assert!(output.contains("p2p_strategy_selections_total{strategy=\"hyperbolic\"} 50"));
+        assert!(output.contains("p2p_strategy_selections_total{strategy=\"Kademlia\"} 100"));
+        assert!(output.contains("p2p_strategy_selections_total{strategy=\"Hyperbolic\"} 50"));
     }
 
     #[tokio::test]
@@ -1482,7 +1482,7 @@ mod tests {
     async fn phase2_handshake_metrics() {
         let agg = MetricsAggregator::new();
         agg.handle_metric_event(MetricEvent::HandshakeCompleted {
-            duration: Duration::from_millis(100),
+            duration: Some(Duration::from_millis(100)),
         })
         .await;
 
@@ -1604,7 +1604,7 @@ mod tests {
         let agg = MetricsAggregator::new();
         // Generate some phase 2 events to populate all paths
         agg.handle_metric_event(MetricEvent::HandshakeCompleted {
-            duration: Duration::from_millis(50),
+            duration: Some(Duration::from_millis(50)),
         })
         .await;
         agg.handle_metric_event(MetricEvent::ConnectionFailed {

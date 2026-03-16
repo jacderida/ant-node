@@ -226,8 +226,14 @@ impl MetricsAggregator {
                 *map.entry(key).or_insert(0) += 1;
             }
             MetricEvent::HandshakeCompleted { duration } => {
-                let micros = duration.as_micros().min(u128::from(u64::MAX)) as u64;
-                push_window(&self.handshake_latencies, micros).await;
+                if let Some(d) = duration {
+                    let micros = d.as_micros().min(u128::from(u64::MAX)) as u64;
+                    push_window(&self.handshake_latencies, micros).await;
+                }
+            }
+            MetricEvent::ConnectionLost { .. } => {
+                // Connection loss is tracked via P2PEvent::PeerDisconnected (pull-based).
+                // No additional event-driven aggregation needed here.
             }
             // --- Phase 2: Replication ---
             MetricEvent::ReplicationStarted { .. } => {
@@ -542,7 +548,7 @@ mod tests {
     async fn handshake_latency() {
         let agg = MetricsAggregator::new();
         agg.handle_metric_event(MetricEvent::HandshakeCompleted {
-            duration: Duration::from_millis(120),
+            duration: Some(Duration::from_millis(120)),
         })
         .await;
 
@@ -612,7 +618,7 @@ mod tests {
     async fn connection_established_no_panic() {
         let agg = MetricsAggregator::new();
         agg.handle_metric_event(MetricEvent::ConnectionEstablished {
-            duration: Duration::from_millis(50),
+            duration: Some(Duration::from_millis(50)),
             nat_type: ConnectionNatType::Direct,
         })
         .await;

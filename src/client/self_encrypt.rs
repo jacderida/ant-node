@@ -13,15 +13,17 @@
 //!   uploaded. Only the holder of the `DataMap` can access the file.
 
 use crate::client::data_types::XorName as ChunkAddress;
-use crate::client::quantum::QuantumClient;
+use crate::client::quantum::{PaidChunk, PreparedChunk, QuantumClient};
 use crate::error::{Error, Result};
 use bytes::Bytes;
 use futures::stream::{FuturesUnordered, StreamExt};
 use self_encryption::DataMap;
 use std::collections::HashMap;
+use std::future::Future;
 use std::hash::BuildHasher;
 use std::io::{BufReader, Read, Write};
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Handle;
 use tracing::{info, warn};
@@ -29,6 +31,13 @@ use xor_name::XorName;
 
 /// Size of the read buffer used when streaming file data into the encryptor.
 const READ_BUFFER_SIZE: usize = 64 * 1024;
+
+/// Maximum chunks per payment wave.
+///
+/// Balances EVM gas efficiency (more chunks per tx = fewer on-chain transactions)
+/// against pipeline responsiveness (smaller waves = earlier store overlap).
+/// evmlib supports up to 256 non-zero payments per transaction.
+const PAYMENT_WAVE_SIZE: usize = 64;
 
 /// Shared error capture used by `open_encrypt_stream`.
 type ReadErrorCapture = Arc<Mutex<Option<std::io::Error>>>;
@@ -125,25 +134,32 @@ fn write_stream_to_file(
 }
 
 /// Encrypt a file using streaming self-encryption and upload chunks with
-/// batched EVM payment.
+/// pipelined, wave-based EVM payment.
 ///
-/// The upload proceeds in three phases:
-/// 1. **Encrypt** — stream chunks from the file.
-/// 2. **Quote** — concurrently request storage quotes from DHT peers for
-///    every chunk.
-/// 3. **Pay + Store** — pay for *all* chunks in a single EVM transaction,
-///    then concurrently store them with the resulting proofs.
+/// The upload proceeds as follows:
+/// 1. **Stream** encrypted chunks lazily from the file — at most one wave
+///    of chunks lives in memory at a time.
+/// 2. **Wave loop** — for each wave of [`PAYMENT_WAVE_SIZE`] chunks:
+///    - **Quote** the wave concurrently, while draining completed stores
+///      from the previous wave via `select!`.
+///    - **Pay** the wave in a single EVM transaction.
+///    - **Launch stores** for the wave (non-blocking, added to the shared
+///      store pool).
+/// 3. **Drain** — await any remaining in-flight stores.
+/// 4. **`DataMap`** — extract the `DataMap` after the encryption stream is
+///    exhausted.
 ///
-/// This eliminates nonce collisions that occur when each chunk submits its
-/// own EVM transaction concurrently, and reduces on-chain transactions to
-/// one regardless of chunk count.
+/// This gives us batched payments (no nonce collisions, fewer on-chain txs),
+/// pipelining (stores from wave N overlap with quotes for wave N+1), and
+/// bounded memory (only one wave of chunks buffered at a time).
 ///
 /// Returns the `DataMap` after all chunks are uploaded, plus the list of
 /// transaction hash strings from payment.
 ///
 /// # Errors
 ///
-/// Returns an error if encryption fails, or any chunk upload fails.
+/// Returns an error if encryption, quoting, payment, or storage fails.
+#[allow(clippy::too_many_lines)]
 pub async fn encrypt_and_upload_file(
     file_path: &Path,
     client: &QuantumClient,
@@ -158,55 +174,123 @@ pub async fn encrypt_and_upload_file(
         file_path.display()
     );
 
-    // Phase 1: Encrypt — collect all chunks and their expected hashes.
     let (mut stream, read_error) = open_encrypt_stream(file_path, file_size)?;
+    let mut all_tx_hashes: Vec<String> = Vec::new();
+    let mut chunk_count: usize = 0;
 
-    let mut chunk_data: Vec<(xor_name::XorName, Bytes)> = Vec::new();
-    for chunk_result in stream.chunks() {
-        let (hash, content) =
-            chunk_result.map_err(|e| Error::Crypto(format!("Self-encryption failed: {e}")))?;
-        chunk_data.push((hash, content));
+    // Shared pool of in-flight store operations across all waves.
+    let mut store_futs: FuturesUnordered<
+        Pin<Box<dyn Future<Output = Result<ChunkAddress>> + Send + '_>>,
+    > = FuturesUnordered::new();
+
+    // Stream chunks lazily in waves — only one wave of content in memory at a time.
+    // The block scope ensures `chunks_iter` (which borrows `stream` mutably)
+    // is dropped before we call `stream.into_datamap()`.
+    {
+        let mut chunks_iter = stream.chunks();
+        let mut wave_idx: usize = 0;
+
+        loop {
+            // Pull the next wave of chunks from the encryption stream.
+            let mut wave: Vec<Bytes> = Vec::with_capacity(PAYMENT_WAVE_SIZE);
+            for chunk_result in chunks_iter.by_ref() {
+                let (_hash, content) = chunk_result
+                    .map_err(|e| Error::Crypto(format!("Self-encryption failed: {e}")))?;
+                wave.push(content);
+                if wave.len() >= PAYMENT_WAVE_SIZE {
+                    break;
+                }
+            }
+
+            if wave.is_empty() {
+                break;
+            }
+
+            let wave_size = wave.len();
+            chunk_count += wave_size;
+            info!(
+                "Wave {wave_idx}: quoting {wave_size} chunks ({} stores in flight)",
+                store_futs.len()
+            );
+
+            // Quote this wave concurrently, draining completed stores in parallel.
+            let prepared = quote_wave_pipelined(&wave, client, &mut store_futs).await?;
+
+            // Pay for this wave (single EVM transaction).
+            let paid = client.batch_pay(prepared).await?;
+
+            // Launch stores for this wave — content moves into the futures,
+            // freeing the wave buffer for the next iteration.
+            for paid_chunk in paid {
+                all_tx_hashes.extend(paid_chunk.tx_hashes.iter().map(|tx| format!("{tx:?}")));
+                store_futs.push(Box::pin(store_paid_chunk(client, paid_chunk)));
+            }
+
+            wave_idx += 1;
+        }
     }
+
+    // Drain remaining stores.
+    while let Some(result) = store_futs.next().await {
+        result?;
+    }
+
     check_read_error(&read_error)?;
 
     let data_map = stream
         .into_datamap()
         .ok_or_else(|| Error::Crypto("DataMap not available after encryption".into()))?;
 
-    let chunk_count = chunk_data.len();
-
-    // Phase 2: Quote — concurrently prepare payment info for all chunks.
-    let prepared_chunks = {
-        let mut quote_futures = FuturesUnordered::new();
-
-        for (idx, (_hash, content)) in chunk_data.into_iter().enumerate() {
-            let fut = async move {
-                let prepared = client.prepare_chunk_payment(content).await;
-                (idx, prepared)
-            };
-            quote_futures.push(fut);
-        }
-
-        // Collect results, then sort by original index to preserve order.
-        let mut indexed_results: Vec<(usize, _)> = Vec::with_capacity(chunk_count);
-        while let Some((idx, result)) = quote_futures.next().await {
-            indexed_results.push((idx, result?));
-        }
-        indexed_results.sort_by_key(|(idx, _)| *idx);
-        indexed_results.into_iter().map(|(_, prep)| prep).collect()
-    };
-
-    // Phase 3: Pay + Store — single EVM transaction, then concurrent stores.
-    let results = client.batch_pay_and_store(prepared_chunks).await?;
-
-    let all_tx_hashes: Vec<String> = results
-        .iter()
-        .flat_map(|(_, tx_hashes)| tx_hashes.iter())
-        .map(|tx| format!("{tx:?}"))
-        .collect();
-
     info!("All {chunk_count} encrypted chunks uploaded");
     Ok((data_map, all_tx_hashes))
+}
+
+/// Store a single paid chunk on the network.
+async fn store_paid_chunk(client: &QuantumClient, paid: PaidChunk) -> Result<ChunkAddress> {
+    client
+        .put_chunk_with_proof(paid.content, paid.proof_bytes)
+        .await
+}
+
+/// Quote a wave of chunks while draining completed stores from prior waves.
+///
+/// Uses `select!` to multiplex between collecting quotes for the current wave
+/// and acknowledging completed stores, so stores from the previous wave make
+/// progress concurrently with the current wave's DHT quote requests.
+async fn quote_wave_pipelined<'a>(
+    wave: &[Bytes],
+    client: &'a QuantumClient,
+    store_futs: &mut FuturesUnordered<
+        Pin<Box<dyn Future<Output = Result<ChunkAddress>> + Send + 'a>>,
+    >,
+) -> Result<Vec<PreparedChunk>> {
+    let wave_len = wave.len();
+    let mut quote_futs = FuturesUnordered::new();
+
+    for (idx, content) in wave.iter().enumerate() {
+        let content = content.clone();
+        let fut = async move { (idx, client.prepare_chunk_payment(content).await) };
+        quote_futs.push(fut);
+    }
+
+    let mut results: Vec<(usize, PreparedChunk)> = Vec::with_capacity(wave_len);
+
+    while results.len() < wave_len {
+        tokio::select! {
+            biased;
+            // Drain completed stores from previous waves to free resources.
+            Some(store_result) = store_futs.next(), if !store_futs.is_empty() => {
+                store_result?;
+            }
+            // Collect quotes for this wave.
+            Some((idx, quote_result)) = quote_futs.next() => {
+                results.push((idx, quote_result?));
+            }
+        }
+    }
+
+    results.sort_by_key(|(idx, _)| *idx);
+    Ok(results.into_iter().map(|(_, prep)| prep).collect())
 }
 
 /// Encrypt a file from disk using `stream_encrypt`, returning the `DataMap`

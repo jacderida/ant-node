@@ -231,17 +231,18 @@ impl AntProtocol {
         let data_size = request.data_size;
         debug!("Handling quote request for {addr_hex} (size: {data_size})");
 
-        // If the chunk is already stored, no payment is needed
-        match self.storage.exists(&request.address) {
-            Ok(true) => {
-                debug!("Chunk {addr_hex} already stored — returning AlreadyStored");
-                return ChunkQuoteResponse::AlreadyStored;
-            }
-            Ok(false) => {}
+        // Check if the chunk is already stored so we can tell the client
+        // to skip payment (already_stored = true).
+        let already_stored = match self.storage.exists(&request.address) {
+            Ok(exists) => exists,
             Err(e) => {
                 warn!("Storage check failed for {addr_hex}: {e}");
-                // Fall through to generate a quote anyway
+                false // Assume not stored on error — generate a normal quote.
             }
+        };
+
+        if already_stored {
+            debug!("Chunk {addr_hex} already stored — returning quote with already_stored=true");
         }
 
         // Validate data size - data_size is u64, cast carefully and reject overflow
@@ -265,7 +266,10 @@ impl AntProtocol {
             Ok(quote) => {
                 // Serialize the quote
                 match rmp_serde::to_vec(&quote) {
-                    Ok(quote_bytes) => ChunkQuoteResponse::Success { quote: quote_bytes },
+                    Ok(quote_bytes) => ChunkQuoteResponse::Success {
+                        quote: quote_bytes,
+                        already_stored,
+                    },
                     Err(e) => ChunkQuoteResponse::Error(ProtocolError::QuoteFailed(format!(
                         "Failed to serialize quote: {e}"
                     ))),

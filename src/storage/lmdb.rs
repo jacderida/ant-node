@@ -338,24 +338,39 @@ impl LmdbStorage {
         let env = self.env.clone();
         let db = self.db;
 
-        spawn_blocking(move || -> Result<()> {
+        // Returns the byte length of the previous value, if any.
+        let old_len: Option<usize> = spawn_blocking(move || -> Result<Option<usize>> {
             let mut wtxn = env
                 .write_txn()
                 .map_err(|e| Error::Storage(format!("Failed to create write txn: {e}")))?;
+
+            let prev_len = db
+                .get(&wtxn, &key)
+                .map_err(|e| Error::Storage(format!("Failed to read old record: {e}")))?
+                .map(<[u8]>::len);
 
             db.put(&mut wtxn, &key, &value)
                 .map_err(|e| Error::Storage(format!("Failed to put record: {e}")))?;
             wtxn.commit()
                 .map_err(|e| Error::Storage(format!("Failed to commit put: {e}")))?;
-            Ok(())
+            Ok(prev_len)
         })
         .await
         .map_err(|e| Error::Storage(format!("LMDB put_overwrite task failed: {e}")))??;
 
         {
             let mut stats = self.stats.write();
-            stats.chunks_stored += 1;
-            stats.bytes_stored += data.len() as u64;
+            if let Some(prev) = old_len {
+                // Update: adjust byte count, chunk count stays the same.
+                stats.bytes_stored = stats
+                    .bytes_stored
+                    .saturating_sub(prev as u64)
+                    .saturating_add(data.len() as u64);
+            } else {
+                // New record.
+                stats.chunks_stored += 1;
+                stats.bytes_stored += data.len() as u64;
+            }
         }
 
         debug!(

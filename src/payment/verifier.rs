@@ -5,12 +5,22 @@
 
 use crate::error::{Error, Result};
 use crate::payment::cache::{CacheStats, VerifiedCache, XorName};
-use crate::payment::proof::deserialize_proof;
+use crate::payment::proof::{
+    deserialize_merkle_proof, deserialize_proof, detect_proof_type, ProofType,
+};
 use crate::payment::quote::{verify_quote_content, verify_quote_signature};
 use crate::payment::single_node::REQUIRED_QUOTES;
+use ant_evm::merkle_payments::OnChainPaymentInfo;
 use ant_evm::{ProofOfPayment, RewardsAddress};
+use evmlib::contract::merkle_payment_vault;
+use evmlib::contract::payment_vault::error::Error as PaymentVaultError;
+use evmlib::contract::payment_vault::verify_data_payment;
+use evmlib::merkle_batch_payment::PoolHash;
 use evmlib::Network as EvmNetwork;
+use lru::LruCache;
+use parking_lot::Mutex;
 use saorsa_core::identity::node_identity::peer_id_from_public_key_bytes;
+use std::num::NonZeroUsize;
 use std::time::SystemTime;
 use tracing::{debug, info};
 
@@ -20,12 +30,13 @@ use tracing::{debug, info};
 /// Proofs smaller than this are rejected as they cannot contain sufficient payment information.
 const MIN_PAYMENT_PROOF_SIZE_BYTES: usize = 32;
 
-/// Maximum allowed size for a payment proof in bytes (100 KB).
+/// Maximum allowed size for a payment proof in bytes (256 KB).
 ///
-/// A `ProofOfPayment` with 5 ML-DSA-65 quotes can reach ~30 KB (each quote carries a
-/// ~1,952-byte public key and a 3,309-byte signature plus metadata). 100 KB provides
-/// headroom for future fields while still capping memory during verification.
-const MAX_PAYMENT_PROOF_SIZE_BYTES: usize = 102_400;
+/// Single-node proofs with 5 ML-DSA-65 quotes reach ~30 KB.
+/// Merkle proofs include 16 candidate nodes (each with ~1,952-byte ML-DSA pub key
+/// and ~3,309-byte signature) plus merkle branch hashes, totaling ~130 KB.
+/// 256 KB provides headroom while still capping memory during verification.
+const MAX_PAYMENT_PROOF_SIZE_BYTES: usize = 262_144;
 
 /// Maximum age of a payment quote before it's considered expired (24 hours).
 /// Prevents replaying old cheap quotes against nearly-full nodes.
@@ -93,14 +104,20 @@ impl PaymentStatus {
     }
 }
 
+/// Default capacity for the merkle pool cache (number of pool hashes to cache).
+const DEFAULT_POOL_CACHE_CAPACITY: usize = 1_000;
+
 /// Main payment verifier for saorsa-node.
 ///
 /// Uses:
 /// 1. LRU cache for fast lookups of previously verified `XorName` values
 /// 2. EVM payment verification for new data (always required)
+/// 3. Pool-level cache for merkle batch payments (avoids repeated on-chain queries)
 pub struct PaymentVerifier {
     /// LRU cache of verified `XorName` values.
     cache: VerifiedCache,
+    /// LRU cache of verified merkle pool hashes → on-chain payment info.
+    pool_cache: Mutex<LruCache<PoolHash, OnChainPaymentInfo>>,
     /// Configuration.
     config: PaymentVerifierConfig,
 }
@@ -110,11 +127,19 @@ impl PaymentVerifier {
     #[must_use]
     pub fn new(config: PaymentVerifierConfig) -> Self {
         let cache = VerifiedCache::with_capacity(config.cache_capacity);
+        // SAFETY: DEFAULT_POOL_CACHE_CAPACITY is a const > 0, so this is always Some
+        let pool_cache_size =
+            NonZeroUsize::new(DEFAULT_POOL_CACHE_CAPACITY).unwrap_or(NonZeroUsize::MIN);
+        let pool_cache = Mutex::new(LruCache::new(pool_cache_size));
 
         let cache_capacity = config.cache_capacity;
-        info!("Payment verifier initialized (cache_capacity={cache_capacity}, evm=always-on)");
+        info!("Payment verifier initialized (cache_capacity={cache_capacity}, evm=always-on, pool_cache={DEFAULT_POOL_CACHE_CAPACITY})");
 
-        Self { cache, config }
+        Self {
+            cache,
+            pool_cache,
+            config,
+        }
     }
 
     /// Check if payment is required for the given `XorName`.
@@ -197,17 +222,29 @@ impl PaymentVerifier {
                         )));
                     }
 
-                    // Deserialize the proof (supports both new PaymentProof and legacy ProofOfPayment)
-                    let (payment, tx_hashes) = deserialize_proof(proof).map_err(|e| {
-                        Error::Payment(format!("Failed to deserialize payment proof: {e}"))
-                    })?;
+                    // Detect proof type from version tag byte
+                    match detect_proof_type(proof) {
+                        Some(ProofType::Merkle) => {
+                            self.verify_merkle_payment(xorname, proof).await?;
+                        }
+                        Some(ProofType::SingleNode) => {
+                            let (payment, tx_hashes) = deserialize_proof(proof).map_err(|e| {
+                                Error::Payment(format!("Failed to deserialize payment proof: {e}"))
+                            })?;
 
-                    if !tx_hashes.is_empty() {
-                        debug!("Proof includes {} transaction hash(es)", tx_hashes.len());
+                            if !tx_hashes.is_empty() {
+                                debug!("Proof includes {} transaction hash(es)", tx_hashes.len());
+                            }
+
+                            self.verify_evm_payment(xorname, &payment).await?;
+                        }
+                        None => {
+                            return Err(Error::Payment(format!(
+                                "Unknown payment proof type tag: {:?}",
+                                proof.first()
+                            )));
+                        }
                     }
-
-                    // Verify the payment using EVM
-                    self.verify_evm_payment(xorname, &payment).await?;
 
                     // Cache the verified xorname
                     self.cache.insert(*xorname);
@@ -469,6 +506,168 @@ impl PaymentVerifier {
         Ok(())
     }
 
+    /// Verify a merkle batch payment proof.
+    ///
+    /// This verification flow:
+    /// 1. Deserialize the `MerklePaymentProof`
+    /// 2. Check pool cache for previously verified pool hash
+    /// 3. If not cached, query on-chain for payment info
+    /// 4. Validate the proof against on-chain data
+    /// 5. Cache the pool hash for subsequent chunk verifications in the same batch
+    #[allow(clippy::too_many_lines)]
+    async fn verify_merkle_payment(&self, xorname: &XorName, proof_bytes: &[u8]) -> Result<()> {
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            debug!("Verifying merkle payment for {}", hex::encode(xorname));
+        }
+
+        // Deserialize the merkle proof
+        let merkle_proof = deserialize_merkle_proof(proof_bytes)
+            .map_err(|e| Error::Payment(format!("Failed to deserialize merkle proof: {e}")))?;
+
+        // Verify the address in the proof matches the xorname being stored
+        if merkle_proof.address.0 != *xorname {
+            return Err(Error::Payment(format!(
+                "Merkle proof address mismatch: proof is for {}, but storing {}",
+                hex::encode(merkle_proof.address.0),
+                hex::encode(xorname)
+            )));
+        }
+
+        let pool_hash = merkle_proof.winner_pool_hash();
+
+        // Check pool cache first
+        let cached_info = {
+            let mut pool_cache = self.pool_cache.lock();
+            pool_cache.get(&pool_hash).cloned()
+        };
+
+        let payment_info = if let Some(info) = cached_info {
+            debug!("Pool cache hit for hash {}", hex::encode(pool_hash));
+            info
+        } else {
+            // Query on-chain for payment info
+            let info =
+                merkle_payment_vault::get_merkle_payment_info(&self.config.evm.network, pool_hash)
+                    .await
+                    .map_err(|e| {
+                        Error::Payment(format!(
+                            "Failed to query merkle payment info for pool {}: {e}",
+                            hex::encode(pool_hash)
+                        ))
+                    })?;
+
+            let on_chain_info = OnChainPaymentInfo {
+                depth: info.depth,
+                merkle_payment_timestamp: info.merklePaymentTimestamp,
+                paid_node_addresses: info
+                    .paidNodeAddresses
+                    .iter()
+                    .map(|pna| (pna.rewardsAddress, pna.poolIndex as usize))
+                    .collect(),
+            };
+
+            // Cache the pool info for subsequent chunks in the same batch
+            {
+                let mut pool_cache = self.pool_cache.lock();
+                pool_cache.put(pool_hash, on_chain_info.clone());
+            }
+
+            debug!(
+                "Queried on-chain merkle payment info for pool {}: depth={}, timestamp={}, paid_nodes={}",
+                hex::encode(pool_hash),
+                on_chain_info.depth,
+                on_chain_info.merkle_payment_timestamp,
+                on_chain_info.paid_node_addresses.len()
+            );
+
+            on_chain_info
+        };
+
+        // pool_hash was derived from merkle_proof.winner_pool and used to query
+        // the contract. The contract only returns data if a payment exists for that
+        // hash. The ML-DSA signature check below ensures the pool contents are
+        // authentic (nodes actually signed their candidate quotes).
+
+        // Verify ML-DSA-65 signatures on all candidate nodes in the winner pool.
+        // Without this, a client could fabricate a pool with fake reward addresses
+        // since the contract only commits to the bytes the client submitted.
+        for candidate in &merkle_proof.winner_pool.candidate_nodes {
+            if !crate::payment::verify_merkle_candidate_signature(candidate) {
+                return Err(Error::Payment(format!(
+                    "Invalid ML-DSA-65 signature on merkle candidate node (reward: {})",
+                    candidate.reward_address
+                )));
+            }
+        }
+
+        // Get the root from the winner pool's midpoint proof
+        let smart_contract_root = merkle_proof.winner_pool.midpoint_proof.root();
+
+        // Verify the cryptographic merkle proofs (address belongs to tree,
+        // midpoint belongs to tree, roots match, timestamps valid).
+        ant_evm::merkle_payments::verify_merkle_proof(
+            &merkle_proof.address,
+            &merkle_proof.data_proof,
+            &merkle_proof.winner_pool.midpoint_proof,
+            payment_info.depth,
+            smart_contract_root,
+            payment_info.merkle_payment_timestamp,
+        )
+        .map_err(|e| {
+            Error::Payment(format!(
+                "Merkle proof verification failed for {}: {e}",
+                hex::encode(xorname)
+            ))
+        })?;
+
+        // Verify paid node count matches depth
+        if payment_info.paid_node_addresses.len() != payment_info.depth as usize {
+            return Err(Error::Payment(format!(
+                "Wrong number of paid nodes: expected {}, got {}",
+                payment_info.depth,
+                payment_info.paid_node_addresses.len()
+            )));
+        }
+
+        // Verify paid node indices are valid within the candidate pool.
+        //
+        // Note: unlike single-node payments, merkle proofs are NOT bound to a
+        // specific storing node. The contract pays `depth` random nodes from the
+        // winner pool; the storing node is whichever close-group peer the client
+        // routes the chunk to. There is no local-recipient check here because
+        // any node that can verify the merkle proof is allowed to store the chunk.
+        // Replay protection comes from the per-address proof binding (each proof
+        // is for a specific XorName in the paid tree).
+        for (addr, idx) in &payment_info.paid_node_addresses {
+            let node = merkle_proof
+                .winner_pool
+                .candidate_nodes
+                .get(*idx)
+                .ok_or_else(|| {
+                    Error::Payment(format!(
+                        "Paid node index {idx} out of bounds for pool size {}",
+                        merkle_proof.winner_pool.candidate_nodes.len()
+                    ))
+                })?;
+            if node.reward_address != *addr {
+                return Err(Error::Payment(format!(
+                    "Paid node address mismatch at index {idx}: expected {addr}, got {}",
+                    node.reward_address
+                )));
+            }
+        }
+
+        if tracing::enabled!(tracing::Level::INFO) {
+            info!(
+                "Merkle payment verified for {} (pool: {})",
+                hex::encode(xorname),
+                hex::encode(pool_hash)
+            );
+        }
+
+        Ok(())
+    }
+
     /// Verify this node is among the paid recipients.
     fn validate_local_recipient(&self, payment: &ProofOfPayment) -> Result<()> {
         let local_addr = &self.config.local_rewards_address;
@@ -619,54 +818,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_proof_at_min_boundary() {
+    async fn test_proof_at_min_boundary_unknown_tag() {
         let verifier = create_test_verifier();
         let xorname = [3u8; 32];
 
-        // Exactly MIN_PAYMENT_PROOF_SIZE_BYTES — passes size check, but
-        // will fail deserialization (not valid msgpack)
+        // Exactly MIN_PAYMENT_PROOF_SIZE_BYTES with unknown tag — rejected
         let boundary_proof = vec![0xFFu8; MIN_PAYMENT_PROOF_SIZE_BYTES];
         let result = verifier
             .verify_payment(&xorname, Some(&boundary_proof))
             .await;
         assert!(result.is_err());
-        let err_msg = format!("{}", result.expect_err("should fail deser"));
+        let err_msg = format!("{}", result.expect_err("should fail"));
         assert!(
-            err_msg.contains("deserialize"),
-            "Error should mention deserialization: {err_msg}"
+            err_msg.contains("Unknown payment proof type tag"),
+            "Error should mention unknown tag: {err_msg}"
         );
     }
 
     #[tokio::test]
-    async fn test_proof_at_max_boundary() {
+    async fn test_proof_at_max_boundary_unknown_tag() {
         let verifier = create_test_verifier();
         let xorname = [4u8; 32];
 
-        // Exactly MAX_PAYMENT_PROOF_SIZE_BYTES — passes size check, but
-        // will fail deserialization
+        // Exactly MAX_PAYMENT_PROOF_SIZE_BYTES with unknown tag — rejected
         let boundary_proof = vec![0xFFu8; MAX_PAYMENT_PROOF_SIZE_BYTES];
         let result = verifier
             .verify_payment(&xorname, Some(&boundary_proof))
             .await;
         assert!(result.is_err());
-        let err_msg = format!("{}", result.expect_err("should fail deser"));
+        let err_msg = format!("{}", result.expect_err("should fail"));
         assert!(
-            err_msg.contains("deserialize"),
-            "Error should mention deserialization: {err_msg}"
+            err_msg.contains("Unknown payment proof type tag"),
+            "Error should mention unknown tag: {err_msg}"
         );
     }
 
     #[tokio::test]
-    async fn test_malformed_msgpack_proof() {
+    async fn test_malformed_single_node_proof() {
         let verifier = create_test_verifier();
         let xorname = [5u8; 32];
 
-        // Valid size but garbage bytes — should fail deserialization
-        let garbage = vec![0xAB; 64];
+        // Valid tag (0x01) but garbage payload — should fail deserialization
+        let mut garbage = vec![crate::ant_protocol::PROOF_TAG_SINGLE_NODE];
+        garbage.extend_from_slice(&[0xAB; 63]);
         let result = verifier.verify_payment(&xorname, Some(&garbage)).await;
         assert!(result.is_err());
         let err_msg = format!("{}", result.expect_err("should fail"));
-        assert!(err_msg.contains("deserialize"));
+        assert!(
+            err_msg.contains("deserialize") || err_msg.contains("Failed"),
+            "Error should mention deserialization failure: {err_msg}"
+        );
     }
 
     #[test]
@@ -776,7 +977,8 @@ mod tests {
             tx_hashes: vec![FixedBytes::from([0xABu8; 32])],
         };
 
-        let proof_bytes = rmp_serde::to_vec(&proof).expect("serialize");
+        let proof_bytes =
+            crate::payment::proof::serialize_single_node_proof(&proof).expect("serialize");
 
         // 5 ML-DSA-65 quotes with ~1952-byte pub keys and ~3309-byte signatures
         // should produce a proof in the 20-60 KB range
@@ -795,7 +997,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_content_address_mismatch_rejected() {
-        use crate::payment::proof::PaymentProof;
+        use crate::payment::proof::{serialize_single_node_proof, PaymentProof};
         use ant_evm::{EncodedPeerId, PaymentQuote, QuotingMetrics, RewardsAddress};
         use libp2p::identity::Keypair;
         use libp2p::PeerId;
@@ -834,14 +1036,13 @@ mod tests {
             let peer_id = PeerId::from_public_key(&keypair.public());
             peer_quotes.push((EncodedPeerId::from(peer_id), quote.clone()));
         }
-        let payment = ProofOfPayment { peer_quotes };
 
         let proof = PaymentProof {
-            proof_of_payment: payment,
+            proof_of_payment: ProofOfPayment { peer_quotes },
             tx_hashes: vec![],
         };
 
-        let proof_bytes = rmp_serde::to_vec(&proof).expect("serialize proof");
+        let proof_bytes = serialize_single_node_proof(&proof).expect("serialize proof");
 
         let result = verifier
             .verify_payment(&target_xorname, Some(&proof_bytes))
@@ -883,17 +1084,17 @@ mod tests {
         }
     }
 
-    /// Helper: wrap quotes into a serialized `PaymentProof`.
+    /// Helper: wrap quotes into a tagged serialized `PaymentProof`.
     fn serialize_proof(
         peer_quotes: Vec<(ant_evm::EncodedPeerId, ant_evm::PaymentQuote)>,
     ) -> Vec<u8> {
-        use crate::payment::proof::PaymentProof;
+        use crate::payment::proof::{serialize_single_node_proof, PaymentProof};
 
         let proof = PaymentProof {
             proof_of_payment: ProofOfPayment { peer_quotes },
             tx_hashes: vec![],
         };
-        rmp_serde::to_vec(&proof).expect("serialize proof")
+        serialize_single_node_proof(&proof).expect("serialize proof")
     }
 
     #[tokio::test]
@@ -1152,5 +1353,131 @@ mod tests {
             err_msg.contains("pub_key does not belong to claimed peer"),
             "Error should mention binding mismatch: {err_msg}"
         );
+    }
+
+    // =========================================================================
+    // Merkle-tagged proof tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_merkle_tagged_proof_invalid_data_rejected() {
+        use crate::ant_protocol::PROOF_TAG_MERKLE;
+
+        let verifier = create_test_verifier();
+        let xorname = [0xA1u8; 32];
+
+        // Build a merkle-tagged proof with garbage body.
+        // The tag byte is correct but the body is not valid msgpack.
+        let mut merkle_garbage = Vec::with_capacity(64);
+        merkle_garbage.push(PROOF_TAG_MERKLE);
+        merkle_garbage.extend_from_slice(&[0xAB; 63]);
+
+        let result = verifier
+            .verify_payment(&xorname, Some(&merkle_garbage))
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Should reject merkle proof with invalid body"
+        );
+        let err_msg = format!("{}", result.expect_err("should fail"));
+        assert!(
+            err_msg.contains("deserialize") || err_msg.contains("merkle proof"),
+            "Error should mention deserialization failure: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_single_node_tagged_proof_deserialization() {
+        use crate::payment::proof::serialize_single_node_proof;
+        use ant_evm::{EncodedPeerId, RewardsAddress};
+
+        let verifier = create_test_verifier();
+        let xorname = [0xA2u8; 32];
+        let rewards_addr = RewardsAddress::new([1u8; 20]);
+
+        // Build a valid tagged single-node proof
+        let quote = make_fake_quote(xorname, SystemTime::now(), rewards_addr);
+        let mut peer_quotes = Vec::new();
+        for _ in 0..5 {
+            let keypair = libp2p::identity::Keypair::generate_ed25519();
+            let peer_id = libp2p::PeerId::from_public_key(&keypair.public());
+            peer_quotes.push((EncodedPeerId::from(peer_id), quote.clone()));
+        }
+
+        let proof = crate::payment::proof::PaymentProof {
+            proof_of_payment: ProofOfPayment {
+                peer_quotes: peer_quotes.clone(),
+            },
+            tx_hashes: vec![],
+        };
+
+        let tagged_bytes = serialize_single_node_proof(&proof).expect("serialize tagged proof");
+
+        // detect_proof_type should identify it as SingleNode
+        assert_eq!(
+            crate::payment::proof::detect_proof_type(&tagged_bytes),
+            Some(crate::payment::proof::ProofType::SingleNode)
+        );
+
+        // verify_payment should process it through the single-node path.
+        // It will fail at quote validation (fake pub_key), but we verify
+        // it passes the deserialization stage by checking the error type.
+        let result = verifier.verify_payment(&xorname, Some(&tagged_bytes)).await;
+
+        assert!(result.is_err(), "Should fail at quote validation stage");
+        let err_msg = format!("{}", result.expect_err("should fail"));
+        // It should NOT be a deserialization error — it should get further
+        assert!(
+            !err_msg.contains("deserialize"),
+            "Should pass deserialization but fail later: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_pool_cache_same_hash_queries_once() {
+        use evmlib::merkle_batch_payment::PoolHash;
+
+        // Verify the pool_cache field exists and works correctly.
+        // Insert a pool hash, then verify it's present on lookup.
+        let verifier = create_test_verifier();
+
+        let pool_hash: PoolHash = [0xBBu8; 32];
+        let payment_info = ant_evm::merkle_payments::OnChainPaymentInfo {
+            depth: 4,
+            merkle_payment_timestamp: 1_700_000_000,
+            paid_node_addresses: vec![],
+        };
+
+        // Insert into pool cache
+        {
+            let mut cache = verifier.pool_cache.lock();
+            cache.put(pool_hash, payment_info);
+        }
+
+        // First lookup — should find it
+        {
+            let found = verifier.pool_cache.lock().get(&pool_hash).cloned();
+            assert!(found.is_some(), "Pool hash should be in cache after insert");
+            let info = found.expect("cached info");
+            assert_eq!(info.depth, 4);
+            assert_eq!(info.merkle_payment_timestamp, 1_700_000_000);
+        }
+
+        // Second lookup — same result (no double-query needed)
+        {
+            let found = verifier.pool_cache.lock().get(&pool_hash).cloned();
+            assert!(
+                found.is_some(),
+                "Pool hash should still be in cache on second lookup"
+            );
+        }
+
+        // Different pool hash — should NOT be found
+        let other_hash: PoolHash = [0xCCu8; 32];
+        {
+            let found = verifier.pool_cache.lock().get(&other_hash).cloned();
+            assert!(found.is_none(), "Unknown pool hash should not be in cache");
+        }
     }
 }

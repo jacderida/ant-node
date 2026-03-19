@@ -47,6 +47,10 @@ pub enum ChunkMessageBody {
     QuoteRequest(ChunkQuoteRequest),
     /// Response with a storage quote.
     QuoteResponse(ChunkQuoteResponse),
+    /// Request a merkle candidate quote for batch payments.
+    MerkleCandidateQuoteRequest(MerkleCandidateQuoteRequest),
+    /// Response with a merkle candidate quote.
+    MerkleCandidateQuoteResponse(MerkleCandidateQuoteResponse),
 }
 
 /// Wire-format wrapper that pairs a sender-assigned `request_id` with
@@ -236,6 +240,49 @@ pub enum ChunkQuoteResponse {
     /// Quote generation failed.
     Error(ProtocolError),
 }
+
+// =============================================================================
+// Merkle Candidate Quote Request/Response
+// =============================================================================
+
+/// Request a merkle candidate quote for batch payments.
+///
+/// Part of the merkle batch payment system where clients collect
+/// signed candidate quotes from 16 closest peers per pool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MerkleCandidateQuoteRequest {
+    /// The candidate pool address (hash of midpoint || root || timestamp).
+    pub address: XorName,
+    /// Data type identifier (0 for chunks).
+    pub data_type: u32,
+    /// Size of the data in bytes.
+    pub data_size: u64,
+    /// Client-provided merkle payment timestamp (unix seconds).
+    pub merkle_payment_timestamp: u64,
+}
+
+/// Response with a merkle candidate quote.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MerkleCandidateQuoteResponse {
+    /// Candidate quote generated successfully.
+    /// Contains the serialized `MerklePaymentCandidateNode`.
+    Success {
+        /// Serialized `MerklePaymentCandidateNode`.
+        candidate_node: Vec<u8>,
+    },
+    /// Quote generation failed.
+    Error(ProtocolError),
+}
+
+// =============================================================================
+// Payment Proof Type Tags
+// =============================================================================
+
+/// Version byte prefix for payment proof serialization.
+/// Allows the verifier to detect proof type before deserialization.
+pub const PROOF_TAG_SINGLE_NODE: u8 = 0x01;
+/// Version byte prefix for merkle payment proofs.
+pub const PROOF_TAG_MERKLE: u8 = 0x02;
 
 // =============================================================================
 // Protocol Errors
@@ -476,5 +523,91 @@ mod tests {
         assert_eq!(PROTOCOL_VERSION, 1);
         assert_eq!(MAX_CHUNK_SIZE, 4 * 1024 * 1024);
         assert_eq!(DATA_TYPE_CHUNK, 0);
+    }
+
+    #[test]
+    fn test_proof_tag_constants() {
+        // Tags must be distinct non-zero bytes
+        assert_ne!(PROOF_TAG_SINGLE_NODE, PROOF_TAG_MERKLE);
+        assert_ne!(PROOF_TAG_SINGLE_NODE, 0x00);
+        assert_ne!(PROOF_TAG_MERKLE, 0x00);
+        assert_eq!(PROOF_TAG_SINGLE_NODE, 0x01);
+        assert_eq!(PROOF_TAG_MERKLE, 0x02);
+    }
+
+    #[test]
+    fn test_merkle_candidate_quote_request_encode_decode() {
+        let address = [0x56; 32];
+        let request = MerkleCandidateQuoteRequest {
+            address,
+            data_type: DATA_TYPE_CHUNK,
+            data_size: 2048,
+            merkle_payment_timestamp: 1_700_000_000,
+        };
+        let msg = ChunkMessage {
+            request_id: 500,
+            body: ChunkMessageBody::MerkleCandidateQuoteRequest(request),
+        };
+
+        let encoded = msg.encode().expect("encode should succeed");
+        let decoded = ChunkMessage::decode(&encoded).expect("decode should succeed");
+
+        assert_eq!(decoded.request_id, 500);
+        if let ChunkMessageBody::MerkleCandidateQuoteRequest(req) = decoded.body {
+            assert_eq!(req.address, address);
+            assert_eq!(req.data_type, DATA_TYPE_CHUNK);
+            assert_eq!(req.data_size, 2048);
+            assert_eq!(req.merkle_payment_timestamp, 1_700_000_000);
+        } else {
+            panic!("expected MerkleCandidateQuoteRequest");
+        }
+    }
+
+    #[test]
+    fn test_merkle_candidate_quote_response_success_encode_decode() {
+        let candidate_node_bytes = vec![0xAA, 0xBB, 0xCC, 0xDD];
+        let response = MerkleCandidateQuoteResponse::Success {
+            candidate_node: candidate_node_bytes.clone(),
+        };
+        let msg = ChunkMessage {
+            request_id: 501,
+            body: ChunkMessageBody::MerkleCandidateQuoteResponse(response),
+        };
+
+        let encoded = msg.encode().expect("encode should succeed");
+        let decoded = ChunkMessage::decode(&encoded).expect("decode should succeed");
+
+        assert_eq!(decoded.request_id, 501);
+        if let ChunkMessageBody::MerkleCandidateQuoteResponse(
+            MerkleCandidateQuoteResponse::Success { candidate_node },
+        ) = decoded.body
+        {
+            assert_eq!(candidate_node, candidate_node_bytes);
+        } else {
+            panic!("expected MerkleCandidateQuoteResponse::Success");
+        }
+    }
+
+    #[test]
+    fn test_merkle_candidate_quote_response_error_encode_decode() {
+        let error = ProtocolError::QuoteFailed("no libp2p keypair".to_string());
+        let response = MerkleCandidateQuoteResponse::Error(error.clone());
+        let msg = ChunkMessage {
+            request_id: 502,
+            body: ChunkMessageBody::MerkleCandidateQuoteResponse(response),
+        };
+
+        let encoded = msg.encode().expect("encode should succeed");
+        let decoded = ChunkMessage::decode(&encoded).expect("decode should succeed");
+
+        assert_eq!(decoded.request_id, 502);
+        if let ChunkMessageBody::MerkleCandidateQuoteResponse(
+            MerkleCandidateQuoteResponse::Error(err),
+        ) = decoded.body
+        {
+            assert_eq!(err, error);
+        } else {
+            panic!("expected MerkleCandidateQuoteResponse::Error");
+        }
     }
 }

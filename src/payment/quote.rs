@@ -9,6 +9,7 @@
 
 use crate::error::{Error, Result};
 use crate::payment::metrics::QuotingMetricsTracker;
+use ant_evm::merkle_payments::MerklePaymentCandidateNode;
 use ant_evm::{PaymentQuote, QuotingMetrics, RewardsAddress};
 use saorsa_core::MlDsa65;
 use saorsa_pqc::pqc::types::{MlDsaPublicKey, MlDsaSecretKey, MlDsaSignature};
@@ -185,6 +186,65 @@ impl QuoteGenerator {
     pub fn record_store(&self, data_type: u32) {
         self.metrics_tracker.record_store(data_type);
     }
+
+    /// Create a merkle candidate quote for batch payment using ML-DSA-65.
+    ///
+    /// Returns a `MerklePaymentCandidateNode` constructed with the node's
+    /// ML-DSA-65 public key and signature. This uses the same post-quantum
+    /// signing stack as regular payment quotes, rather than the ed25519
+    /// signing that the upstream `ant-evm` library assumes.
+    ///
+    /// The `pub_key` field stores the raw ML-DSA-65 public key bytes,
+    /// and `signature` stores the ML-DSA-65 signature over `bytes_to_sign()`.
+    /// Clients verify these using `verify_merkle_candidate_signature()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if signing is not configured.
+    pub fn create_merkle_candidate_quote(
+        &self,
+        data_size: usize,
+        data_type: u32,
+        merkle_payment_timestamp: u64,
+    ) -> Result<MerklePaymentCandidateNode> {
+        let sign_fn = self
+            .sign_fn
+            .as_ref()
+            .ok_or_else(|| Error::Payment("Quote signing not configured".to_string()))?;
+
+        let quoting_metrics = self.metrics_tracker.get_metrics(data_size, data_type);
+
+        // Compute the same bytes_to_sign used by the upstream library
+        let msg = MerklePaymentCandidateNode::bytes_to_sign(
+            &quoting_metrics,
+            &self.rewards_address,
+            merkle_payment_timestamp,
+        );
+
+        // Sign with ML-DSA-65
+        let signature = sign_fn(&msg);
+        if signature.is_empty() {
+            return Err(Error::Payment(
+                "ML-DSA-65 signing produced empty signature for merkle candidate".to_string(),
+            ));
+        }
+
+        let candidate = MerklePaymentCandidateNode {
+            pub_key: self.pub_key.clone(),
+            quoting_metrics,
+            reward_address: self.rewards_address,
+            merkle_payment_timestamp,
+            signature,
+        };
+
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            debug!(
+                "Generated ML-DSA-65 merkle candidate quote (size: {data_size}, type: {data_type}, ts: {merkle_payment_timestamp})"
+            );
+        }
+
+        Ok(candidate)
+    }
 }
 
 /// Verify a payment quote's content address and ML-DSA-65 signature.
@@ -260,6 +320,54 @@ pub fn verify_quote_signature(quote: &PaymentQuote) -> bool {
         }
         Err(e) => {
             debug!("ML-DSA-65 verification error: {e}");
+            false
+        }
+    }
+}
+
+/// Verify a `MerklePaymentCandidateNode` signature using ML-DSA-65.
+///
+/// Saorsa uses ML-DSA-65 post-quantum signatures for merkle candidate signing,
+/// rather than the ed25519 signatures used by the upstream `ant-evm` library.
+/// The `pub_key` field contains the raw ML-DSA-65 public key bytes, and
+/// `signature` contains the ML-DSA-65 signature over `bytes_to_sign()`.
+///
+/// This replaces `MerklePaymentCandidateNode::verify_signature()` which
+/// expects libp2p ed25519 keys.
+#[must_use]
+pub fn verify_merkle_candidate_signature(candidate: &MerklePaymentCandidateNode) -> bool {
+    let pub_key = match MlDsaPublicKey::from_bytes(&candidate.pub_key) {
+        Ok(pk) => pk,
+        Err(e) => {
+            debug!("Failed to parse ML-DSA-65 public key from merkle candidate: {e}");
+            return false;
+        }
+    };
+
+    let signature = match MlDsaSignature::from_bytes(&candidate.signature) {
+        Ok(sig) => sig,
+        Err(e) => {
+            debug!("Failed to parse ML-DSA-65 signature from merkle candidate: {e}");
+            return false;
+        }
+    };
+
+    let msg = MerklePaymentCandidateNode::bytes_to_sign(
+        &candidate.quoting_metrics,
+        &candidate.reward_address,
+        candidate.merkle_payment_timestamp,
+    );
+
+    let ml_dsa = MlDsa65::new();
+    match ml_dsa.verify(&pub_key, &msg, &signature) {
+        Ok(valid) => {
+            if !valid {
+                debug!("ML-DSA-65 merkle candidate signature verification failed");
+            }
+            valid
+        }
+        Err(e) => {
+            debug!("ML-DSA-65 merkle candidate verification error: {e}");
             false
         }
     }
@@ -572,5 +680,70 @@ mod tests {
 
         let result = generator.probe_signer();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_merkle_candidate_quote_with_ml_dsa() {
+        let ml_dsa = MlDsa65::new();
+        let (public_key, secret_key) = ml_dsa.generate_keypair().expect("keypair generation");
+
+        let rewards_address = RewardsAddress::new([0x42u8; 20]);
+        let metrics_tracker = QuotingMetricsTracker::new(800, 50);
+        let mut generator = QuoteGenerator::new(rewards_address, metrics_tracker);
+
+        // Wire ML-DSA-65 signing (same as production nodes)
+        let pub_key_bytes = public_key.as_bytes().to_vec();
+        let sk_bytes = secret_key.as_bytes().to_vec();
+        generator.set_signer(pub_key_bytes.clone(), move |msg| {
+            let sk = MlDsaSecretKey::from_bytes(&sk_bytes).expect("sk parse");
+            let ml_dsa = MlDsa65::new();
+            ml_dsa.sign(&sk, msg).expect("sign").as_bytes().to_vec()
+        });
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_secs();
+
+        let result = generator.create_merkle_candidate_quote(2048, 0, timestamp);
+
+        assert!(
+            result.is_ok(),
+            "create_merkle_candidate_quote should succeed: {result:?}"
+        );
+
+        let candidate = result.expect("valid candidate");
+
+        // Verify the returned node has the correct reward address
+        assert_eq!(candidate.reward_address, rewards_address);
+
+        // Verify the timestamp was set correctly
+        assert_eq!(candidate.merkle_payment_timestamp, timestamp);
+
+        // Verify metrics match what the tracker would produce
+        assert_eq!(candidate.quoting_metrics.data_size, 2048);
+        assert_eq!(candidate.quoting_metrics.data_type, 0);
+        assert_eq!(candidate.quoting_metrics.max_records, 800);
+        assert_eq!(candidate.quoting_metrics.close_records_stored, 50);
+
+        // Verify the public key is the ML-DSA-65 public key (not ed25519)
+        assert_eq!(
+            candidate.pub_key, pub_key_bytes,
+            "Public key should be raw ML-DSA-65 bytes"
+        );
+
+        // Verify ML-DSA-65 signature is valid using our verifier
+        assert!(
+            verify_merkle_candidate_signature(&candidate),
+            "ML-DSA-65 merkle candidate signature must be valid"
+        );
+
+        // Verify tampered timestamp invalidates ML-DSA signature
+        let mut tampered = candidate;
+        tampered.merkle_payment_timestamp = timestamp + 1;
+        assert!(
+            !verify_merkle_candidate_signature(&tampered),
+            "Tampered timestamp should invalidate the ML-DSA-65 signature"
+        );
     }
 }

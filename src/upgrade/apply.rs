@@ -8,6 +8,7 @@
 //! 5. Restart the node process
 
 use crate::error::{Error, Result};
+use crate::upgrade::binary_cache::BinaryCache;
 use crate::upgrade::{signature, UpgradeInfo, UpgradeResult};
 use flate2::read::GzDecoder;
 use semver::Version;
@@ -21,12 +22,23 @@ use tracing::{debug, error, info, warn};
 /// Maximum allowed upgrade archive size (200 MiB).
 const MAX_ARCHIVE_SIZE_BYTES: usize = 200 * 1024 * 1024;
 
+/// Exit code that signals the service manager to restart the process.
+///
+/// On Windows, `trigger_restart` exits with this code instead of using
+/// `exec()`.  The wrapping service (e.g. NSSM or Windows Service) should be
+/// configured to restart on this exit code.
+pub const RESTART_EXIT_CODE: i32 = 100;
+
 /// Auto-apply upgrader with archive support.
 pub struct AutoApplyUpgrader {
     /// Current running version.
     current_version: Version,
     /// HTTP client for downloads.
     client: reqwest::Client,
+    /// Shared binary cache (optional).
+    binary_cache: Option<BinaryCache>,
+    /// When true, exit cleanly for service manager restart instead of spawning.
+    stop_on_upgrade: bool,
 }
 
 impl AutoApplyUpgrader {
@@ -43,7 +55,29 @@ impl AutoApplyUpgrader {
                 .timeout(std::time::Duration::from_secs(300))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
+            binary_cache: None,
+            stop_on_upgrade: false,
         }
+    }
+
+    /// Configure a shared binary cache for downloaded upgrades.
+    ///
+    /// When set, `apply_upgrade` will check the cache before downloading
+    /// and store freshly verified binaries so other nodes can reuse them.
+    #[must_use]
+    pub fn with_binary_cache(mut self, cache: BinaryCache) -> Self {
+        self.binary_cache = Some(cache);
+        self
+    }
+
+    /// Configure the upgrader to exit cleanly instead of spawning a new process.
+    ///
+    /// When enabled, the node exits after applying an upgrade, relying on an
+    /// external service manager (systemd, launchd, Windows Service) to restart it.
+    #[must_use]
+    pub fn with_stop_on_upgrade(mut self, stop: bool) -> Self {
+        self.stop_on_upgrade = stop;
+        self
     }
 
     /// Get the current version.
@@ -54,11 +88,57 @@ impl AutoApplyUpgrader {
 
     /// Get the path to the currently running binary.
     ///
+    /// On Linux, `/proc/self/exe` may have a `" (deleted)"` suffix when the on-disk binary has
+    /// been replaced by another node's upgrade. This function strips that suffix so that backup
+    /// creation, binary replacement, and restart all target the correct on-disk path.
+    ///
     /// # Errors
     ///
     /// Returns an error if the binary path cannot be determined.
     pub fn current_binary_path() -> Result<PathBuf> {
-        env::current_exe().map_err(|e| Error::Upgrade(format!("Cannot determine binary path: {e}")))
+        // Prefer the invoked path (argv[0]) if it exists, as it preserves symlinks.
+        // Fall back to current_exe() which resolves symlinks via /proc/self/exe.
+        let invoked_path = env::args().next().map(PathBuf::from);
+
+        if let Some(ref invoked) = invoked_path {
+            // Check for "(deleted)" suffix first — on Linux, /proc/self/exe
+            // reports this when the on-disk binary has been replaced. The
+            // `exists()` check below would return false for the suffixed path,
+            // so we must strip it before testing existence.
+            let path_str = invoked.to_string_lossy();
+            let cleaned = if path_str.ends_with(" (deleted)") {
+                let stripped = path_str.trim_end_matches(" (deleted)");
+                debug!("Stripped '(deleted)' suffix from invoked path: {stripped}");
+                PathBuf::from(stripped)
+            } else {
+                invoked.clone()
+            };
+
+            if cleaned.exists() {
+                // Canonicalize to an absolute path so that trigger_restart
+                // works even if the CWD has changed since startup.
+                if let Ok(canonical) = cleaned.canonicalize() {
+                    return Ok(canonical);
+                }
+                return Ok(cleaned);
+            }
+        }
+
+        // Fall back to current_exe (resolves symlinks on Linux)
+        let path = env::current_exe()
+            .map_err(|e| Error::Upgrade(format!("Cannot determine binary path: {e}")))?;
+
+        #[cfg(unix)]
+        {
+            let path_str = path.to_string_lossy();
+            if path_str.ends_with(" (deleted)") {
+                let cleaned = path_str.trim_end_matches(" (deleted)");
+                debug!("Stripped '(deleted)' suffix from binary path: {cleaned}");
+                return Ok(PathBuf::from(cleaned));
+            }
+        }
+
+        Ok(path)
     }
 
     /// Perform the complete auto-apply upgrade workflow.
@@ -102,48 +182,38 @@ impl AutoApplyUpgrader {
             .tempdir_in(binary_dir)
             .map_err(|e| Error::Upgrade(format!("Failed to create temp dir: {e}")))?;
 
-        let archive_path = temp_dir.path().join("archive");
-        let sig_path = temp_dir.path().join("signature");
+        let version_str = info.version.to_string();
 
-        // Step 1: Download archive
-        info!("Downloading upgrade archive...");
-        if let Err(e) = self.download(&info.download_url, &archive_path).await {
-            warn!("Archive download failed: {e}");
-            return Ok(UpgradeResult::RolledBack {
-                reason: format!("Download failed: {e}"),
-            });
-        }
-
-        // Step 2: Download signature
-        info!("Downloading signature...");
-        if let Err(e) = self.download(&info.signature_url, &sig_path).await {
-            warn!("Signature download failed: {e}");
-            return Ok(UpgradeResult::RolledBack {
-                reason: format!("Signature download failed: {e}"),
-            });
-        }
-
-        // Step 3: Verify signature on archive BEFORE extraction (security: verify before unpacking)
-        info!("Verifying ML-DSA signature on archive...");
-        if let Err(e) = signature::verify_from_file(&archive_path, &sig_path) {
-            warn!("Signature verification failed: {e}");
-            return Ok(UpgradeResult::RolledBack {
-                reason: format!("Signature verification failed: {e}"),
-            });
-        }
-        info!("Archive signature verified successfully");
-
-        // Step 4: Extract binary from verified archive
-        info!("Extracting binary from archive...");
-        let extracted_binary = match Self::extract_binary(&archive_path, temp_dir.path()) {
+        // Try the binary cache first; download/verify/extract errors are
+        // recoverable and result in RolledBack rather than a hard error.
+        let extracted_binary = match self
+            .resolve_upgrade_binary(info, temp_dir.path(), &version_str)
+            .await
+        {
             Ok(path) => path,
             Err(e) => {
-                warn!("Extraction failed: {e}");
+                warn!("Download/verify/extract failed: {e}");
                 return Ok(UpgradeResult::RolledBack {
-                    reason: format!("Extraction failed: {e}"),
+                    reason: format!("{e}"),
                 });
             }
         };
+
+        // Check if the on-disk binary has already been upgraded by a sibling service.
+        // This prevents redundant backup/replace cycles when multiple nodes share one binary.
+        if let Some(disk_version) = on_disk_version(&current_binary).await {
+            if disk_version == info.version {
+                info!(
+                    "Binary already upgraded to {} by another service, skipping replacement",
+                    info.version
+                );
+                let exit_code = self.prepare_restart(&current_binary)?;
+                return Ok(UpgradeResult::Success {
+                    version: info.version.clone(),
+                    exit_code,
+                });
+            }
+        }
 
         // Step 5: Create backup of current binary
         let backup_path = binary_dir.join(format!(
@@ -160,9 +230,16 @@ impl AutoApplyUpgrader {
             });
         }
 
-        // Step 6: Replace binary
+        // Step 6: Replace binary (offloaded to blocking thread to avoid
+        // starving the tokio runtime, especially on Windows where retries sleep)
         info!("Replacing binary...");
-        if let Err(e) = Self::replace_binary(&extracted_binary, &current_binary) {
+        let new_bin = extracted_binary.clone();
+        let target_bin = current_binary.clone();
+        let replace_result =
+            tokio::task::spawn_blocking(move || Self::replace_binary(&new_bin, &target_bin))
+                .await
+                .map_err(|e| Error::Upgrade(format!("Binary replacement task panicked: {e}")))?;
+        if let Err(e) = replace_result {
             warn!("Binary replacement failed: {e}");
             // Attempt rollback
             if let Err(restore_err) = fs::copy(&backup_path, &current_binary) {
@@ -181,11 +258,12 @@ impl AutoApplyUpgrader {
             info.version
         );
 
-        // Step 7: Trigger restart
-        Self::trigger_restart(&current_binary)?;
+        // Step 7: Prepare restart (spawn new process if standalone mode)
+        let exit_code = self.prepare_restart(&current_binary)?;
 
         Ok(UpgradeResult::Success {
             version: info.version.clone(),
+            exit_code,
         })
     }
 
@@ -225,13 +303,152 @@ impl AutoApplyUpgrader {
         Ok(())
     }
 
-    /// Extract the saorsa-node binary from a tar.gz archive.
+    /// Resolve the upgrade binary, checking the cache first and falling back
+    /// to a full download/verify/extract cycle.
+    ///
+    /// On a cache miss the exclusive download lock is acquired (via
+    /// `spawn_blocking` to avoid blocking the tokio runtime), the cache is
+    /// re-checked, and if still missing the full download runs while the lock
+    /// is held so that only one node downloads per version.
+    async fn resolve_upgrade_binary(
+        &self,
+        info: &UpgradeInfo,
+        dest_dir: &Path,
+        version_str: &str,
+    ) -> Result<PathBuf> {
+        if let Some(ref cache) = self.binary_cache {
+            // Fast path — cache hit without locking
+            if let Some(cached_path) = cache.get_verified(version_str) {
+                info!("Cached binary verified for version {}", version_str);
+                let dest = dest_dir.join(
+                    cached_path
+                        .file_name()
+                        .unwrap_or_else(|| std::ffi::OsStr::new("saorsa-node")),
+                );
+                if let Err(e) = fs::copy(&cached_path, &dest) {
+                    warn!("Failed to copy from cache, will re-download: {e}");
+                    return self
+                        .download_verify_extract(info, dest_dir, Some(cache))
+                        .await;
+                }
+                return Ok(dest);
+            }
+
+            // Cache miss — acquire exclusive download lock via spawn_blocking
+            // to avoid blocking the tokio runtime while waiting for the lock.
+            let cache_clone = cache.clone();
+            // Named `lock_guard` (not `_lock_guard`) so the compiler keeps it
+            // alive across the `.await` below — dropping it would release the
+            // file lock before the download completes.
+            let lock_guard =
+                tokio::task::spawn_blocking(move || cache_clone.acquire_download_lock())
+                    .await
+                    .map_err(|e| Error::Upgrade(format!("Lock task failed: {e}")))??;
+
+            // Re-check cache under the lock — another node may have populated it
+            if let Some(cached_path) = cache.get_verified(version_str) {
+                info!(
+                    "Cached binary became available under lock for version {}",
+                    version_str
+                );
+                let dest = dest_dir.join(
+                    cached_path
+                        .file_name()
+                        .unwrap_or_else(|| std::ffi::OsStr::new("saorsa-node")),
+                );
+                fs::copy(&cached_path, &dest)?;
+                return Ok(dest);
+            }
+
+            // Still missing — download while holding the lock
+            let result = self
+                .download_verify_extract(info, dest_dir, Some(cache))
+                .await;
+            drop(lock_guard);
+            result
+        } else {
+            self.download_verify_extract(info, dest_dir, None).await
+        }
+    }
+
+    /// Download archive, verify signature, extract binary, and optionally
+    /// store in the binary cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any step (download, signature verification,
+    /// extraction) fails.
+    async fn download_verify_extract(
+        &self,
+        info: &UpgradeInfo,
+        dest_dir: &Path,
+        cache: Option<&BinaryCache>,
+    ) -> Result<PathBuf> {
+        let archive_path = dest_dir.join("archive");
+        let sig_path = dest_dir.join("signature");
+
+        // Step 1: Download archive
+        info!("Downloading saorsa-node binary...");
+        self.download(&info.download_url, &archive_path).await?;
+
+        // Step 2: Download signature
+        info!("Downloading signature...");
+        self.download(&info.signature_url, &sig_path).await?;
+
+        // Step 3: Verify signature on archive BEFORE extraction
+        info!("Verifying ML-DSA signature on archive...");
+        signature::verify_from_file(&archive_path, &sig_path)?;
+        info!("Archive signature verified successfully");
+
+        // Step 4: Extract binary from verified archive
+        info!("Extracting binary from archive...");
+        let extracted_binary = Self::extract_binary(&archive_path, dest_dir)?;
+
+        // Store in binary cache if available
+        if let Some(c) = cache {
+            let version_str = info.version.to_string();
+            if let Err(e) = c.store(&version_str, &extracted_binary) {
+                warn!("Failed to store binary in cache: {e}");
+            }
+        }
+
+        Ok(extracted_binary)
+    }
+
+    /// Extract the saorsa-node binary from an archive (tar.gz or zip).
+    ///
+    /// The archive format is detected by magic bytes:
+    /// - `1f 8b` → gzip (tar.gz)
+    /// - `50 4b` → zip
     fn extract_binary(archive_path: &Path, dest_dir: &Path) -> Result<PathBuf> {
+        let mut file = File::open(archive_path)?;
+        let mut magic = [0u8; 2];
+        file.read_exact(&mut magic)
+            .map_err(|e| Error::Upgrade(format!("Failed to read archive header: {e}")))?;
+        drop(file);
+
+        match magic {
+            [0x1f, 0x8b] => Self::extract_from_tar_gz(archive_path, dest_dir),
+            [0x50, 0x4b] => Self::extract_from_zip(archive_path, dest_dir),
+            _ => Err(Error::Upgrade(format!(
+                "Unknown archive format (magic bytes: {:02x} {:02x})",
+                magic[0], magic[1]
+            ))),
+        }
+    }
+
+    /// Extract the saorsa-node binary from a tar.gz archive.
+    fn extract_from_tar_gz(archive_path: &Path, dest_dir: &Path) -> Result<PathBuf> {
         let file = File::open(archive_path)?;
         let decoder = GzDecoder::new(file);
         let mut archive = Archive::new(decoder);
 
-        let extracted_binary = dest_dir.join("saorsa-node");
+        let binary_name = if cfg!(windows) {
+            "saorsa-node.exe"
+        } else {
+            "saorsa-node"
+        };
+        let extracted_binary = dest_dir.join(binary_name);
 
         for entry in archive
             .entries()
@@ -247,15 +464,12 @@ impl AutoApplyUpgrader {
             if let Some(name) = path.file_name() {
                 let name_str = name.to_string_lossy();
                 if name_str == "saorsa-node" || name_str == "saorsa-node.exe" {
-                    debug!("Found binary in archive: {}", path.display());
+                    debug!("Found binary in tar.gz archive: {}", path.display());
 
-                    // Read and write the binary
-                    let mut contents = Vec::new();
-                    entry
-                        .read_to_end(&mut contents)
-                        .map_err(|e| Error::Upgrade(format!("Failed to read binary: {e}")))?;
-
-                    fs::write(&extracted_binary, &contents)?;
+                    // Stream directly to disk to avoid large heap allocations
+                    let mut out = File::create(&extracted_binary)?;
+                    std::io::copy(&mut entry, &mut out)
+                        .map_err(|e| Error::Upgrade(format!("Failed to write binary: {e}")))?;
 
                     // Make executable on Unix
                     #[cfg(unix)]
@@ -272,57 +486,193 @@ impl AutoApplyUpgrader {
         }
 
         Err(Error::Upgrade(
-            "saorsa-node binary not found in archive".to_string(),
+            "saorsa-node binary not found in tar.gz archive".to_string(),
+        ))
+    }
+
+    /// Extract the saorsa-node binary from a zip archive.
+    fn extract_from_zip(archive_path: &Path, dest_dir: &Path) -> Result<PathBuf> {
+        let file = File::open(archive_path)?;
+        let mut archive = zip::ZipArchive::new(file)
+            .map_err(|e| Error::Upgrade(format!("Failed to open zip archive: {e}")))?;
+
+        let binary_name = if cfg!(windows) {
+            "saorsa-node.exe"
+        } else {
+            "saorsa-node"
+        };
+        let extracted_binary = dest_dir.join(binary_name);
+
+        for i in 0..archive.len() {
+            let mut entry = archive
+                .by_index(i)
+                .map_err(|e| Error::Upgrade(format!("Failed to read zip entry: {e}")))?;
+
+            let path = match entry.enclosed_name() {
+                Some(p) => p.clone(),
+                None => continue,
+            };
+
+            if let Some(name) = path.file_name() {
+                let name_str = name.to_string_lossy();
+                if name_str == "saorsa-node" || name_str == "saorsa-node.exe" {
+                    debug!("Found binary in zip archive: {}", path.display());
+
+                    // Stream directly to disk to avoid large heap allocations
+                    let mut out = File::create(&extracted_binary)?;
+                    std::io::copy(&mut entry, &mut out)
+                        .map_err(|e| Error::Upgrade(format!("Failed to write binary: {e}")))?;
+
+                    // Make executable on Unix
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let mut perms = fs::metadata(&extracted_binary)?.permissions();
+                        perms.set_mode(0o755);
+                        fs::set_permissions(&extracted_binary, perms)?;
+                    }
+
+                    return Ok(extracted_binary);
+                }
+            }
+        }
+
+        Err(Error::Upgrade(
+            "saorsa-node binary not found in zip archive".to_string(),
         ))
     }
 
     /// Replace the current binary with the new one.
+    ///
+    /// This is a blocking operation (filesystem I/O, and on Windows potentially
+    /// retries with back-off). Call via `spawn_blocking` from async context.
     fn replace_binary(new_binary: &Path, target: &Path) -> Result<()> {
-        // Preserve original permissions on Unix
         #[cfg(unix)]
         {
+            // Preserve original permissions on Unix
             if let Ok(meta) = fs::metadata(target) {
                 let perms = meta.permissions();
                 fs::set_permissions(new_binary, perms)?;
             }
+            // Atomic rename
+            fs::rename(new_binary, target)?;
         }
 
-        // Atomic rename
-        fs::rename(new_binary, target)?;
+        #[cfg(windows)]
+        {
+            let _ = target; // target is the current exe — self_replace handles it
+                            // Retry with back-off: Windows file locks may delay replacement
+            let delays = [500u64, 1000, 2000];
+            let mut last_err = None;
+            for (attempt, delay_ms) in delays.iter().enumerate() {
+                match self_replace::self_replace(new_binary) {
+                    Ok(()) => {
+                        last_err = None;
+                        break;
+                    }
+                    Err(e) => {
+                        warn!(
+                            "self_replace attempt {} failed: {e}, retrying in {delay_ms}ms",
+                            attempt + 1
+                        );
+                        last_err = Some(e);
+                        std::thread::sleep(std::time::Duration::from_millis(*delay_ms));
+                    }
+                }
+            }
+            if let Some(e) = last_err {
+                return Err(Error::Upgrade(format!(
+                    "self_replace failed after retries: {e}"
+                )));
+            }
+        }
+
         debug!("Binary replacement complete");
         Ok(())
     }
 
-    /// Trigger a restart of the node process.
+    /// Prepare for a restart after a successful upgrade.
     ///
-    /// On Unix, uses `exec()` to replace the current process.
-    /// The calling code should ensure graceful shutdown before calling this.
-    fn trigger_restart(binary_path: &Path) -> Result<()> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
+    /// Returns the exit code that the process should use after graceful shutdown.
+    /// The caller is responsible for triggering graceful shutdown (e.g. via
+    /// `CancellationToken`) and then calling `std::process::exit()` with the
+    /// returned code **after** all async cleanup has completed.
+    ///
+    /// **Service manager mode** (`stop_on_upgrade = true`):
+    /// Returns exit code 0 on Unix or [`RESTART_EXIT_CODE`] on Windows so the
+    /// service manager (systemd, launchd, Windows Service) restarts the process.
+    ///
+    /// **Standalone mode** (`stop_on_upgrade = false`):
+    /// Spawns the new binary as a child process with the same arguments, then
+    /// returns exit code 0.
+    fn prepare_restart(&self, binary_path: &Path) -> Result<i32> {
+        if self.stop_on_upgrade {
+            let exit_code;
 
-            // Collect current args (skip the binary name)
+            #[cfg(unix)]
+            {
+                info!("Service manager mode: will exit with code 0 after graceful shutdown");
+                exit_code = 0;
+            }
+
+            #[cfg(windows)]
+            {
+                let _ = binary_path;
+                info!(
+                    "Service manager mode: will exit with code {} after graceful shutdown",
+                    RESTART_EXIT_CODE
+                );
+                exit_code = RESTART_EXIT_CODE;
+            }
+
+            #[cfg(not(any(unix, windows)))]
+            {
+                let _ = binary_path;
+                warn!("Auto-restart not supported on this platform. Please restart manually.");
+                exit_code = 0;
+            }
+
+            Ok(exit_code)
+        } else {
+            // Standalone mode: spawn new process, then exit after graceful shutdown
             let args: Vec<String> = env::args().skip(1).collect();
 
-            info!("Executing restart: {} {:?}", binary_path.display(), args);
+            info!("Spawning new process: {} {:?}", binary_path.display(), args);
 
-            // exec() replaces the current process
-            let err = std::process::Command::new(binary_path).args(&args).exec();
+            std::process::Command::new(binary_path)
+                .args(&args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .spawn()
+                .map_err(|e| Error::Upgrade(format!("Failed to spawn new binary: {e}")))?;
 
-            // If we get here, exec failed
-            Err(Error::Upgrade(format!("Failed to exec new binary: {err}")))
-        }
-
-        #[cfg(not(unix))]
-        {
-            // On Windows, we can't replace a running binary
-            // Just log and let the user restart manually
-            let _ = binary_path; // Suppress unused warning on Windows
-            warn!("Auto-restart not supported on this platform. Please restart manually.");
-            Ok(())
+            info!("New process spawned, will exit after graceful shutdown");
+            Ok(0)
         }
     }
+}
+
+/// Run the on-disk binary with `--version` and parse the reported version.
+///
+/// Returns `None` if the binary cannot be executed, times out, or the output
+/// cannot be parsed.  Uses `tokio::process::Command` with a 5-second timeout
+/// to avoid blocking the async runtime.
+///
+/// Output format is expected to be "saorsa-node X.Y.Z" or "saorsa-node X.Y.Z-rc.N".
+async fn on_disk_version(binary_path: &Path) -> Option<Version> {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::process::Command::new(binary_path)
+            .arg("--version")
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let version_str = stdout.trim().strip_prefix("saorsa-node ")?;
+    Version::parse(version_str).ok()
 }
 
 impl Default for AutoApplyUpgrader {
@@ -354,5 +704,156 @@ mod tests {
     fn test_default_impl() {
         let upgrader = AutoApplyUpgrader::default();
         assert!(!upgrader.current_version().to_string().is_empty());
+    }
+
+    /// Helper: create a tar.gz archive containing a fake binary.
+    fn create_tar_gz_archive(dir: &Path, binary_name: &str, content: &[u8]) -> PathBuf {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        let archive_path = dir.join("test.tar.gz");
+        let file = File::create(&archive_path).unwrap();
+        let encoder = GzEncoder::new(file, Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, binary_name, content)
+            .unwrap();
+        builder.finish().unwrap();
+
+        archive_path
+    }
+
+    /// Helper: create a zip archive containing a fake binary.
+    fn create_zip_archive(dir: &Path, binary_name: &str, content: &[u8]) -> PathBuf {
+        use std::io::Write;
+
+        let archive_path = dir.join("test.zip");
+        let file = File::create(&archive_path).unwrap();
+        let mut zip_writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip_writer.start_file(binary_name, options).unwrap();
+        zip_writer.write_all(content).unwrap();
+        zip_writer.finish().unwrap();
+
+        archive_path
+    }
+
+    #[test]
+    fn test_extract_binary_from_tar_gz() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = b"fake-binary-content";
+        let archive = create_tar_gz_archive(dir.path(), "saorsa-node", content);
+
+        let dest = tempfile::tempdir().unwrap();
+        let result = AutoApplyUpgrader::extract_binary(&archive, dest.path());
+        assert!(result.is_ok());
+
+        let extracted = result.unwrap();
+        assert!(extracted.exists());
+        assert_eq!(fs::read(&extracted).unwrap(), content);
+    }
+
+    #[test]
+    fn test_extract_binary_from_zip() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = b"fake-binary-content";
+        let archive = create_zip_archive(dir.path(), "saorsa-node", content);
+
+        let dest = tempfile::tempdir().unwrap();
+        let result = AutoApplyUpgrader::extract_binary(&archive, dest.path());
+        assert!(result.is_ok());
+
+        let extracted = result.unwrap();
+        assert!(extracted.exists());
+        assert_eq!(fs::read(&extracted).unwrap(), content);
+    }
+
+    #[test]
+    fn test_extract_binary_from_zip_with_exe() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = b"fake-windows-binary";
+        let archive = create_zip_archive(dir.path(), "saorsa-node.exe", content);
+
+        let dest = tempfile::tempdir().unwrap();
+        let result = AutoApplyUpgrader::extract_binary(&archive, dest.path());
+        assert!(result.is_ok());
+
+        let extracted = result.unwrap();
+        assert!(extracted.exists());
+        assert_eq!(fs::read(&extracted).unwrap(), content);
+    }
+
+    #[test]
+    fn test_extract_binary_from_tar_gz_nested_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = b"nested-binary";
+        let archive = create_tar_gz_archive(dir.path(), "some/nested/path/saorsa-node", content);
+
+        let dest = tempfile::tempdir().unwrap();
+        let result = AutoApplyUpgrader::extract_binary(&archive, dest.path());
+        assert!(result.is_ok());
+
+        let extracted = result.unwrap();
+        assert!(extracted.exists());
+        assert_eq!(fs::read(&extracted).unwrap(), content);
+    }
+
+    #[test]
+    fn test_extract_binary_unknown_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("bad_archive");
+        fs::write(&archive_path, b"XX not a real archive").unwrap();
+
+        let dest = tempfile::tempdir().unwrap();
+        let result = AutoApplyUpgrader::extract_binary(&archive_path, dest.path());
+        assert!(result.is_err());
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Unknown archive format"));
+    }
+
+    #[test]
+    fn test_extract_binary_missing_binary_in_tar_gz() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = b"not-the-binary";
+        let archive = create_tar_gz_archive(dir.path(), "other-file", content);
+
+        let dest = tempfile::tempdir().unwrap();
+        let result = AutoApplyUpgrader::extract_binary(&archive, dest.path());
+        assert!(result.is_err());
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not found in tar.gz archive"));
+    }
+
+    #[test]
+    fn test_extract_binary_missing_binary_in_zip() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = b"not-the-binary";
+        let archive = create_zip_archive(dir.path(), "other-file", content);
+
+        let dest = tempfile::tempdir().unwrap();
+        let result = AutoApplyUpgrader::extract_binary(&archive, dest.path());
+        assert!(result.is_err());
+
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not found in zip archive"));
+    }
+
+    #[test]
+    fn test_extract_binary_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("empty");
+        fs::write(&archive_path, b"").unwrap();
+
+        let dest = tempfile::tempdir().unwrap();
+        let result = AutoApplyUpgrader::extract_binary(&archive_path, dest.path());
+        assert!(result.is_err());
     }
 }

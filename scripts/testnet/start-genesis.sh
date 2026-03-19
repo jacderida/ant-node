@@ -26,7 +26,6 @@ ExecStart=/usr/local/bin/saorsa-node \
     --ip-version ipv4 \
     --metrics-port 9100 \
     --log-level info \
-    --auto-upgrade \
     --upgrade-channel stable \
     --evm-network arbitrum-sepolia \
     --disable-payment-verification
@@ -69,7 +68,6 @@ ExecStart=/usr/local/bin/saorsa-node \
     -b 142.93.52.129:12000 \
     --metrics-port 9100 \
     --log-level info \
-    --auto-upgrade \
     --upgrade-channel stable \
     --evm-network arbitrum-sepolia \
     --disable-payment-verification

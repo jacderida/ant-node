@@ -153,10 +153,6 @@ pub struct NodeConfig {
 /// Auto-upgrade configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpgradeConfig {
-    /// Enable automatic upgrades.
-    #[serde(default)]
-    pub enabled: bool,
-
     /// Release channel.
     #[serde(default)]
     pub channel: UpgradeChannel,
@@ -178,6 +174,15 @@ pub struct UpgradeConfig {
     /// Set to 0 to disable staged rollout (apply upgrades immediately).
     #[serde(default = "default_staged_rollout_hours")]
     pub staged_rollout_hours: u64,
+
+    /// Exit cleanly on upgrade instead of spawning a new process.
+    ///
+    /// When true, the node exits after applying an upgrade and relies on
+    /// an external service manager (systemd, launchd, Windows Service) to
+    /// restart it. When false (default), the node spawns the new binary
+    /// as a child process before exiting.
+    #[serde(default)]
+    pub stop_on_upgrade: bool,
 }
 
 /// EVM network for payment processing.
@@ -320,17 +325,17 @@ impl NodeConfig {
 impl Default for UpgradeConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             channel: UpgradeChannel::default(),
             check_interval_hours: default_check_interval(),
             github_repo: default_github_repo(),
             staged_rollout_hours: default_staged_rollout_hours(),
+            stop_on_upgrade: false,
         }
     }
 }
 
 fn default_github_repo() -> String {
-    "dirvine/saorsa-node".to_string()
+    "saorsa-labs/saorsa-node".to_string()
 }
 
 /// Default base directory for node data (platform data dir for "saorsa").

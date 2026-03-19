@@ -63,7 +63,6 @@ ExecStart=/usr/local/bin/saorsa-node \\
     ${BOOTSTRAP_FLAGS} \\
     --metrics-port ${METRICS} \\
     --log-level info \\
-    --auto-upgrade \\
     --upgrade-channel stable \\
     --evm-network arbitrum-sepolia \\
     --disable-payment-verification

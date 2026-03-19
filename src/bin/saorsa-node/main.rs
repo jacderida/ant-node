@@ -1,11 +1,12 @@
 //! saorsa-node CLI entry point.
 
 mod cli;
+mod platform;
 
 use clap::Parser;
 use cli::{Cli, CliLogFormat};
 use saorsa_node::NodeBuilder;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{fmt, EnvFilter, Layer};
 
@@ -80,6 +81,20 @@ async fn main() -> color_eyre::Result<()> {
         commit = env!("SAORSA_GIT_COMMIT"),
         "saorsa-node starting"
     );
+
+    // Prevent macOS App Nap from throttling background timer operations.
+    // _activity must live for the duration of main() — dropping it re-enables App Nap.
+    #[allow(clippy::collection_is_never_read)]
+    let _activity = match platform::disable_app_nap() {
+        Ok(activity) => {
+            info!("App Nap prevention enabled");
+            Some(activity)
+        }
+        Err(e) => {
+            warn!("Failed to disable App Nap: {e}");
+            None
+        }
+    };
 
     // Build configuration
     let config = cli.into_config()?;

@@ -3,7 +3,7 @@
 use clap::{Parser, ValueEnum};
 use saorsa_node::config::{
     BootstrapCacheConfig, EvmNetworkConfig, IpVersion, NetworkMode, NodeConfig, PaymentConfig,
-    UpgradeChannel, UpgradeConfig,
+    UpgradeChannel,
 };
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -28,10 +28,6 @@ pub struct Cli {
     /// Bootstrap peer addresses.
     #[arg(long, short, env = "SAORSA_BOOTSTRAP")]
     pub bootstrap: Vec<SocketAddr>,
-
-    /// Enable automatic upgrades.
-    #[arg(long, env = "SAORSA_AUTO_UPGRADE")]
-    pub auto_upgrade: bool,
 
     /// Release channel for upgrades.
     #[arg(
@@ -96,6 +92,12 @@ pub struct Cli {
     /// Path to configuration file.
     #[arg(long, short)]
     pub config: Option<PathBuf>,
+
+    /// Exit cleanly on upgrade instead of spawning a new process.
+    /// Use when running under a service manager (systemd, launchd, Windows Service)
+    /// that will restart the process automatically.
+    #[arg(long)]
+    pub stop_on_upgrade: bool,
 
     /// Disable persistent bootstrap cache.
     #[arg(long)]
@@ -208,11 +210,8 @@ impl Cli {
         config.network_mode = self.network_mode.into();
 
         // Upgrade config
-        config.upgrade = UpgradeConfig {
-            enabled: self.auto_upgrade,
-            channel: self.upgrade_channel.into(),
-            ..config.upgrade
-        };
+        config.upgrade.channel = self.upgrade_channel.into();
+        config.upgrade.stop_on_upgrade = self.stop_on_upgrade;
 
         // Payment config (payment verification is always on)
         config.payment = PaymentConfig {

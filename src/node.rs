@@ -11,9 +11,11 @@ use crate::payment::metrics::QuotingMetricsTracker;
 use crate::payment::wallet::parse_rewards_address;
 use crate::payment::{EvmVerifierConfig, PaymentVerifier, PaymentVerifierConfig, QuoteGenerator};
 use crate::storage::{AntProtocol, LmdbStorage, LmdbStorageConfig};
-use crate::upgrade::{AutoApplyUpgrader, UpgradeMonitor, UpgradeResult};
-
+use crate::upgrade::{
+    upgrade_cache_dir, AutoApplyUpgrader, BinaryCache, ReleaseCache, UpgradeMonitor, UpgradeResult,
+};
 use evmlib::Network as EvmNetwork;
+use rand::Rng;
 use saorsa_core::identity::NodeIdentity;
 use saorsa_core::{
     BootstrapConfig as CoreBootstrapConfig, BootstrapManager,
@@ -21,6 +23,7 @@ use saorsa_core::{
     P2PNode,
 };
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
@@ -106,12 +109,10 @@ impl NodeBuilder {
             .await
             .map_err(|e| Error::Startup(format!("Failed to create P2P node: {e}")))?;
 
-        // Create upgrade monitor if enabled
-        let upgrade_monitor = if self.config.upgrade.enabled {
+        // Create upgrade monitor
+        let upgrade_monitor = {
             let node_id_seed = p2p_node.peer_id().as_bytes();
             Some(Self::build_upgrade_monitor(&self.config, node_id_seed))
-        } else {
-            None
         };
 
         // Initialize bootstrap cache manager if enabled
@@ -142,6 +143,7 @@ impl NodeBuilder {
             bootstrap_manager,
             ant_protocol,
             protocol_task: None,
+            upgrade_exit_code: Arc::new(AtomicI32::new(-1)),
         };
 
         Ok(node)
@@ -299,18 +301,26 @@ impl NodeBuilder {
         Ok(dirs)
     }
 
-    fn build_upgrade_monitor(config: &NodeConfig, node_id_seed: &[u8]) -> Arc<UpgradeMonitor> {
-        let monitor = UpgradeMonitor::new(
+    fn build_upgrade_monitor(config: &NodeConfig, node_id_seed: &[u8]) -> UpgradeMonitor {
+        let mut monitor = UpgradeMonitor::new(
             config.upgrade.github_repo.clone(),
             config.upgrade.channel,
             config.upgrade.check_interval_hours,
         );
 
-        if config.upgrade.staged_rollout_hours > 0 {
-            Arc::new(monitor.with_staged_rollout(node_id_seed, config.upgrade.staged_rollout_hours))
-        } else {
-            Arc::new(monitor)
+        if let Ok(cache_dir) = upgrade_cache_dir() {
+            monitor = monitor.with_release_cache(ReleaseCache::new(
+                cache_dir,
+                std::time::Duration::from_secs(3600),
+            ));
         }
+
+        if config.upgrade.staged_rollout_hours > 0 {
+            monitor =
+                monitor.with_staged_rollout(node_id_seed, config.upgrade.staged_rollout_hours);
+        }
+
+        monitor
     }
 
     /// Build the ANT protocol handler from config.
@@ -419,13 +429,15 @@ pub struct RunningNode {
     shutdown: CancellationToken,
     events_tx: NodeEventsSender,
     events_rx: Option<NodeEventsChannel>,
-    upgrade_monitor: Option<Arc<UpgradeMonitor>>,
+    upgrade_monitor: Option<UpgradeMonitor>,
     /// Bootstrap cache manager for persistent peer storage.
     bootstrap_manager: Option<BootstrapManager>,
     /// ANT protocol handler for chunk storage.
     ant_protocol: Option<Arc<AntProtocol>>,
     /// Protocol message routing background task.
     protocol_task: Option<JoinHandle<()>>,
+    /// Exit code requested by a successful upgrade (-1 = no upgrade exit pending).
+    upgrade_exit_code: Arc<AtomicI32>,
 }
 
 impl RunningNode {
@@ -453,6 +465,7 @@ impl RunningNode {
     /// # Errors
     ///
     /// Returns an error if the node encounters a fatal error.
+    #[allow(clippy::too_many_lines)]
     pub async fn run(&mut self) -> Result<()> {
         info!("Node runtime loop starting");
 
@@ -462,8 +475,18 @@ impl RunningNode {
             .await
             .map_err(|e| Error::Startup(format!("Failed to start P2P node: {e}")))?;
 
-        let addrs = self.p2p_node.listen_addrs().await;
-        info!(listen_addrs = ?addrs, "P2P node started");
+        let listen_addrs = self.p2p_node.listen_addrs().await;
+        info!(listen_addrs = ?listen_addrs, "P2P node started");
+
+        // Extract the actual bound port (config port may be 0 = auto-select)
+        let actual_port = listen_addrs
+            .first()
+            .and_then(MultiAddr::port)
+            .unwrap_or(self.config.port);
+        info!(
+            port = actual_port,
+            "Node is running on port: {}", actual_port
+        );
 
         // Emit started event
         if let Err(e) = self.events_tx.send(NodeEvent::Started) {
@@ -474,54 +497,102 @@ impl RunningNode {
         self.start_protocol_routing();
 
         // Start upgrade monitor if enabled
-        if let Some(ref monitor) = self.upgrade_monitor {
-            let monitor = Arc::clone(monitor);
+        if let Some(monitor) = self.upgrade_monitor.take() {
             let events_tx = self.events_tx.clone();
             let shutdown = self.shutdown.clone();
+            let stop_on_upgrade = self.config.upgrade.stop_on_upgrade;
+            let upgrade_exit_code = Arc::clone(&self.upgrade_exit_code);
 
             tokio::spawn(async move {
-                let upgrader = AutoApplyUpgrader::new();
+                let mut monitor = monitor;
+                let mut upgrader = AutoApplyUpgrader::new().with_stop_on_upgrade(stop_on_upgrade);
+                if let Ok(cache_dir) = upgrade_cache_dir() {
+                    upgrader = upgrader.with_binary_cache(BinaryCache::new(cache_dir));
+                }
+
+                // Add randomized jitter before the first upgrade check to prevent all nodes
+                // from hitting the GitHub API simultaneously when started together.
+                {
+                    let jitter_duration = jittered_interval(monitor.check_interval());
+                    let first_check_time = chrono::Utc::now()
+                        + chrono::Duration::from_std(jitter_duration).unwrap_or_else(|e| {
+                            warn!("chrono::Duration::from_std failed for jitter ({e}), defaulting to 1 minute");
+                            chrono::Duration::minutes(1)
+                        });
+                    info!(
+                        "First upgrade check scheduled for {} (jitter: {}s)",
+                        first_check_time.to_rfc3339(),
+                        jitter_duration.as_secs()
+                    );
+                    tokio::time::sleep(jitter_duration).await;
+                }
 
                 loop {
                     tokio::select! {
                         () = shutdown.cancelled() => {
                             break;
                         }
-                        result = monitor.check_for_updates() => {
-                            if let Ok(Some(upgrade_info)) = result {
-                                info!(
-                                    current_version = %upgrader.current_version(),
-                                    new_version = %upgrade_info.version,
-                                    "Upgrade available"
-                                );
+                        result = monitor.check_for_ready_upgrade() => {
+                            match result {
+                                Ok(Some(upgrade_info)) => {
+                                    info!(
+                                        current_version = %upgrader.current_version(),
+                                        new_version = %upgrade_info.version,
+                                        "Upgrade available"
+                                    );
 
-                                // Send notification event
-                                if let Err(e) = events_tx.send(NodeEvent::UpgradeAvailable {
-                                    version: upgrade_info.version.to_string(),
-                                }) {
-                                    warn!("Failed to send UpgradeAvailable event: {e}");
+                                    // Send notification event
+                                    if let Err(e) = events_tx.send(NodeEvent::UpgradeAvailable {
+                                        version: upgrade_info.version.to_string(),
+                                    }) {
+                                        warn!("Failed to send UpgradeAvailable event: {e}");
+                                    }
+
+                                    // Auto-apply the upgrade
+                                    info!("Starting auto-apply upgrade...");
+                                    match upgrader.apply_upgrade(&upgrade_info).await {
+                                        Ok(UpgradeResult::Success { version, exit_code }) => {
+                                            info!("Upgrade to {} successful, initiating graceful shutdown", version);
+                                            upgrade_exit_code.store(exit_code, Ordering::SeqCst);
+                                            shutdown.cancel();
+                                            break;
+                                        }
+                                        Ok(UpgradeResult::RolledBack { reason }) => {
+                                            warn!("Error during upgrade process: {}", reason);
+                                        }
+                                        Ok(UpgradeResult::NoUpgrade) => {
+                                            info!("Already running latest version");
+                                        }
+                                        Err(e) => {
+                                            error!("Error during upgrade process: {}", e);
+                                        }
+                                    }
                                 }
-
-                                // Auto-apply the upgrade
-                                info!("Starting auto-apply upgrade...");
-                                match upgrader.apply_upgrade(&upgrade_info).await {
-                                    Ok(UpgradeResult::Success { version }) => {
-                                        info!(version = %version, "Upgrade successful, process will restart");
-                                        // If we reach here, exec() failed or not supported
+                                Ok(None) => {
+                                    if let Some(remaining) = monitor.time_until_upgrade() {
+                                        info!(
+                                            "Upgrade pending, rollout delay remaining: {}m {}s",
+                                            remaining.as_secs() / 60,
+                                            remaining.as_secs() % 60
+                                        );
+                                    } else {
+                                        info!("No upgrade available");
                                     }
-                                    Ok(UpgradeResult::RolledBack { reason }) => {
-                                        warn!("Upgrade rolled back: {reason}");
-                                    }
-                                    Ok(UpgradeResult::NoUpgrade) => {
-                                        debug!("No upgrade needed");
-                                    }
-                                    Err(e) => {
-                                        error!("Critical upgrade error: {e}");
-                                    }
+                                }
+                                Err(e) => {
+                                    warn!("Error during upgrade process: {}", e);
                                 }
                             }
-                            // Wait for next check interval
-                            tokio::time::sleep(monitor.check_interval()).await;
+                            // Schedule next check with jitter to prevent fleet re-alignment
+                            let jittered_duration =
+                                jittered_interval(monitor.check_interval());
+                            let next_check = chrono::Utc::now()
+                                + chrono::Duration::from_std(jittered_duration).unwrap_or_else(|e| {
+                                    warn!("chrono::Duration::from_std failed for interval ({e}), defaulting to 1 hour");
+                                    chrono::Duration::hours(1)
+                                });
+                            info!("Next upgrade check scheduled for {}", next_check.to_rfc3339());
+                            tokio::time::sleep(jittered_duration).await;
                         }
                     }
                 }
@@ -557,6 +628,16 @@ impl RunningNode {
             warn!("Failed to send ShuttingDown event: {e}");
         }
         info!("Node shutdown complete");
+
+        // If an upgrade triggered the shutdown, exit with the requested code.
+        // This happens *after* all cleanup (P2P shutdown, log flush, etc.) so
+        // that destructors and async resources are properly torn down.
+        let exit_code = self.upgrade_exit_code.load(Ordering::SeqCst);
+        if exit_code >= 0 {
+            info!("Exiting with code {} for upgrade restart", exit_code);
+            std::process::exit(exit_code);
+        }
+
         Ok(())
     }
 
@@ -682,6 +763,18 @@ impl RunningNode {
     }
 }
 
+/// Apply ±5% jitter to a base interval to prevent thundering-herd behaviour
+/// when multiple nodes check for upgrades on the same schedule.
+fn jittered_interval(base: std::time::Duration) -> std::time::Duration {
+    let secs = base.as_secs();
+    let variance = secs / 20; // 5%
+    if variance == 0 {
+        return base;
+    }
+    let jitter = rand::thread_rng().gen_range(0..=variance * 2);
+    std::time::Duration::from_secs(secs.saturating_sub(variance) + jitter)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -692,7 +785,6 @@ mod tests {
     fn test_build_upgrade_monitor_staged_rollout_enabled() {
         let config = NodeConfig {
             upgrade: crate::config::UpgradeConfig {
-                enabled: true,
                 staged_rollout_hours: 24,
                 ..Default::default()
             },
@@ -708,7 +800,6 @@ mod tests {
     fn test_build_upgrade_monitor_staged_rollout_disabled() {
         let config = NodeConfig {
             upgrade: crate::config::UpgradeConfig {
-                enabled: true,
                 staged_rollout_hours: 0,
                 ..Default::default()
             },

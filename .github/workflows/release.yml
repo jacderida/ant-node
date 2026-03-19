@@ -249,8 +249,8 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ needs.validate.outputs.version }}"
-          # Remove 'v' prefix and convert to MSI format (x.y.z.0)
-          $version = $tag -replace '^v', ''
+          # Remove 'v' prefix and strip any pre-release suffix (e.g., -rc.1, -beta.2)
+          $version = $tag -replace '^v', '' -replace '-.*$', ''
           # Ensure 4-part version for MSI (add .0 if needed)
           $parts = $version.Split('.')
           while ($parts.Length -lt 4) {

@@ -35,7 +35,7 @@ write_files:
         *) echo "Unsupported architecture: $${ARCH}"; exit 1 ;;
       esac
 
-      ARCHIVE_URL="https://github.com/dirvine/saorsa-node/releases/download/v$${SAORSA_VERSION}/saorsa-node-cli-$${PLATFORM}.tar.gz"
+      ARCHIVE_URL="https://github.com/saorsa-labs/saorsa-node/releases/download/v$${SAORSA_VERSION}/saorsa-node-cli-$${PLATFORM}.tar.gz"
       SIG_URL="$${ARCHIVE_URL}.sig"
       BINARY_PATH="/usr/local/bin/saorsa-node"
       KEYGEN_PATH="/usr/local/bin/saorsa-keygen"

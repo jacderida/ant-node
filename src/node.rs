@@ -481,7 +481,7 @@ impl RunningNode {
         // Extract the actual bound port (config port may be 0 = auto-select)
         let actual_port = listen_addrs
             .first()
-            .and_then(|addr| addr.port())
+            .and_then(MultiAddr::port)
             .unwrap_or(self.config.port);
         info!(
             port = actual_port,

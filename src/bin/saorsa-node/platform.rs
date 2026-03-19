@@ -30,7 +30,7 @@ pub fn disable_app_nap() -> Result<AppNapActivity, String> {
     // wrappers. `processInfo` returns a shared singleton and
     // `beginActivityWithOptions:reason:` is thread-safe.
     unsafe {
-        use objc2::msg_send_id;
+        use objc2::msg_send;
         use objc2_foundation::{NSProcessInfo, NSString};
 
         let process_info = NSProcessInfo::processInfo();
@@ -42,7 +42,7 @@ pub fn disable_app_nap() -> Result<AppNapActivity, String> {
         let reason =
             NSString::from_str("saorsa-node: P2P network daemon performing background operations");
 
-        let activity: AppNapActivity = msg_send_id![
+        let activity: AppNapActivity = msg_send![
             &process_info,
             beginActivityWithOptions: options,
             reason: &*reason,
@@ -54,6 +54,7 @@ pub fn disable_app_nap() -> Result<AppNapActivity, String> {
 
 /// No-op on non-macOS platforms.
 #[cfg(not(target_os = "macos"))]
+#[allow(clippy::unnecessary_wraps)] // signature must match macOS variant for caller compatibility
 pub fn disable_app_nap() -> Result<(), String> {
     Ok(())
 }

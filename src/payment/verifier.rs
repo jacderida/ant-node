@@ -13,8 +13,6 @@ use crate::payment::single_node::REQUIRED_QUOTES;
 use ant_evm::merkle_payments::OnChainPaymentInfo;
 use ant_evm::{ProofOfPayment, RewardsAddress};
 use evmlib::contract::merkle_payment_vault;
-use evmlib::contract::payment_vault::error::Error as PaymentVaultError;
-use evmlib::contract::payment_vault::verify_data_payment;
 use evmlib::merkle_batch_payment::PoolHash;
 use evmlib::Network as EvmNetwork;
 use lru::LruCache;

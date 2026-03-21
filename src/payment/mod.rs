@@ -50,8 +50,14 @@ pub mod wallet;
 pub use cache::{CacheStats, VerifiedCache};
 pub use metrics::QuotingMetricsTracker;
 pub use pricing::calculate_price;
-pub use proof::{deserialize_proof, PaymentProof};
-pub use quote::{verify_quote_content, wire_ml_dsa_signer, QuoteGenerator, XorName};
+pub use proof::{
+    deserialize_merkle_proof, deserialize_proof, detect_proof_type, serialize_merkle_proof,
+    serialize_single_node_proof, PaymentProof, ProofType,
+};
+pub use quote::{
+    verify_merkle_candidate_signature, verify_quote_content, wire_ml_dsa_signer, QuoteGenerator,
+    XorName,
+};
 pub use single_node::SingleNodePayment;
 pub use verifier::{EvmVerifierConfig, PaymentStatus, PaymentVerifier, PaymentVerifierConfig};
 pub use wallet::{is_valid_address, parse_rewards_address, WalletConfig};

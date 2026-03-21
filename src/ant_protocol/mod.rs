@@ -48,6 +48,8 @@ pub mod chunk;
 // Re-export chunk types for convenience
 pub use chunk::{
     ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkMessageBody, ChunkPutRequest,
-    ChunkPutResponse, ChunkQuoteRequest, ChunkQuoteResponse, ProtocolError, XorName,
-    CHUNK_PROTOCOL_ID, DATA_TYPE_CHUNK, MAX_CHUNK_SIZE, MAX_WIRE_MESSAGE_SIZE, PROTOCOL_VERSION,
+    ChunkPutResponse, ChunkQuoteRequest, ChunkQuoteResponse, MerkleCandidateQuoteRequest,
+    MerkleCandidateQuoteResponse, ProtocolError, XorName, CHUNK_PROTOCOL_ID, DATA_TYPE_CHUNK,
+    MAX_CHUNK_SIZE, MAX_WIRE_MESSAGE_SIZE, PROOF_TAG_MERKLE, PROOF_TAG_SINGLE_NODE,
+    PROTOCOL_VERSION,
 };

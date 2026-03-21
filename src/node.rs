@@ -371,19 +371,21 @@ impl NodeBuilder {
         let metrics_tracker = QuotingMetricsTracker::new(max_records, 0);
         let mut quote_generator = QuoteGenerator::new(rewards_address, metrics_tracker);
 
-        // Wire ML-DSA-65 signing from node identity
+        // Wire ML-DSA-65 signing from node identity.
+        // This same signer is used for both regular quotes and merkle candidate quotes.
         crate::payment::wire_ml_dsa_signer(&mut quote_generator, identity)?;
 
-        info!(
-            "ANT protocol handler initialized with ML-DSA-65 signing (protocol={})",
-            CHUNK_PROTOCOL_ID
-        );
-
-        Ok(AntProtocol::new(
+        let protocol = AntProtocol::new(
             Arc::new(storage),
             Arc::new(payment_verifier),
             Arc::new(quote_generator),
-        ))
+        );
+
+        info!(
+            "ANT protocol handler initialized with ML-DSA-65 signing (protocol={CHUNK_PROTOCOL_ID})"
+        );
+
+        Ok(protocol)
     }
 
     /// Build the bootstrap cache manager from config.

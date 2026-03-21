@@ -28,8 +28,9 @@
 
 use crate::ant_protocol::{
     ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkMessageBody, ChunkPutRequest,
-    ChunkPutResponse, ChunkQuoteRequest, ChunkQuoteResponse, ProtocolError, CHUNK_PROTOCOL_ID,
-    DATA_TYPE_CHUNK, MAX_CHUNK_SIZE,
+    ChunkPutResponse, ChunkQuoteRequest, ChunkQuoteResponse, MerkleCandidateQuoteRequest,
+    MerkleCandidateQuoteResponse, ProtocolError, CHUNK_PROTOCOL_ID, DATA_TYPE_CHUNK,
+    MAX_CHUNK_SIZE,
 };
 use crate::client::compute_address;
 use crate::error::{Error, Result};
@@ -49,6 +50,7 @@ pub struct AntProtocol {
     /// Payment verifier for checking payments.
     payment_verifier: Arc<PaymentVerifier>,
     /// Quote generator for creating storage quotes.
+    /// Also handles merkle candidate quote signing via ML-DSA-65.
     quote_generator: Arc<QuoteGenerator>,
 }
 
@@ -108,10 +110,16 @@ impl AntProtocol {
             ChunkMessageBody::QuoteRequest(ref req) => {
                 ChunkMessageBody::QuoteResponse(self.handle_quote(req))
             }
+            ChunkMessageBody::MerkleCandidateQuoteRequest(ref req) => {
+                ChunkMessageBody::MerkleCandidateQuoteResponse(
+                    self.handle_merkle_candidate_quote(req),
+                )
+            }
             // Response messages shouldn't be received as requests
             ChunkMessageBody::PutResponse(_)
             | ChunkMessageBody::GetResponse(_)
-            | ChunkMessageBody::QuoteResponse(_) => {
+            | ChunkMessageBody::QuoteResponse(_)
+            | ChunkMessageBody::MerkleCandidateQuoteResponse(_) => {
                 let error = ProtocolError::Internal("Unexpected response message".to_string());
                 ChunkMessageBody::PutResponse(ChunkPutResponse::Error(error))
             }
@@ -276,6 +284,50 @@ impl AntProtocol {
                 }
             }
             Err(e) => ChunkQuoteResponse::Error(ProtocolError::QuoteFailed(e.to_string())),
+        }
+    }
+
+    /// Handle a merkle candidate quote request.
+    fn handle_merkle_candidate_quote(
+        &self,
+        request: &MerkleCandidateQuoteRequest,
+    ) -> MerkleCandidateQuoteResponse {
+        let addr_hex = hex::encode(request.address);
+        let data_size = request.data_size;
+        debug!(
+            "Handling merkle candidate quote request for {addr_hex} (size: {data_size}, ts: {})",
+            request.merkle_payment_timestamp
+        );
+
+        let Ok(data_size_usize) = usize::try_from(request.data_size) else {
+            return MerkleCandidateQuoteResponse::Error(ProtocolError::QuoteFailed(format!(
+                "data_size {} overflows usize",
+                request.data_size
+            )));
+        };
+        if data_size_usize > MAX_CHUNK_SIZE {
+            return MerkleCandidateQuoteResponse::Error(ProtocolError::ChunkTooLarge {
+                size: data_size_usize,
+                max_size: MAX_CHUNK_SIZE,
+            });
+        }
+
+        match self.quote_generator.create_merkle_candidate_quote(
+            data_size_usize,
+            request.data_type,
+            request.merkle_payment_timestamp,
+        ) {
+            Ok(candidate_node) => match rmp_serde::to_vec(&candidate_node) {
+                Ok(bytes) => MerkleCandidateQuoteResponse::Success {
+                    candidate_node: bytes,
+                },
+                Err(e) => MerkleCandidateQuoteResponse::Error(ProtocolError::QuoteFailed(format!(
+                    "Failed to serialize merkle candidate node: {e}"
+                ))),
+            },
+            Err(e) => {
+                MerkleCandidateQuoteResponse::Error(ProtocolError::QuoteFailed(e.to_string()))
+            }
         }
     }
 
@@ -719,6 +771,60 @@ mod tests {
         let (protocol, _temp) = create_test_protocol().await;
         let stats = protocol.storage_stats();
         assert_eq!(stats.chunks_stored, 0);
+    }
+
+    #[tokio::test]
+    async fn test_merkle_candidate_quote_request() {
+        use crate::payment::quote::verify_merkle_candidate_signature;
+        use ant_evm::merkle_payments::MerklePaymentCandidateNode;
+
+        // create_test_protocol already wires ML-DSA-65 signing
+        let (protocol, _temp) = create_test_protocol().await;
+
+        let address = [0x77; 32];
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_secs();
+
+        let request = MerkleCandidateQuoteRequest {
+            address,
+            data_type: DATA_TYPE_CHUNK,
+            data_size: 4096,
+            merkle_payment_timestamp: timestamp,
+        };
+        let msg = ChunkMessage {
+            request_id: 600,
+            body: ChunkMessageBody::MerkleCandidateQuoteRequest(request),
+        };
+        let msg_bytes = msg.encode().expect("encode request");
+
+        let response_bytes = protocol
+            .handle_message(&msg_bytes)
+            .await
+            .expect("handle merkle candidate quote");
+        let response = ChunkMessage::decode(&response_bytes).expect("decode response");
+
+        assert_eq!(response.request_id, 600);
+        match response.body {
+            ChunkMessageBody::MerkleCandidateQuoteResponse(
+                MerkleCandidateQuoteResponse::Success { candidate_node },
+            ) => {
+                let candidate: MerklePaymentCandidateNode =
+                    rmp_serde::from_slice(&candidate_node).expect("deserialize candidate node");
+
+                // Verify ML-DSA-65 signature
+                assert!(
+                    verify_merkle_candidate_signature(&candidate),
+                    "ML-DSA-65 candidate signature must be valid"
+                );
+
+                assert_eq!(candidate.merkle_payment_timestamp, timestamp);
+                assert_eq!(candidate.quoting_metrics.data_size, 4096);
+                assert_eq!(candidate.quoting_metrics.data_type, DATA_TYPE_CHUNK);
+            }
+            other => panic!("expected MerkleCandidateQuoteResponse::Success, got: {other:?}"),
+        }
     }
 
     #[tokio::test]

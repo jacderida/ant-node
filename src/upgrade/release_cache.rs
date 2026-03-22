@@ -1,6 +1,6 @@
 //! Disk cache for GitHub release metadata.
 //!
-//! When multiple saorsa-node instances run on the same machine, each would
+//! When multiple ant-node instances run on the same machine, each would
 //! otherwise poll the GitHub API independently.  `ReleaseCache` stores the
 //! most recent API response on disk with a configurable TTL so that only the
 //! first node to hit a stale cache actually contacts GitHub.
@@ -280,7 +280,7 @@ mod tests {
             body: "Notes".to_string(),
             prerelease: false,
             assets: vec![Asset {
-                name: "saorsa-node-x86_64-linux.tar.gz".to_string(),
+                name: "ant-node-x86_64-linux.tar.gz".to_string(),
                 browser_download_url: "https://example.com/bin".to_string(),
             }],
         }]
@@ -297,7 +297,7 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].tag_name, "v1.2.0");
         assert_eq!(loaded[0].assets.len(), 1);
-        assert_eq!(loaded[0].assets[0].name, "saorsa-node-x86_64-linux.tar.gz");
+        assert_eq!(loaded[0].assets[0].name, "ant-node-x86_64-linux.tar.gz");
     }
 
     #[test]

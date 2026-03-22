@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Protocol identifier for chunk operations.
-pub const CHUNK_PROTOCOL_ID: &str = "saorsa/ant/chunk/v1";
+pub const CHUNK_PROTOCOL_ID: &str = "autonomi/ant/chunk/v1";
 
 /// Current protocol version.
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -519,7 +519,7 @@ mod tests {
 
     #[test]
     fn test_constants() {
-        assert_eq!(CHUNK_PROTOCOL_ID, "saorsa/ant/chunk/v1");
+        assert_eq!(CHUNK_PROTOCOL_ID, "autonomi/ant/chunk/v1");
         assert_eq!(PROTOCOL_VERSION, 1);
         assert_eq!(MAX_CHUNK_SIZE, 4 * 1024 * 1024);
         assert_eq!(DATA_TYPE_CHUNK, 0);

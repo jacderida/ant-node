@@ -1,6 +1,6 @@
-//! # saorsa-node
+//! # ant-node
 //!
-//! A pure quantum-proof network node for the Saorsa decentralized network.
+//! A pure quantum-proof network node for the Autonomi decentralized network.
 //!
 //! This crate provides a thin wrapper around `saorsa-core` that adds:
 //! - Auto-upgrade system with ML-DSA signature verification
@@ -9,7 +9,7 @@
 //!
 //! ## Architecture
 //!
-//! `saorsa-node` delegates all core functionality to `saorsa-core`:
+//! `ant-node` delegates all core functionality to `saorsa-core`:
 //! - Networking via `P2PNode`
 //! - DHT via `AdaptiveDHT`
 //! - Trust via `TrustEngine`
@@ -23,7 +23,7 @@
 //! ## Example
 //!
 //! ```rust,no_run
-//! use saorsa_node::{NodeBuilder, NodeConfig};
+//! use ant_node::{NodeBuilder, NodeConfig};
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -66,8 +66,8 @@ pub use node::{NodeBuilder, RunningNode};
 pub use payment::{PaymentStatus, PaymentVerifier, PaymentVerifierConfig};
 pub use storage::{AntProtocol, LmdbStorage, LmdbStorageConfig};
 
-/// Re-exports from `saorsa-core` so downstream crates (e.g. `saorsa-client`)
-/// can depend on `saorsa-node` alone without a direct `saorsa-core` dependency.
+/// Re-exports from `saorsa-core` so downstream crates (e.g. `ant-client`)
+/// can depend on `ant-node` alone without a direct `saorsa-core` dependency.
 pub mod core {
     pub use saorsa_core::identity::{NodeIdentity, PeerId};
     pub use saorsa_core::{

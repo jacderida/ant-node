@@ -1,21 +1,21 @@
 #!/bin/bash
-# Deploy saorsa-node to all testnet droplets
+# Deploy ant-node to all testnet droplets
 # Run from local machine with SSH access to droplets
 
 set -e
 
 # Droplet IPs
 WORKERS=(
-    "142.93.52.129"   # saorsa-worker-1
-    "24.199.82.114"   # saorsa-worker-2
-    "192.34.62.192"   # saorsa-worker-3
-    "159.223.131.196" # saorsa-worker-4
+    "142.93.52.129"   # ant-worker-1
+    "24.199.82.114"   # ant-worker-2
+    "192.34.62.192"   # ant-worker-3
+    "159.223.131.196" # ant-worker-4
 )
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BINARY_URL="https://github.com/saorsa-labs/saorsa-node/releases/download/v0.2.0/saorsa-node-cli-linux-x64.tar.gz"
+BINARY_URL="https://github.com/WithAutonomi/ant-node/releases/download/v0.2.0/ant-node-cli-linux-x64.tar.gz"
 
-echo "=== Saorsa Testnet Deployment ==="
+echo "=== Autonomi Testnet Deployment ==="
 echo "Deploying to ${#WORKERS[@]} droplets"
 echo ""
 
@@ -23,7 +23,7 @@ for i in "${!WORKERS[@]}"; do
     IP="${WORKERS[$i]}"
     WORKER_NUM=$((i + 1))
 
-    echo "=== Deploying to saorsa-worker-${WORKER_NUM} ($IP) ==="
+    echo "=== Deploying to ant-worker-${WORKER_NUM} ($IP) ==="
 
     # Copy scripts
     echo "Copying scripts..."
@@ -38,16 +38,16 @@ for i in "${!WORKERS[@]}"; do
     ssh -o StrictHostKeyChecking=no "root@${IP}" "chmod +x /usr/local/bin/*.sh"
 
     # Download and install binary
-    echo "Downloading and installing saorsa-node..."
+    echo "Downloading and installing ant-node..."
     ssh -o StrictHostKeyChecking=no "root@${IP}" "
         cd /tmp
-        curl -sL '${BINARY_URL}' -o saorsa-node.tar.gz
-        tar xzf saorsa-node.tar.gz
-        mv saorsa-node /usr/local/bin/
-        mv saorsa-keygen /usr/local/bin/ 2>/dev/null || true
-        chmod +x /usr/local/bin/saorsa-node
-        rm -f saorsa-node.tar.gz
-        /usr/local/bin/saorsa-node --version
+        curl -sL '${BINARY_URL}' -o ant-node.tar.gz
+        tar xzf ant-node.tar.gz
+        mv ant-node /usr/local/bin/
+        mv ant-keygen /usr/local/bin/ 2>/dev/null || true
+        chmod +x /usr/local/bin/ant-node
+        rm -f ant-node.tar.gz
+        /usr/local/bin/ant-node --version
     "
 
     # Configure system limits

@@ -1,9 +1,9 @@
 #!/bin/bash
-# Saorsa Network Validator - Checks health of entire testnet
+# Autonomi Network Validator - Checks health of entire testnet
 # Usage: ./validate-network.sh [worker_ips_file]
 set -euo pipefail
 
-WORKERS_FILE="${1:-/etc/saorsa/workers.json}"
+WORKERS_FILE="${1:-/etc/ant/workers.json}"
 NODES_PER_WORKER="${NODES_PER_WORKER:-100}"
 METRICS_BASE_PORT="${METRICS_BASE_PORT:-9100}"
 
@@ -12,7 +12,7 @@ MIN_PEERS=3
 MIN_DHT_SIZE=20
 HEALTH_THRESHOLD=0.99  # 99% nodes healthy
 
-echo "=== Saorsa Testnet Validator ==="
+echo "=== Autonomi Testnet Validator ==="
 echo "Nodes per worker: $NODES_PER_WORKER"
 echo "Min peers: $MIN_PEERS"
 echo "Min DHT size: $MIN_DHT_SIZE"

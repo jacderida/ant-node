@@ -1,10 +1,10 @@
-//! saorsa-devnet CLI entry point.
+//! ant-devnet CLI entry point.
 
 mod cli;
 
+use ant_node::devnet::{Devnet, DevnetConfig, DevnetEvmInfo, DevnetManifest};
 use clap::Parser;
 use cli::Cli;
-use saorsa_node::devnet::{Devnet, DevnetConfig, DevnetEvmInfo, DevnetManifest};
 use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -22,7 +22,7 @@ async fn main() -> color_eyre::Result<()> {
         .with(filter)
         .init();
 
-    info!("saorsa-devnet v{}", env!("CARGO_PKG_VERSION"));
+    info!("ant-devnet v{}", env!("CARGO_PKG_VERSION"));
 
     let mut config =
         cli.preset

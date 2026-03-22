@@ -1,4 +1,4 @@
-//! Configuration for saorsa-node.
+//! Configuration for ant-node.
 
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
@@ -265,7 +265,7 @@ impl NodeConfig {
     ///
     /// This is a convenience method for setting up a testnet node with
     /// relaxed anti-Sybil protection, suitable for single-provider deployments.
-    /// Includes default bootstrap nodes for the Saorsa testnet.
+    /// Includes default bootstrap nodes for the Autonomi testnet.
     #[must_use]
     pub fn testnet() -> Self {
         Self {
@@ -335,14 +335,14 @@ impl Default for UpgradeConfig {
 }
 
 fn default_github_repo() -> String {
-    "saorsa-labs/saorsa-node".to_string()
+    "WithAutonomi/ant-node".to_string()
 }
 
-/// Default base directory for node data (platform data dir for "saorsa").
+/// Default base directory for node data (platform data dir for "ant").
 #[must_use]
 pub fn default_root_dir() -> PathBuf {
-    directories::ProjectDirs::from("", "", "saorsa").map_or_else(
-        || PathBuf::from(".saorsa"),
+    directories::ProjectDirs::from("", "", "ant").map_or_else(
+        || PathBuf::from(".ant"),
         |dirs| dirs.data_dir().to_path_buf(),
     )
 }
@@ -484,14 +484,14 @@ const fn default_storage_verify_on_read() -> bool {
 
 /// Default testnet bootstrap nodes.
 ///
-/// These are well-known bootstrap nodes for the Saorsa testnet.
-/// - saorsa-bootstrap-1 (NYC): 165.22.4.178:12000
-/// - saorsa-bootstrap-2 (SFO): 164.92.111.156:12000
+/// These are well-known bootstrap nodes for the Autonomi testnet.
+/// - ant-bootstrap-1 (NYC): 165.22.4.178:12000
+/// - ant-bootstrap-2 (SFO): 164.92.111.156:12000
 fn default_testnet_bootstrap() -> Vec<SocketAddr> {
     vec![
-        // saorsa-bootstrap-1 (Digital Ocean NYC1)
+        // ant-bootstrap-1 (Digital Ocean NYC1)
         SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(165, 22, 4, 178), 12000)),
-        // saorsa-bootstrap-2 (Digital Ocean SFO3)
+        // ant-bootstrap-2 (Digital Ocean SFO3)
         SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(164, 92, 111, 156), 12000)),
     ]
 }

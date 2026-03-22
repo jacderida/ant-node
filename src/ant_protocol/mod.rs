@@ -1,7 +1,7 @@
-//! ANT protocol implementation for the saorsa network.
+//! ANT protocol implementation for the Autonomi network.
 //!
 //! This module implements the wire protocol for storing and retrieving
-//! data on the saorsa network, compatible with the autonomi network protocol.
+//! data on the Autonomi network.
 //!
 //! # Data Types
 //!
@@ -31,7 +31,7 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use saorsa_node::ant_protocol::{ChunkMessage, ChunkPutRequest, ChunkGetRequest};
+//! use ant_node::ant_protocol::{ChunkMessage, ChunkPutRequest, ChunkGetRequest};
 //!
 //! // Create a PUT request
 //! let address = compute_address(&data);

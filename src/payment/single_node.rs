@@ -1,4 +1,4 @@
-//! `SingleNode` payment mode implementation for saorsa-node.
+//! `SingleNode` payment mode implementation for ant-node.
 //!
 //! This module implements the `SingleNode` payment strategy from autonomi:
 //! - Client gets 5 quotes from network (`CLOSE_GROUP_SIZE`)

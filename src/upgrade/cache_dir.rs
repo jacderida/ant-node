@@ -1,6 +1,6 @@
 //! Shared cache directory for upgrade artifacts.
 //!
-//! Multiple saorsa-node instances on the same machine share a single cache
+//! Multiple ant-node instances on the same machine share a single cache
 //! directory so that release metadata and downloaded binaries are fetched only
 //! once, reducing GitHub API calls and bandwidth.
 
@@ -11,7 +11,7 @@ use std::path::PathBuf;
 /// Return the shared upgrade cache directory, creating it on demand.
 ///
 /// The path is `{data_dir}/upgrades/` where `data_dir` comes from
-/// `directories::ProjectDirs` (e.g. `~/.local/share/saorsa/upgrades/` on
+/// `directories::ProjectDirs` (e.g. `~/.local/share/ant/upgrades/` on
 /// Linux).
 ///
 /// # Errors
@@ -19,7 +19,7 @@ use std::path::PathBuf;
 /// Returns an error if the platform data directory cannot be determined or
 /// the directory cannot be created.
 pub fn upgrade_cache_dir() -> Result<PathBuf> {
-    let project_dirs = directories::ProjectDirs::from("", "", "saorsa").ok_or_else(|| {
+    let project_dirs = directories::ProjectDirs::from("", "", "ant").ok_or_else(|| {
         Error::Upgrade("Cannot determine platform data directory for upgrade cache".to_string())
     })?;
 

@@ -1,7 +1,7 @@
 //! Data type definitions for chunk storage.
 //!
 //! This module provides the core data types for content-addressed chunk storage
-//! on the saorsa network. Chunks are immutable, content-addressed blobs where
+//! on the Autonomi network. Chunks are immutable, content-addressed blobs where
 //! the address is the BLAKE3 hash of the content.
 
 use bytes::Bytes;
@@ -41,7 +41,7 @@ pub type XorName = [u8; 32];
 
 /// A chunk of data with its content-addressed identifier.
 ///
-/// Chunks are the fundamental storage unit in saorsa. They are:
+/// Chunks are the fundamental storage unit in Autonomi. They are:
 /// - **Immutable**: Content cannot be changed after storage
 /// - **Content-addressed**: Address = BLAKE3(content)
 /// - **Paid**: Storage requires EVM payment on Arbitrum

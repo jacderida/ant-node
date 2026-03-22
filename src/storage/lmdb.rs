@@ -36,7 +36,7 @@ pub struct LmdbStorageConfig {
 impl Default for LmdbStorageConfig {
     fn default() -> Self {
         Self {
-            root_dir: PathBuf::from(".saorsa/chunks"),
+            root_dir: PathBuf::from(".ant/chunks"),
             verify_on_read: true,
             max_chunks: 0,
             max_map_size: 0,

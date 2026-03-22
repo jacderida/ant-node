@@ -1,4 +1,4 @@
-# Saorsa 500-Node Testnet Infrastructure
+# Autonomi 500-Node Testnet Infrastructure
 # Deploys 5 worker droplets (100 nodes each) + 1 monitoring server
 
 terraform {
@@ -21,8 +21,8 @@ variable "ssh_key_fingerprint" {
   type        = string
 }
 
-variable "saorsa_version" {
-  description = "Version of saorsa-node to deploy"
+variable "ant_version" {
+  description = "Version of ant-node to deploy"
   type        = string
   default     = "0.1.0"
 }
@@ -55,19 +55,19 @@ locals {
 resource "digitalocean_droplet" "worker" {
   for_each = local.worker_regions
 
-  name     = "saorsa-worker-${each.key}"
+  name     = "ant-worker-${each.key}"
   region   = each.key
   size     = "s-8vcpu-32gb"  # 8 vCPU, 32GB RAM
   image    = "ubuntu-24-04-x64"
   ssh_keys = [var.ssh_key_fingerprint]
 
-  tags = ["saorsa", "testnet", "worker"]
+  tags = ["ant", "testnet", "worker"]
 
   user_data = templatefile("${path.module}/cloud-init/worker.yml", {
     region           = each.key
     nodes_per_worker = local.nodes_per_worker
     metrics_base_port = local.metrics_base_port
-    saorsa_version   = var.saorsa_version
+    ant_version   = var.ant_version
     bootstrap_nodes  = join(",", var.bootstrap_nodes)
   })
 
@@ -78,13 +78,13 @@ resource "digitalocean_droplet" "worker" {
 
 # Monitoring droplet
 resource "digitalocean_droplet" "monitoring" {
-  name     = "saorsa-monitoring"
+  name     = "ant-monitoring"
   region   = "nyc1"
   size     = "s-4vcpu-8gb"  # 4 vCPU, 8GB RAM
   image    = "ubuntu-24-04-x64"
   ssh_keys = [var.ssh_key_fingerprint]
 
-  tags = ["saorsa", "testnet", "monitoring"]
+  tags = ["ant", "testnet", "monitoring"]
 
   user_data = templatefile("${path.module}/cloud-init/monitoring.yml", {
     worker_ips = jsonencode([for w in digitalocean_droplet.worker : w.ipv4_address])
@@ -97,7 +97,7 @@ resource "digitalocean_droplet" "monitoring" {
 
 # Firewall for workers
 resource "digitalocean_firewall" "worker" {
-  name = "saorsa-worker-firewall"
+  name = "ant-worker-firewall"
 
   droplet_ids = [for w in digitalocean_droplet.worker : w.id]
 
@@ -138,7 +138,7 @@ resource "digitalocean_firewall" "worker" {
 
 # Firewall for monitoring
 resource "digitalocean_firewall" "monitoring" {
-  name = "saorsa-monitoring-firewall"
+  name = "ant-monitoring-firewall"
 
   droplet_ids = [digitalocean_droplet.monitoring.id]
 

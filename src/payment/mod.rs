@@ -1,4 +1,4 @@
-//! Payment verification system for saorsa-node.
+//! Payment verification system for ant-node.
 //!
 //! This module implements the payment verification strategy:
 //! 1. Check LRU cache for already-verified data

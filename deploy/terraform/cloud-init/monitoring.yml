@@ -1,5 +1,5 @@
 #cloud-config
-# Saorsa Monitoring Server - Prometheus + Grafana
+# Autonomi Monitoring Server - Prometheus + Grafana
 
 package_update: true
 package_upgrade: true
@@ -12,7 +12,7 @@ packages:
   - docker-compose
 
 write_files:
-  - path: /etc/saorsa/workers.json
+  - path: /etc/ant/workers.json
     permissions: '0644'
     content: |
       ${worker_ips}
@@ -48,7 +48,7 @@ write_files:
             - ./grafana/dashboards:/var/lib/grafana/dashboards
             - grafana_data:/var/lib/grafana
           environment:
-            - GF_SECURITY_ADMIN_PASSWORD=saorsa-testnet
+            - GF_SECURITY_ADMIN_PASSWORD=ant-testnet
             - GF_USERS_ALLOW_SIGN_UP=false
             - GF_INSTALL_PLUGINS=grafana-piechart-panel
           restart: always
@@ -82,11 +82,11 @@ write_files:
         # Worker nodes - dynamically generated
         # WORKER_SCRAPE_CONFIGS_PLACEHOLDER
 
-  - path: /opt/monitoring/prometheus/rules/saorsa-alerts.yml
+  - path: /opt/monitoring/prometheus/rules/ant-alerts.yml
     permissions: '0644'
     content: |
       groups:
-        - name: saorsa-alerts
+        - name: ant-alerts
           rules:
             - alert: NodeDown
               expr: up == 0
@@ -94,7 +94,7 @@ write_files:
               labels:
                 severity: critical
               annotations:
-                summary: "Saorsa node down"
+                summary: "Autonomi node down"
                 description: "Node {{ $labels.instance }} has been down for more than 2 minutes"
 
             - alert: LowPeerCount
@@ -141,7 +141,7 @@ write_files:
     content: |
       apiVersion: 1
       providers:
-        - name: 'Saorsa Testnet'
+        - name: 'Autonomi Testnet'
           orgId: 1
           folder: ''
           type: file
@@ -156,7 +156,7 @@ write_files:
       #!/bin/bash
       set -euo pipefail
 
-      WORKERS_JSON="/etc/saorsa/workers.json"
+      WORKERS_JSON="/etc/ant/workers.json"
       PROMETHEUS_CONFIG="/opt/monitoring/prometheus/prometheus.yml"
       NODES_PER_WORKER=${nodes_per_worker}
       METRICS_BASE_PORT=${metrics_base_port}
@@ -180,7 +180,7 @@ write_files:
         done
 
         SCRAPE_CONFIGS="$SCRAPE_CONFIGS
-        - job_name: 'saorsa-worker-$ip'
+        - job_name: 'ant-worker-$ip'
           static_configs:
             - targets: [$TARGETS]
               labels:
@@ -211,9 +211,9 @@ runcmd:
   - /usr/local/bin/generate-prometheus-config.sh
 
   # Copy dashboard (will be provided separately)
-  # - curl -o /opt/monitoring/grafana/dashboards/saorsa-testnet.json <dashboard-url>
+  # - curl -o /opt/monitoring/grafana/dashboards/ant-testnet.json <dashboard-url>
 
   # Start monitoring stack
   - cd /opt/monitoring && docker-compose up -d
 
-final_message: "Saorsa monitoring server ready - Grafana at :3000, Prometheus at :9090"
+final_message: "Autonomi monitoring server ready - Grafana at :3000, Prometheus at :9090"

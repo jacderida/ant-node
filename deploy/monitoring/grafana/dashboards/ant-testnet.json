@@ -430,12 +430,12 @@
   "refresh": "30s",
   "schemaVersion": 38,
   "style": "dark",
-  "tags": ["saorsa", "testnet", "p2p"],
+  "tags": ["ant", "testnet", "p2p"],
   "templating": { "list": [] },
   "time": { "from": "now-1h", "to": "now" },
   "timepicker": {},
   "timezone": "browser",
-  "title": "Saorsa Testnet Dashboard",
-  "uid": "saorsa-testnet",
+  "title": "Autonomi Testnet Dashboard",
+  "uid": "ant-testnet",
   "version": 1
 }

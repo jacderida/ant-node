@@ -1,4 +1,4 @@
-//! Build script for saorsa-node.
+//! Build script for ant-node.
 
 use std::process::Command;
 
@@ -19,5 +19,5 @@ fn main() {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map_or_else(|| "unknown".to_string(), |s| s.trim().to_string());
 
-    println!("cargo:rustc-env=SAORSA_GIT_COMMIT={commit}");
+    println!("cargo:rustc-env=ANT_GIT_COMMIT={commit}");
 }

@@ -260,7 +260,7 @@ impl Upgrader {
             .ok_or_else(|| Error::Upgrade("Current binary has no parent directory".to_string()))?;
 
         tempfile::Builder::new()
-            .prefix("saorsa-upgrade-")
+            .prefix("ant-upgrade-")
             .tempdir_in(target_dir)
             .map_err(|e| Error::Upgrade(format!("Failed to create temp dir: {e}")))
     }
@@ -585,7 +585,7 @@ mod tests {
     #[test]
     fn test_backup_special_filename() {
         let temp = TempDir::new().unwrap();
-        let current = temp.path().join("saorsa-node-v1.0.0");
+        let current = temp.path().join("ant-node-v1.0.0");
         let rollback_dir = temp.path().join("rollback");
         fs::create_dir(&rollback_dir).unwrap();
 
@@ -595,7 +595,7 @@ mod tests {
         let result = upgrader.create_backup(&current, &rollback_dir);
         assert!(result.is_ok());
 
-        let backup_path = rollback_dir.join("saorsa-node-v1.0.0.backup");
+        let backup_path = rollback_dir.join("ant-node-v1.0.0.backup");
         assert!(backup_path.exists());
     }
 

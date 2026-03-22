@@ -1,19 +1,19 @@
 #!/bin/bash
-# Check health of all saorsa nodes across all testnet droplets
+# Check health of all ant nodes across all testnet droplets
 # Run from local machine
 
 WORKERS=(
-    "142.93.52.129"   # saorsa-worker-1
-    "24.199.82.114"   # saorsa-worker-2
-    "192.34.62.192"   # saorsa-worker-3
-    "159.223.131.196" # saorsa-worker-4
+    "142.93.52.129"   # ant-worker-1
+    "24.199.82.114"   # ant-worker-2
+    "192.34.62.192"   # ant-worker-3
+    "159.223.131.196" # ant-worker-4
 )
 
 TOTAL_HEALTHY=0
 TOTAL_UNHEALTHY=0
 TOTAL_UNREACHABLE=0
 
-echo "=== Saorsa Testnet Health Check ==="
+echo "=== Autonomi Testnet Health Check ==="
 echo ""
 
 for i in "${!WORKERS[@]}"; do
@@ -21,7 +21,7 @@ for i in "${!WORKERS[@]}"; do
     WORKER_NUM=$((i + 1))
     START_INDEX=$((i * 50))
 
-    echo "--- saorsa-worker-${WORKER_NUM} ($IP) ---"
+    echo "--- ant-worker-${WORKER_NUM} ($IP) ---"
 
     # Run health check remotely
     RESULT=$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 "root@${IP}" \

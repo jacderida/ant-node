@@ -1,6 +1,6 @@
 //! Payment verifier with LRU cache and EVM verification.
 //!
-//! This is the core payment verification logic for saorsa-node.
+//! This is the core payment verification logic for ant-node.
 //! All new data requires EVM payment on Arbitrum (no free tier).
 
 use crate::error::{Error, Result};
@@ -105,7 +105,7 @@ impl PaymentStatus {
 /// Default capacity for the merkle pool cache (number of pool hashes to cache).
 const DEFAULT_POOL_CACHE_CAPACITY: usize = 1_000;
 
-/// Main payment verifier for saorsa-node.
+/// Main payment verifier for ant-node.
 ///
 /// Uses:
 /// 1. LRU cache for fast lookups of previously verified `XorName` values
@@ -1267,9 +1267,9 @@ mod tests {
 
     /// Helper: build an `EncodedPeerId` that matches the BLAKE3 hash of an ML-DSA public key.
     fn encoded_peer_id_for_pub_key(pub_key: &[u8]) -> ant_evm::EncodedPeerId {
-        let saorsa_peer_id = peer_id_from_public_key_bytes(pub_key).expect("valid ML-DSA pub key");
+        let ant_peer_id = peer_id_from_public_key_bytes(pub_key).expect("valid ML-DSA pub key");
         // Wrap raw 32-byte peer ID in identity multihash format: [0x00, length, ...bytes]
-        let raw = saorsa_peer_id.as_bytes();
+        let raw = ant_peer_id.as_bytes();
         let mut multihash_bytes = Vec::with_capacity(2 + raw.len());
         multihash_bytes.push(0x00); // identity multihash code
                                     // PeerId is always 32 bytes, safely fits in u8

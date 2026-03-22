@@ -1,11 +1,11 @@
-//! CLI definition for saorsa-devnet.
+//! CLI definition for ant-devnet.
 
 use clap::Parser;
 use std::path::PathBuf;
 
-/// Local devnet runner for saorsa-node.
+/// Local devnet runner for ant-node.
 #[derive(Parser, Debug)]
-#[command(name = "saorsa-devnet")]
+#[command(name = "ant-devnet")]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
     /// Node count to spawn.

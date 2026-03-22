@@ -26,8 +26,8 @@ TOTAL_NODES=200
 LOG_FILE="$LOG_DIR/churn-verify-$(date +%Y%m%d-%H%M%S).log"
 
 # Testnet configuration
-export SAORSA_TEST_BOOTSTRAP="142.93.52.129:12000,24.199.82.114:12000"
-export SAORSA_TEST_EXTERNAL=true
+export ANT_TEST_BOOTSTRAP="142.93.52.129:12000,24.199.82.114:12000"
+export ANT_TEST_EXTERNAL=true
 export RUST_LOG=info
 
 log() {
@@ -39,7 +39,7 @@ log() {
 get_node_count() {
     local TOTAL=0
     for IP in "${WORKERS[@]}"; do
-        COUNT=$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@$IP "pgrep -c saorsa-node 2>/dev/null" 2>/dev/null || echo "0")
+        COUNT=$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@$IP "pgrep -c ant-node 2>/dev/null" 2>/dev/null || echo "0")
         TOTAL=$((TOTAL + COUNT))
     done
     echo $TOTAL
@@ -59,7 +59,7 @@ kill_random_nodes() {
         # Get running nodes on this worker
         local RUNNING_NODES=$(ssh -o StrictHostKeyChecking=no root@$IP "
             for i in \$(seq $START_IDX $((START_IDX + NODES_PER_WORKER - 1))); do
-                if systemctl is-active --quiet saorsa-node-\$i 2>/dev/null; then
+                if systemctl is-active --quiet ant-node-\$i 2>/dev/null; then
                     echo \$i
                 fi
             done
@@ -69,7 +69,7 @@ kill_random_nodes() {
             local NODE_ARRAY=($RUNNING_NODES)
             local NODE_IDX=${NODE_ARRAY[$((RANDOM % ${#NODE_ARRAY[@]}))]}
 
-            ssh -o StrictHostKeyChecking=no root@$IP "systemctl stop saorsa-node-$NODE_IDX" 2>/dev/null || true
+            ssh -o StrictHostKeyChecking=no root@$IP "systemctl stop ant-node-$NODE_IDX" 2>/dev/null || true
             log "    Killed node $NODE_IDX on $IP"
             KILLED=$((KILLED + 1))
         fi
@@ -90,7 +90,7 @@ restart_random_nodes() {
         # Get stopped nodes on this worker
         local STOPPED_NODES=$(ssh -o StrictHostKeyChecking=no root@$IP "
             for i in \$(seq $START_IDX $((START_IDX + NODES_PER_WORKER - 1))); do
-                if ! systemctl is-active --quiet saorsa-node-\$i 2>/dev/null; then
+                if ! systemctl is-active --quiet ant-node-\$i 2>/dev/null; then
                     echo \$i
                 fi
             done
@@ -100,7 +100,7 @@ restart_random_nodes() {
             local NODE_ARRAY=($STOPPED_NODES)
             local NODE_IDX=${NODE_ARRAY[$((RANDOM % ${#NODE_ARRAY[@]}))]}
 
-            ssh -o StrictHostKeyChecking=no root@$IP "systemctl start saorsa-node-$NODE_IDX" 2>/dev/null || true
+            ssh -o StrictHostKeyChecking=no root@$IP "systemctl start ant-node-$NODE_IDX" 2>/dev/null || true
             log "    Restarted node $NODE_IDX on $IP"
             RESTARTED=$((RESTARTED + 1))
         fi
@@ -130,7 +130,7 @@ verify_data() {
 
     # Run verification test
     cd "$PROJECT_ROOT"
-    export SAORSA_TEST_ADDRESSES_FILE="$ADDRESSES_FILE"
+    export ANT_TEST_ADDRESSES_FILE="$ADDRESSES_FILE"
 
     # Run quick verification (sample of chunks)
     local RESULT=$(cargo test --release --test e2e run_verify_chunks -- --ignored --nocapture 2>&1)
@@ -149,7 +149,7 @@ verify_data() {
 
 # Main test
 main() {
-    log "=== Saorsa Churn + Verification Test ==="
+    log "=== Autonomi Churn + Verification Test ==="
     log "Addresses file: $ADDRESSES_FILE"
     log "Duration: $DURATION_MINUTES minutes"
     log "Churn rate: $CHURN_RATE%"

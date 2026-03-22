@@ -1,10 +1,10 @@
 # Testnet Deployment Guide
 
-This guide covers deploying saorsa-node for network testing, including considerations for cloud providers and anti-Sybil protection.
+This guide covers deploying ant-node for network testing, including considerations for cloud providers and anti-Sybil protection.
 
 ## Overview
 
-The Saorsa network uses multiple anti-Sybil mechanisms that can affect testnet deployments:
+The Autonomi network uses multiple anti-Sybil mechanisms that can affect testnet deployments:
 
 1. **IP Diversity Enforcement**: Limits nodes per subnet and ASN
 2. **Node Age Verification**: Requires time-based trust accumulation
@@ -38,9 +38,9 @@ let diversity_config = IPDiversityConfig::permissive();
 let age_config = NodeAgeConfig::permissive();
 ```
 
-### saorsa-node Configuration
+### ant-node Configuration
 
-In your `saorsa-node` configuration file:
+In your `ant-node` configuration file:
 
 ```toml
 # config.toml for testnet deployment
@@ -71,10 +71,10 @@ enforce_age_requirements = false
 
 ```bash
 # Example deployment script for Digital Ocean
-export SAORSA_TESTNET_MODE=true
-export SAORSA_MAX_NODES_PER_ASN=5000
+export ANT_TESTNET_MODE=true
+export ANT_MAX_NODES_PER_ASN=5000
 
-./saorsa-node --config testnet.toml
+./ant-node --config testnet.toml
 ```
 
 ### AWS
@@ -108,8 +108,8 @@ For realistic network testing, we recommend a multi-cloud deployment:
 # Deploy 5 nodes on DO with testnet config
 for i in $(seq 1 5); do
     doctl compute droplet create \
-        saorsa-node-$i \
-        --image saorsa-node:latest \
+        ant-node-$i \
+        --image ant-node:latest \
         --size s-1vcpu-2gb \
         --region nyc1
 done
@@ -251,9 +251,9 @@ let config = NodeAgeConfig::testnet();
 **Solution**: Add multiple bootstrap nodes across regions:
 ```toml
 bootstrap = [
-    "bootstrap1.testnet.saorsa.io:9000",
-    "bootstrap2.testnet.saorsa.io:9000",
-    "bootstrap3.testnet.saorsa.io:9000"
+    "bootstrap1.testnet.autonomi.io:9000",
+    "bootstrap2.testnet.autonomi.io:9000",
+    "bootstrap3.testnet.autonomi.io:9000"
 ]
 ```
 
@@ -271,11 +271,11 @@ SIZE="s-2vcpu-4gb"
 # Create bootstrap node first
 echo "Creating bootstrap node..."
 BOOTSTRAP_IP=$(doctl compute droplet create \
-    saorsa-bootstrap \
-    --image saorsa-node:latest \
+    ant-bootstrap \
+    --image ant-node:latest \
     --size $SIZE \
     --region $REGION \
-    --user-data "SAORSA_BOOTSTRAP=true" \
+    --user-data "ANT_BOOTSTRAP=true" \
     --wait \
     --format PublicIPv4 --no-header)
 
@@ -285,11 +285,11 @@ echo "Bootstrap node: $BOOTSTRAP_IP"
 for i in $(seq 1 $NUM_NODES); do
     echo "Creating node $i..."
     doctl compute droplet create \
-        saorsa-node-$i \
-        --image saorsa-node:latest \
+        ant-node-$i \
+        --image ant-node:latest \
         --size $SIZE \
         --region $REGION \
-        --user-data "SAORSA_BOOTSTRAP_PEERS=$BOOTSTRAP_IP:9000" \
+        --user-data "ANT_BOOTSTRAP_PEERS=$BOOTSTRAP_IP:9000" \
         --wait
 done
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Spawn 50 saorsa nodes on a single droplet
+# Spawn 50 ant nodes on a single droplet
 # Usage: ./spawn-nodes.sh [start_index]
 #
 # start_index: Optional starting index for node numbering (default: 0)
@@ -15,16 +15,16 @@ BOOTSTRAP1="142.93.52.129:12000"
 BOOTSTRAP2="24.199.82.114:12000"
 START_INDEX=${1:-0}
 
-echo "=== Saorsa Node Spawner ==="
+echo "=== Autonomi Node Spawner ==="
 echo "Creating $NODE_COUNT nodes starting at index $START_INDEX"
 echo "Bootstrap nodes: $BOOTSTRAP1, $BOOTSTRAP2"
 
 # Create data directory
-mkdir -p /var/lib/saorsa/nodes
+mkdir -p /var/lib/ant/nodes
 
 for i in $(seq 0 $((NODE_COUNT - 1))); do
     NODE_INDEX=$((START_INDEX + i))
-    NODE_DIR="/var/lib/saorsa/nodes/node-${NODE_INDEX}"
+    NODE_DIR="/var/lib/ant/nodes/node-${NODE_INDEX}"
     PORT=$((BASE_PORT + i))
     METRICS=$((METRICS_BASE + i))
 
@@ -48,14 +48,14 @@ for i in $(seq 0 $((NODE_COUNT - 1))); do
         BOOTSTRAP_FLAGS="-b ${BOOTSTRAP1} -b ${BOOTSTRAP2}"
     fi
 
-    cat > /etc/systemd/system/saorsa-node-${NODE_INDEX}.service <<EOF
+    cat > /etc/systemd/system/ant-node-${NODE_INDEX}.service <<EOF
 [Unit]
-Description=Saorsa Node ${NODE_INDEX}
+Description=Autonomi Node ${NODE_INDEX}
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/saorsa-node \\
+ExecStart=/usr/local/bin/ant-node \\
     --root-dir ${NODE_DIR} \\
     --port ${PORT} \\
     --ip-version ipv4 \\

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Configure system limits for running 50 saorsa nodes
+# Configure system limits for running 50 ant nodes
 # Run this once on each droplet before spawning nodes
 
 set -e
@@ -22,7 +22,7 @@ sysctl -p
 
 # Create data directories
 echo "Creating data directories..."
-mkdir -p /var/lib/saorsa/nodes
+mkdir -p /var/lib/ant/nodes
 
 # Set ulimit for current session
 ulimit -n 65535 2>/dev/null || true

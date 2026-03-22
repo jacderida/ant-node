@@ -1,7 +1,7 @@
-//! E2E test infrastructure for saorsa-node.
+//! E2E test infrastructure for ant-node.
 //!
 //! This module provides a complete testing framework for running E2E tests
-//! against a local testnet of 25 saorsa nodes with optional EVM payment
+//! against a local testnet of 25 ant nodes with optional EVM payment
 //! verification via a local Anvil testnet.
 //!
 //! ## Architecture
@@ -18,7 +18,7 @@
 //! ## Usage
 //!
 //! ```rust,no_run
-//! use saorsa_node::tests::e2e::TestHarness;
+//! use ant_node::tests::e2e::TestHarness;
 //!
 //! #[tokio::test]
 //! async fn test_chunk_storage() {

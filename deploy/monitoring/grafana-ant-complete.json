@@ -1083,7 +1083,7 @@
   "refresh": "30s",
   "schemaVersion": 38,
   "style": "dark",
-  "tags": ["saorsa", "p2p", "dht", "security", "payment", "testnet", "skademlia"],
+  "tags": ["ant", "p2p", "dht", "security", "payment", "testnet", "skademlia"],
   "templating": {
     "list": [
       {
@@ -1105,8 +1105,8 @@
   "time": { "from": "now-1h", "to": "now" },
   "timepicker": {},
   "timezone": "browser",
-  "title": "Saorsa Network - Complete Security Dashboard (v0.7.4)",
-  "uid": "saorsa-security-v074",
+  "title": "Autonomi Network - Complete Security Dashboard (v0.7.4)",
+  "uid": "ant-security-v074",
   "version": 2,
   "weekStart": ""
 }

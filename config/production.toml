@@ -1,10 +1,10 @@
-# Production Configuration for saorsa-node
+# Production Configuration for ant-node
 #
 # This file matches the NodeConfig struct schema.
 # See src/config.rs for all available fields and defaults.
 
 # Root directory for node data
-root_dir = "/var/lib/saorsa-node"
+root_dir = "/var/lib/ant"
 
 # Listening port (10000-10999 for production)
 port = 10000
@@ -60,7 +60,7 @@ db_size_gb = 0
 enabled = false
 channel = "stable"
 check_interval_hours = 1
-github_repo = "dirvine/saorsa-node"
+github_repo = "WithAutonomi/ant-node"
 staged_rollout_hours = 1
 
 # --- Bootstrap cache ---

@@ -1,7 +1,7 @@
-//! Protocol helpers for saorsa-node client operations.
+//! Protocol helpers for ant-node client operations.
 //!
 //! This module provides low-level protocol support for client-node communication.
-//! For high-level client operations, use the `saorsa-client` crate instead.
+//! For high-level client operations, use the `ant-client` crate instead.
 //!
 //! # Architecture
 //!
@@ -12,13 +12,13 @@
 //!
 //! # Migration Note
 //!
-//! The `QuantumClient` has been deprecated and consolidated into `saorsa-client::Client`.
-//! Use `saorsa-client` for all client operations.
+//! The `QuantumClient` has been deprecated and consolidated into `ant-client::Client`.
+//! Use `ant-client` for all client operations.
 //!
 //! # Example
 //!
 //! ```rust,ignore
-//! use saorsa_client::Client; // Use saorsa-client instead of QuantumClient
+//! use ant_client::Client; // Use ant-client instead of QuantumClient
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -50,9 +50,9 @@ use ant_evm::EncodedPeerId;
 /// Identity multihash code (stores raw bytes without hashing).
 const MULTIHASH_IDENTITY_CODE: u64 = 0x00;
 
-/// Convert a hex-encoded 32-byte saorsa-core node ID to an [`EncodedPeerId`].
+/// Convert a hex-encoded 32-byte node ID to an [`EncodedPeerId`].
 ///
-/// Saorsa-core peer IDs are 64-character hex strings representing 32 raw bytes.
+/// Peer IDs are 64-character hex strings representing 32 raw bytes.
 /// libp2p `PeerId` expects a multihash-encoded identity. This function bridges the two
 /// formats by wrapping the raw bytes in an identity multihash (code 0x00) and then
 /// converting to `EncodedPeerId` via `From<PeerId>`.

@@ -1,7 +1,7 @@
-//! Payment quote generation for saorsa-node.
+//! Payment quote generation for ant-node.
 //!
 //! Generates `PaymentQuote` values that clients use to pay for data storage.
-//! Compatible with the autonomi payment system.
+//! Compatible with the Autonomi payment system.
 //!
 //! NOTE: Quote generation requires integration with the node's signing
 //! capabilities from saorsa-core. This module provides the interface
@@ -88,7 +88,7 @@ impl QuoteGenerator {
             .sign_fn
             .as_ref()
             .ok_or_else(|| Error::Payment("Signer not set".to_string()))?;
-        let test_msg = b"saorsa-signing-probe";
+        let test_msg = b"ant-signing-probe";
         let test_sig = sign_fn(test_msg);
         if test_sig.is_empty() {
             return Err(Error::Payment(
@@ -276,7 +276,7 @@ pub fn verify_quote_content(quote: &PaymentQuote, expected_content: &XorName) ->
 /// Verify that a payment quote has a valid ML-DSA-65 signature.
 ///
 /// This replaces ant-evm's `check_is_signed_by_claimed_peer()` which only
-/// handles Ed25519/libp2p signatures. Saorsa uses ML-DSA-65 post-quantum
+/// handles Ed25519/libp2p signatures. Autonomi uses ML-DSA-65 post-quantum
 /// signatures for quote signing.
 ///
 /// # Arguments
@@ -309,7 +309,7 @@ pub fn verify_quote_signature(quote: &PaymentQuote) -> bool {
     // Get the bytes that were signed
     let bytes = quote.bytes_for_sig();
 
-    // Verify using saorsa's ML-DSA-65 implementation
+    // Verify using ML-DSA-65 implementation
     let ml_dsa = MlDsa65::new();
     match ml_dsa.verify(&pub_key, &bytes, &signature) {
         Ok(valid) => {
@@ -327,7 +327,7 @@ pub fn verify_quote_signature(quote: &PaymentQuote) -> bool {
 
 /// Verify a `MerklePaymentCandidateNode` signature using ML-DSA-65.
 ///
-/// Saorsa uses ML-DSA-65 post-quantum signatures for merkle candidate signing,
+/// Autonomi uses ML-DSA-65 post-quantum signatures for merkle candidate signing,
 /// rather than the ed25519 signatures used by the upstream `ant-evm` library.
 /// The `pub_key` field contains the raw ML-DSA-65 public key bytes, and
 /// `signature` contains the ML-DSA-65 signature over `bytes_to_sign()`.

@@ -24,7 +24,7 @@ use std::path::Path;
 use tracing::debug;
 
 /// Signing context for domain separation (prevents cross-protocol attacks).
-pub const SIGNING_CONTEXT: &[u8] = b"saorsa-node-release-v1";
+pub const SIGNING_CONTEXT: &[u8] = b"ant-node-release-v1";
 
 /// ML-DSA-65 signature size in bytes.
 pub const SIGNATURE_SIZE: usize = 3309;

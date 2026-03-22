@@ -1,6 +1,6 @@
-# Saorsa Network Infrastructure
+# Autonomi Network Infrastructure
 
-This document describes the VPS infrastructure used for running bootstrap nodes, relay nodes, and test nodes across the Saorsa ecosystem (ant-quic, saorsa-node, communitas).
+This document describes the VPS infrastructure used for running bootstrap nodes, relay nodes, and test nodes across the Autonomi ecosystem (ant-quic, ant-node, communitas).
 
 ## Node Overview
 
@@ -23,7 +23,7 @@ Each network uses a dedicated port RANGE to allow running multiple instances on 
 | Service | UDP Port Range | Default | Description |
 |---------|----------------|---------|-------------|
 | ant-quic | 9000-9999 | 9000 | QUIC transport layer testing |
-| saorsa-node | 10000-10999 | 10000 | Core P2P network nodes |
+| ant-node | 10000-10999 | 10000 | Core P2P network nodes |
 | communitas | 11000-11999 | 11000 | Collaboration platform nodes |
 
 **Important**: Each network MUST stay within its assigned port range. Never use ports from another network's range.
@@ -38,15 +38,15 @@ Additional ports:
 All nodes use the `saorsalabs.com` domain. Configure the following A records:
 
 ```
-saorsa-1.saorsalabs.com  →  77.42.75.115
-saorsa-2.saorsalabs.com  →  142.93.199.50
-saorsa-3.saorsalabs.com  →  147.182.234.192
-saorsa-4.saorsalabs.com  →  206.189.7.117
-saorsa-5.saorsalabs.com  →  144.126.230.161
-saorsa-6.saorsalabs.com  →  65.21.157.229
-saorsa-7.saorsalabs.com  →  116.203.101.172
-saorsa-8.saorsalabs.com  →  149.28.156.231
-saorsa-9.saorsalabs.com  →  45.77.176.184
+saorsa-1.saorsalabs.com  ->  77.42.75.115
+saorsa-2.saorsalabs.com  ->  142.93.199.50
+saorsa-3.saorsalabs.com  ->  147.182.234.192
+saorsa-4.saorsalabs.com  ->  206.189.7.117
+saorsa-5.saorsalabs.com  ->  144.126.230.161
+saorsa-6.saorsalabs.com  ->  65.21.157.229
+saorsa-7.saorsalabs.com  ->  116.203.101.172
+saorsa-8.saorsalabs.com  ->  149.28.156.231
+saorsa-9.saorsalabs.com  ->  45.77.176.184
 ```
 
 ## Bootstrap Endpoints
@@ -57,7 +57,7 @@ saorsa-2.saorsalabs.com:9000
 saorsa-3.saorsalabs.com:9000
 ```
 
-### saorsa-node Bootstrap
+### ant-node Bootstrap
 ```
 saorsa-2.saorsalabs.com:10000
 saorsa-3.saorsalabs.com:10000
@@ -74,7 +74,7 @@ saorsa-3.saorsalabs.com:11000
 ### Dashboard Node (saorsa-1)
 - **IP:** 77.42.75.115
 - **Provider:** Hetzner (Helsinki)
-- Hosts the Saorsa Labs website
+- Hosts the Autonomi Labs website
 - Runs monitoring dashboards
 - Central admin interface
 
@@ -99,7 +99,7 @@ saorsa-3.saorsalabs.com:11000
 ### DigitalOcean
 ```bash
 # Already configured via DIGITALOCEAN_API_TOKEN
-doctl compute droplet list --tag-name saorsa
+doctl compute droplet list --tag-name autonomi
 ```
 
 ### Hetzner
@@ -117,15 +117,15 @@ VULTR_API_KEY="$VULTR_API_TOKEN" vultr-cli instance list
 
 ## Firewall Configuration
 
-### DigitalOcean Firewall (saorsa-p2p-firewall)
-Applied to all nodes tagged with `saorsa`:
+### DigitalOcean Firewall (autonomi-p2p-firewall)
+Applied to all nodes tagged with `autonomi`:
 
 **Inbound Rules:**
 - TCP 22 (SSH)
 - TCP 80 (HTTP)
 - TCP 443 (HTTPS)
 - UDP 9000 (ant-quic)
-- UDP 10000 (saorsa-node)
+- UDP 10000 (ant-node)
 - UDP 11000 (communitas)
 
 **Outbound Rules:**
@@ -133,15 +133,15 @@ Applied to all nodes tagged with `saorsa`:
 - All UDP
 - ICMP
 
-### Hetzner Firewall (saorsa-p2p-firewall)
-Applied to all saorsa servers:
+### Hetzner Firewall (autonomi-p2p-firewall)
+Applied to all Autonomi servers:
 
 **Inbound Rules:**
 - TCP 22 (SSH)
 - TCP 80 (HTTP)
 - TCP 443 (HTTPS)
 - UDP 9000 (ant-quic)
-- UDP 10000 (saorsa-node)
+- UDP 10000 (ant-node)
 - UDP 11000 (communitas)
 - ICMP
 
@@ -169,7 +169,7 @@ doctl compute droplet create saorsa-N \
   --image ubuntu-24-04-x64 \
   --region nyc1 \
   --ssh-keys 48810465,2064413 \
-  --tag-names saorsa,testnode \
+  --tag-names autonomi,testnode \
   --wait
 ```
 
@@ -182,7 +182,7 @@ HCLOUD_TOKEN="$HETZNER_API_KEY" hcloud server create \
   --location hel1 \
   --ssh-key 104686182 \
   --label role=testnode \
-  --label project=saorsa
+  --label project=autonomi
 ```
 
 ### Create New Vultr Node
@@ -204,11 +204,11 @@ cd /opt/ant-quic
 ./ant-quic-node --listen 0.0.0.0:9000 --bootstrap
 ```
 
-### saorsa-node Bootstrap
+### ant-node Bootstrap
 ```bash
 # On saorsa-2 or saorsa-3
-cd /opt/saorsa-node
-./saorsa-node --listen 0.0.0.0:10000 --bootstrap
+cd /opt/ant-node
+./ant-node --listen 0.0.0.0:10000 --bootstrap
 ```
 
 ### communitas Bootstrap
@@ -220,12 +220,12 @@ cd /opt/communitas
 
 ## Production Configuration
 
-Before deploying, create `/etc/saorsa/production.toml` based on the template in `config/production.toml`:
+Before deploying, create `/etc/autonomi/production.toml` based on the template in `config/production.toml`:
 
 ```bash
-sudo mkdir -p /etc/saorsa
-sudo cp config/production.toml /etc/saorsa/production.toml
-sudo nano /etc/saorsa/production.toml  # Set your rewards_address
+sudo mkdir -p /etc/autonomi
+sudo cp config/production.toml /etc/autonomi/production.toml
+sudo nano /etc/autonomi/production.toml  # Set your rewards_address
 ```
 
 **CRITICAL**: Ensure `payment.enabled = true` in the config file.
@@ -250,17 +250,17 @@ RestartSec=10
 WantedBy=multi-user.target
 ```
 
-### saorsa-node Bootstrap Service
+### ant-node Bootstrap Service
 ```ini
-# /etc/systemd/system/saorsa-node-bootstrap.service
+# /etc/systemd/system/ant-node-bootstrap.service
 [Unit]
-Description=saorsa-node Bootstrap Node
+Description=Ant Node Bootstrap Node
 After=network.target
 
 [Service]
 Type=simple
 User=root
-ExecStart=/opt/saorsa-node/saorsa-node --config /etc/saorsa/production.toml --listen 0.0.0.0:10000 --bootstrap
+ExecStart=/opt/ant-node/ant-node --config /etc/autonomi/production.toml --listen 0.0.0.0:10000 --bootstrap
 # CRITICAL: DO NOT add --disable-payment-verification flag in production
 Restart=always
 RestartSec=10
@@ -292,7 +292,7 @@ WantedBy=multi-user.target
 ### Check Node Status
 ```bash
 # DigitalOcean
-doctl compute droplet list --tag-name saorsa --format Name,Status,PublicIPv4
+doctl compute droplet list --tag-name autonomi --format Name,Status,PublicIPv4
 
 # Hetzner
 HCLOUD_TOKEN="$HETZNER_API_KEY" hcloud server list
@@ -312,7 +312,7 @@ nc -vzu saorsa-2.saorsalabs.com 11000
 ### Check Service Status (on node)
 ```bash
 systemctl status ant-quic-bootstrap
-systemctl status saorsa-node-bootstrap
+systemctl status ant-node-bootstrap
 systemctl status communitas-bootstrap
 ```
 
@@ -330,23 +330,23 @@ systemctl status communitas-bootstrap
 
 ```bash
 # Dashboard
-export SAORSA_DASHBOARD="77.42.75.115"
+export ANT_DASHBOARD="77.42.75.115"
 
 # Bootstrap nodes
-export SAORSA_BOOTSTRAP_1="142.93.199.50"
-export SAORSA_BOOTSTRAP_2="147.182.234.192"
+export ANT_BOOTSTRAP_1="142.93.199.50"
+export ANT_BOOTSTRAP_2="147.182.234.192"
 
 # Test nodes - DigitalOcean
-export SAORSA_TEST_DO_1="206.189.7.117"
-export SAORSA_TEST_DO_2="144.126.230.161"
+export ANT_TEST_DO_1="206.189.7.117"
+export ANT_TEST_DO_2="144.126.230.161"
 
 # Test nodes - Hetzner
-export SAORSA_TEST_HZ_1="65.21.157.229"
-export SAORSA_TEST_HZ_2="116.203.101.172"
+export ANT_TEST_HZ_1="65.21.157.229"
+export ANT_TEST_HZ_2="116.203.101.172"
 
 # Test nodes - Vultr
-export SAORSA_TEST_VL_1="149.28.156.231"
-export SAORSA_TEST_VL_2="45.77.176.184"
+export ANT_TEST_VL_1="149.28.156.231"
+export ANT_TEST_VL_2="45.77.176.184"
 ```
 
 ## Maintenance
@@ -360,7 +360,7 @@ apt update && apt upgrade -y
 ### Restart Services
 ```bash
 systemctl restart ant-quic-bootstrap
-systemctl restart saorsa-node-bootstrap
+systemctl restart ant-node-bootstrap
 systemctl restart communitas-bootstrap
 ```
 
@@ -400,6 +400,6 @@ ssh root@saorsa-2.saorsalabs.com "systemctl restart ant-quic-bootstrap"
 ## Related Documentation
 
 - [ant-quic README](https://github.com/maidsafe/ant-quic)
-- [saorsa-gossip](../../../saorsa-gossip/README.md)
+- [ant-gossip](../../../ant-gossip/README.md)
 - [communitas Architecture](../architecture/README.md)
 - [Port Allocation](./PORTS.md)

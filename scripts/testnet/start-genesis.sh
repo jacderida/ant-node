@@ -12,16 +12,16 @@ echo "=== Starting Genesis Bootstrap Nodes ==="
 # Create genesis node-0 on worker-1 (no bootstrap peers needed)
 echo "Creating genesis node-0 on worker-1..."
 ssh -o StrictHostKeyChecking=no root@${WORKER1} "
-    mkdir -p /var/lib/saorsa/nodes/node-0
-    cat > /etc/systemd/system/saorsa-node-0.service <<'EOF'
+    mkdir -p /var/lib/ant/nodes/node-0
+    cat > /etc/systemd/system/ant-node-0.service <<'EOF'
 [Unit]
-Description=Saorsa Genesis Node 0
+Description=Autonomi Genesis Node 0
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/saorsa-node \
-    --root-dir /var/lib/saorsa/nodes/node-0 \
+ExecStart=/usr/local/bin/ant-node \
+    --root-dir /var/lib/ant/nodes/node-0 \
     --port 12000 \
     --ip-version ipv4 \
     --metrics-port 9100 \
@@ -38,8 +38,8 @@ CPUQuota=15%
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
-    systemctl enable saorsa-node-0
-    systemctl start saorsa-node-0
+    systemctl enable ant-node-0
+    systemctl start ant-node-0
 "
 
 # Wait for node-0 to start
@@ -48,21 +48,21 @@ sleep 10
 
 # Check if node-0 is running
 echo "Checking node-0 status..."
-ssh -o StrictHostKeyChecking=no root@${WORKER1} "systemctl is-active saorsa-node-0 && echo 'Node-0 is running!' || echo 'Node-0 failed to start'"
+ssh -o StrictHostKeyChecking=no root@${WORKER1} "systemctl is-active ant-node-0 && echo 'Node-0 is running!' || echo 'Node-0 failed to start'"
 
 # Create genesis node-50 on worker-2 (bootstrap to node-0)
 echo "Creating genesis node-50 on worker-2..."
 ssh -o StrictHostKeyChecking=no root@${WORKER2} "
-    mkdir -p /var/lib/saorsa/nodes/node-50
-    cat > /etc/systemd/system/saorsa-node-50.service <<'EOF'
+    mkdir -p /var/lib/ant/nodes/node-50
+    cat > /etc/systemd/system/ant-node-50.service <<'EOF'
 [Unit]
-Description=Saorsa Genesis Node 50
+Description=Autonomi Genesis Node 50
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/saorsa-node \
-    --root-dir /var/lib/saorsa/nodes/node-50 \
+ExecStart=/usr/local/bin/ant-node \
+    --root-dir /var/lib/ant/nodes/node-50 \
     --port 12000 \
     --ip-version ipv4 \
     -b 142.93.52.129:12000 \
@@ -80,8 +80,8 @@ CPUQuota=15%
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
-    systemctl enable saorsa-node-50
-    systemctl start saorsa-node-50
+    systemctl enable ant-node-50
+    systemctl start ant-node-50
 "
 
 # Wait for node-50 to start
@@ -90,7 +90,7 @@ sleep 10
 
 # Check if node-50 is running
 echo "Checking node-50 status..."
-ssh -o StrictHostKeyChecking=no root@${WORKER2} "systemctl is-active saorsa-node-50 && echo 'Node-50 is running!' || echo 'Node-50 failed to start'"
+ssh -o StrictHostKeyChecking=no root@${WORKER2} "systemctl is-active ant-node-50 && echo 'Node-50 is running!' || echo 'Node-50 failed to start'"
 
 echo ""
 echo "=== Genesis Bootstrap Complete ==="

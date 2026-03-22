@@ -32,7 +32,7 @@ use tracing::info;
 
 /// Test environment containing both the test network and EVM testnet.
 struct PaymentTestEnv {
-    /// Test harness managing the saorsa node network
+    /// Test harness managing the ant node network
     harness: TestHarness,
     /// Anvil EVM testnet for payment testing
     testnet: Testnet,
@@ -61,7 +61,7 @@ impl PaymentTestEnv {
 ///
 /// This sets up:
 /// - Anvil EVM testnet FIRST (so nodes can verify on the same chain)
-/// - 10-node saorsa test network with `payment_enforcement: true`
+/// - 10-node ant test network with `payment_enforcement: true`
 /// - Network stabilization wait (5 seconds for 10 nodes)
 ///
 /// All nodes share the SAME Anvil instance as the client wallet,

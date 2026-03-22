@@ -10,7 +10,7 @@
 //! ┌─────────────────────────────────────────────────────────┐
 //! │        AntProtocol (implements Protocol trait)        │
 //! ├─────────────────────────────────────────────────────────┤
-//! │  protocol_id() = "saorsa/ant/chunk/v1"                  │
+//! │  protocol_id() = "autonomi/ant/chunk/v1"                  │
 //! │                                                         │
 //! │  handle(peer_id, data) ──▶ decode AntProtocolMessage │
 //! │                                   │                     │
@@ -31,7 +31,7 @@
 //!
 //! ```rust,ignore
 //! use std::sync::Arc;
-//! use saorsa_node::storage::{AntProtocol, LmdbStorage, LmdbStorageConfig};
+//! use ant_node::storage::{AntProtocol, LmdbStorage, LmdbStorageConfig};
 //!
 //! // Create storage
 //! let config = LmdbStorageConfig::default();

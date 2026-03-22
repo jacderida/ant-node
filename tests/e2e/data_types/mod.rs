@@ -1,4 +1,4 @@
-//! Data type E2E tests for saorsa-node.
+//! Data type E2E tests for ant-node.
 //!
 //! This module contains tests for the chunk data type:
 //! - **Chunk**: Immutable, content-addressed data (up to 4MB)

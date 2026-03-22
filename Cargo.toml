@@ -1,30 +1,30 @@
 [package]
-name = "saorsa-node"
+name = "ant-node"
 version = "0.5.0"
 edition = "2021"
 authors = ["David Irvine <david.irvine@maidsafe.net>"]
-description = "Pure quantum-proof network node for the Saorsa decentralized network"
+description = "Pure quantum-proof network node for the Autonomi decentralized network"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/saorsa-labs/saorsa-node"
+repository = "https://github.com/WithAutonomi/ant-node"
 keywords = ["p2p", "decentralized", "quantum-safe", "post-quantum", "dht"]
 categories = ["network-programming", "cryptography"]
 rust-version = "1.75"
 
 [lib]
-name = "saorsa_node"
+name = "ant_node"
 path = "src/lib.rs"
 
 [[bin]]
-name = "saorsa-node"
-path = "src/bin/saorsa-node/main.rs"
+name = "ant-node"
+path = "src/bin/ant-node/main.rs"
 
 [[bin]]
-name = "saorsa-keygen"
+name = "ant-keygen"
 path = "src/bin/keygen.rs"
 
 [[bin]]
-name = "saorsa-devnet"
-path = "src/bin/saorsa-devnet/main.rs"
+name = "ant-devnet"
+path = "src/bin/ant-devnet/main.rs"
 
 [dependencies]
 # Core (provides EVERYTHING: networking, DHT, security, trust, storage)
@@ -161,10 +161,10 @@ missing_const_for_fn = "allow"
 # Debian package metadata (cargo-deb)
 [package.metadata.deb]
 maintainer = "David Irvine <david.irvine@maidsafe.net>"
-copyright = "2024-2025 Saorsa Labs"
+copyright = "2024-2025 Autonomi"
 license-file = ["LICENSE-MIT", "0"]
 extended-description = """
-Saorsa Node is a pure quantum-proof network node for the Saorsa decentralized network.
+Ant Node is a pure quantum-proof network node for the Autonomi decentralized network.
 It provides secure, private, and censorship-resistant data storage using post-quantum
 cryptography (ML-DSA-65, ML-KEM-768). Features include:
 - Quantum-resistant authentication and encryption
@@ -175,21 +175,21 @@ cryptography (ML-DSA-65, ML-KEM-768). Features include:
 section = "net"
 priority = "optional"
 assets = [
-    ["target/release/saorsa-node", "usr/bin/", "755"],
-    ["target/release/saorsa-keygen", "usr/bin/", "755"],
-    ["README.md", "usr/share/doc/saorsa-node/", "644"],
+    ["target/release/ant-node", "usr/bin/", "755"],
+    ["target/release/ant-keygen", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/ant-node/", "644"],
 ]
-conf-files = ["/etc/saorsa/config.toml"]
+conf-files = ["/etc/ant/config.toml"]
 depends = "$auto"
 systemd-units = { enable = true }
 
 # RPM package metadata (cargo-generate-rpm)
 [package.metadata.generate-rpm]
 assets = [
-    { source = "target/release/saorsa-node", dest = "/usr/bin/saorsa-node", mode = "755" },
-    { source = "target/release/saorsa-keygen", dest = "/usr/bin/saorsa-keygen", mode = "755" },
-    { source = "README.md", dest = "/usr/share/doc/saorsa-node/README.md", mode = "644" },
-    { source = "systemd/saorsa-node.service", dest = "/usr/lib/systemd/system/saorsa-node.service", mode = "644" },
+    { source = "target/release/ant-node", dest = "/usr/bin/ant-node", mode = "755" },
+    { source = "target/release/ant-keygen", dest = "/usr/bin/ant-keygen", mode = "755" },
+    { source = "README.md", dest = "/usr/share/doc/ant-node/README.md", mode = "644" },
+    { source = "systemd/ant-node.service", dest = "/usr/lib/systemd/system/ant-node.service", mode = "644" },
 ]
 
 [package.metadata.generate-rpm.requires]

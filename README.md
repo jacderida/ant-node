@@ -1,22 +1,22 @@
-# saorsa-node
+# ant-node
 
 **The quantum-proof evolution of Autonomi network nodes.**
 
-saorsa-node is the next-generation node software for the Autonomi decentralized network, replacing ant-node with future-proof cryptography and advanced network security.
+ant-node is the next-generation node software for the Autonomi decentralized network, replacing the legacy ant-node with future-proof cryptography and advanced network security.
 
-> **Why Upgrade?** Current ant-node uses Ed25519/X25519 cryptography that will be broken by quantum computers. Data encrypted today can be harvested and decrypted later. saorsa-node uses FIPS-approved post-quantum algorithms to protect your data forever.
+> **Why Upgrade?** Current legacy ant-node uses Ed25519/X25519 cryptography that will be broken by quantum computers. Data encrypted today can be harvested and decrypted later. ant-node uses FIPS-approved post-quantum algorithms to protect your data forever.
 
 ---
 
 ## Table of Contents
 
 1. [The Quantum Threat](#the-quantum-threat)
-2. [Key Advantages Over ant-node](#key-advantages-over-ant-node)
+2. [Key Advantages Over Legacy ant-node](#key-advantages-over-legacy-ant-node)
 3. [Post-Quantum Cryptography](#post-quantum-cryptography)
 4. [NAT Traversal](#nat-traversal)
 5. [Network Hardening](#network-hardening)
 6. [Dual IPv4/IPv6 DHT](#dual-ipv4ipv6-dht)
-7. [Migration from ant-node](#migration-from-ant-node)
+7. [Migration from Legacy ant-node](#migration-from-legacy-ant-node)
 8. [Development Status](#development-status)
 9. [Auto-Upgrade System](#auto-upgrade-system)
 10. [Running as a Service](#running-as-a-service)
@@ -53,7 +53,7 @@ Nation-state actors and sophisticated adversaries are already collecting encrypt
 
 ### The Autonomi Network Risk
 
-ant-node uses:
+Legacy ant-node uses:
 - **BLS signatures** - Quantum vulnerable (elliptic curve based)
 - **Ed25519 signatures** - Quantum vulnerable (elliptic curve based)
 - **X25519 key exchange** - Quantum vulnerable (elliptic curve based)
@@ -62,9 +62,9 @@ Even though the Autonomi nettwork self encrypted data is secure, he Autonomi net
 
 ---
 
-## Key Advantages Over ant-node
+## Key Advantages Over Legacy ant-node
 
-| Feature | ant-node | saorsa-node |
+| Feature | Legacy ant-node | ant-node |
 |---------|----------|-------------|
 | **Digital Signatures** | BLS/Ed25519 (quantum-vulnerable) | ML-DSA-65 (FIPS 204, quantum-proof) |
 | **Key Exchange** | X25519 (quantum-vulnerable) | ML-KEM-768 (FIPS 203, quantum-proof) |
@@ -84,7 +84,7 @@ Even though the Autonomi nettwork self encrypted data is secure, he Autonomi net
 
 ## Post-Quantum Cryptography
 
-saorsa-node implements **pure post-quantum cryptography** with no hybrid fallbacks. All algorithms are NIST FIPS-approved standards.
+ant-node implements **pure post-quantum cryptography** with no hybrid fallbacks. All algorithms are NIST FIPS-approved standards.
 
 ### ML-DSA-65 (FIPS 204) - Digital Signatures
 
@@ -114,7 +114,7 @@ Symmetric algorithms remain quantum-resistant at sufficient key sizes. ChaCha20-
 
 ### No Hybrid Mode
 
-Unlike some transitional implementations, saorsa-node uses **pure post-quantum cryptography**:
+Unlike some transitional implementations, ant-node uses **pure post-quantum cryptography**:
 
 - No Ed25519 fallback
 - No X25519 hybrid key exchange
@@ -126,7 +126,7 @@ This ensures maximum security and eliminates the complexity of dual-algorithm sy
 
 saorsa-core fully supports **legacy classical encrypted data**:
 
-- **Existing Data**: AES-256-GCM-SIV encrypted content from ant-node remains readable
+- **Existing Data**: AES-256-GCM-SIV encrypted content from legacy ant-node remains readable
 - **New Signatures**: All new signatures use ML-DSA-65 (quantum-proof)
 - **New Key Exchange**: All new key exchanges use ML-KEM-768 (quantum-proof)
 - **Gradual Migration**: Network can operate with mixed classical/quantum-proof data
@@ -139,13 +139,13 @@ This allows seamless migration without data loss while ensuring all new data is 
 
 ### Everyone Can Run a Node
 
-One of the most significant advantages of saorsa-node is **full native QUIC NAT traversal**. Unlike ant-node, which requires manual port forwarding, saorsa-core implements NAT traversal directly within the QUIC protocol itself - **no ICE, no STUN, no external protocols**.
+One of the most significant advantages of ant-node is **full native QUIC NAT traversal**. Unlike legacy ant-node, which requires manual port forwarding, saorsa-core implements NAT traversal directly within the QUIC protocol itself - **no ICE, no STUN, no external protocols**.
 
 > **100% Success Rate**: In our testing, we have successfully traversed 100% of network connections using native QUIC NAT traversal.
 
-### The ant-node Limitation
+### The Legacy ant-node Limitation
 
-ant-node has **no native NAT traversal**:
+Legacy ant-node has **no native NAT traversal**:
 - Requires manual router configuration or UPnP
 - Excludes users behind carrier-grade NAT (CGNAT)
 - Excludes most mobile and residential users
@@ -157,7 +157,7 @@ Based on **draft-seemann-quic-nat-traversal-02** (Marten Seemann & Eric Kinnear,
 
 **Why Not ICE/STUN?**
 
-| Aspect | ICE/STUN | Native QUIC (saorsa) |
+| Aspect | ICE/STUN | Native QUIC (Autonomi) |
 |--------|----------|----------------------|
 | **External Dependencies** | Requires STUN/TURN servers | None - 100% within QUIC |
 | **Protocol Complexity** | Separate signaling (SDP) | QUIC frames only |
@@ -174,11 +174,11 @@ Based on **draft-seemann-quic-nat-traversal-02** (Marten Seemann & Eric Kinnear,
 ### How It Works
 
 ```
-1. Node starts → enumerates local interfaces and addresses
+1. Node starts -> enumerates local interfaces and addresses
 2. Peers exchange addresses via ADD_ADDRESS frames
 3. Client sends PUNCH_ME_NOW to coordinate timing
 4. Both peers simultaneously send QUIC PATH_CHALLENGE packets
-5. NAT bindings created → PATH_RESPONSE packets received
+5. NAT bindings created -> PATH_RESPONSE packets received
 6. QUIC connection migrates to direct path automatically
 7. Application data flows directly (no relay needed)
 ```
@@ -202,7 +202,7 @@ This ensures that **everyone can contribute to the network**, democratizing part
 
 ### Multi-Layer Sybil Resistance
 
-Sybil attacks involve creating many fake identities to gain disproportionate influence. saorsa-node implements defense-in-depth:
+Sybil attacks involve creating many fake identities to gain disproportionate influence. ant-node implements defense-in-depth:
 
 #### Layer 1: IPv6 Node Identity Binding
 
@@ -329,7 +329,7 @@ The EigenTrust++ system provides the foundation for **continuous network health 
 
 ## Dual IPv4/IPv6 DHT
 
-saorsa-node implements a novel dual-stack DHT architecture that maximizes network connectivity.
+ant-node implements a novel dual-stack DHT architecture that maximizes network connectivity.
 
 ### Separate Close Groups
 
@@ -346,7 +346,7 @@ Data is replicated to **both** close groups:
 
 ### Happy Eyeballs (RFC 8305)
 
-For connections, saorsa-node implements Happy Eyeballs:
+For connections, ant-node implements Happy Eyeballs:
 1. Attempt IPv6 connection first
 2. Start IPv4 connection after short delay
 3. Use whichever completes first
@@ -360,15 +360,15 @@ For connections, saorsa-node implements Happy Eyeballs:
 
 ---
 
-## Migration from ant-node
+## Migration from Legacy ant-node
 
-saorsa-node provides seamless migration from existing ant-node installations.
+ant-node provides seamless migration from existing legacy ant-node installations.
 
 ### Automatic Detection
 
 ```bash
-# Auto-detect ant-node data directories
-saorsa-node --migrate-ant-data auto
+# Auto-detect legacy ant-node data directories
+ant-node --migrate-ant-data auto
 ```
 
 Searches common locations:
@@ -378,10 +378,10 @@ Searches common locations:
 
 ### Migration Process
 
-1. **Scan**: Enumerate all record files in ant-node `record_store/`
+1. **Scan**: Enumerate all record files in legacy ant-node `record_store/`
 2. **Classify**: Identify record types (Chunk, Register, Scratchpad, GraphEntry)
 3. **Decrypt**: Decrypt AES-256-GCM-SIV encrypted records
-4. **Upload**: Store on saorsa-network
+4. **Upload**: Store on Autonomi network
 5. **Track**: Save progress for resume capability
 
 ### Progress Tracking
@@ -390,7 +390,7 @@ Migration can be interrupted and resumed:
 
 ```bash
 # Migration continues from last checkpoint
-saorsa-node --migrate-ant-data ~/.local/share/safe/node
+ant-node --migrate-ant-data ~/.local/share/safe/node
 ```
 
 ### Payment Model
@@ -411,11 +411,11 @@ Mutable data types (Scratchpad, Pointer, GraphEntry) present a **fundamental cha
 
 #### Why CRDT Data Cannot Be Directly Migrated
 
-**saorsa-nodes are pure post-quantum** - they only understand ML-DSA-65 signatures:
+**ant-nodes are pure post-quantum** - they only understand ML-DSA-65 signatures:
 
 ```
 User: "Here's my Scratchpad update, signed with Ed25519"
-saorsa-node: "Invalid signature - rejected" ❌
+ant-node: "Invalid signature - rejected"
 ```
 
 This is by design. Adding classical crypto verification would:
@@ -426,36 +426,36 @@ This is by design. Adding classical crypto verification would:
 #### The Two-Network Reality
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                     TWO SEPARATE NETWORKS                            │
-├────────────────────────────────┬────────────────────────────────────┤
-│      AUTONOMI NETWORK          │         SAORSA NETWORK             │
-│      (Classical Crypto)        │         (Quantum Crypto)           │
-├────────────────────────────────┼────────────────────────────────────┤
-│  Nodes: ant-node               │  Nodes: saorsa-node                │
-│  Signatures: Ed25519/BLS       │  Signatures: ML-DSA-65 ONLY        │
-│  Key Exchange: X25519          │  Key Exchange: ML-KEM-768          │
-│                                │                                    │
-│  Scratchpad address:           │  Scratchpad address:               │
-│  hash("scratchpad:" ||         │  hash("scratchpad:" ||             │
-│       Ed25519_pubkey)          │       ML-DSA-65_pubkey)            │
-│           ↓                    │           ↓                        │
-│    0x7a3f...                   │    0xb2c8...                       │
-│                                │                                    │
-│  DIFFERENT ADDRESSES - SAME USER, DIFFERENT IDENTITY                │
-└────────────────────────────────┴────────────────────────────────────┘
++---------------------------------------------------------------------+
+|                     TWO SEPARATE NETWORKS                            |
++--------------------------------+------------------------------------+
+|      AUTONOMI NETWORK          |         AUTONOMI NETWORK           |
+|      (Classical Crypto)        |         (Quantum Crypto)           |
++--------------------------------+------------------------------------+
+|  Nodes: legacy ant-node        |  Nodes: ant-node                   |
+|  Signatures: Ed25519/BLS       |  Signatures: ML-DSA-65 ONLY        |
+|  Key Exchange: X25519          |  Key Exchange: ML-KEM-768          |
+|                                |                                    |
+|  Scratchpad address:           |  Scratchpad address:               |
+|  hash("scratchpad:" ||         |  hash("scratchpad:" ||             |
+|       Ed25519_pubkey)          |       ML-DSA_65_pubkey)            |
+|           |                    |           |                        |
+|    0x7a3f...                   |    0xb2c8...                       |
+|                                |                                    |
+|  DIFFERENT ADDRESSES - SAME USER, DIFFERENT IDENTITY                |
++--------------------------------+------------------------------------+
 ```
 
 #### What This Means for Users
 
-| Data Type | Autonomi → Saorsa | Notes |
+| Data Type | Autonomi Legacy -> Autonomi PQ | Notes |
 |-----------|-------------------|-------|
-| **Chunk** | ✅ Migratable | Content-addressed, no signature needed |
-| **Scratchpad** | ❌ New identity | Different address on Saorsa |
-| **Pointer** | ❌ New identity | Different address on Saorsa |
-| **GraphEntry** | ❌ New identity | Different address on Saorsa |
+| **Chunk** | Migratable | Content-addressed, no signature needed |
+| **Scratchpad** | New identity | Different address on PQ network |
+| **Pointer** | New identity | Different address on PQ network |
+| **GraphEntry** | New identity | Different address on PQ network |
 
-**Users don't "migrate" their CRDT data - they establish a new quantum-safe identity on Saorsa.**
+**Users don't "migrate" their CRDT data - they establish a new quantum-safe identity on the Autonomi network.**
 
 #### The HybridClient Architecture
 
@@ -465,10 +465,10 @@ The HybridClient connects to **both networks simultaneously**:
 // HybridClient talks to TWO different networks
 let hybrid = HybridClient::new(config)?;
 
-// Read from Autonomi network (via ant-node peers)
+// Read from Autonomi network (via legacy ant-node peers)
 let legacy_data = hybrid.legacy().get_scratchpad(&ed25519_owner).await?;
 
-// Write to Saorsa network (via saorsa-node peers)
+// Write to Autonomi network (via ant-node peers)
 let new_scratchpad = hybrid.quantum().put_scratchpad(
     &mldsa_keypair,
     content_type,
@@ -485,15 +485,15 @@ let new_scratchpad = hybrid.quantum().put_scratchpad(
 ```
 1. Read final state from Autonomi (LegacyClient)
 2. Generate new ML-DSA-65 keypair (new identity)
-3. Create equivalent Scratchpad on Saorsa (QuantumClient)
+3. Create equivalent Scratchpad on PQ network (QuantumClient)
 4. Update applications to use new address
 5. Old Autonomi data becomes read-only archive
 ```
 
 **Strategy 2: Identity Registry**
 ```
-1. Create a public "migration registry" on Saorsa
-2. Users register: Ed25519_pubkey_hash → ML-DSA_pubkey_hash
+1. Create a public "migration registry" on PQ network
+2. Users register: Ed25519_pubkey_hash -> ML-DSA_pubkey_hash
 3. Applications can resolve old addresses to new ones
 4. Provides continuity for social/reputation systems
 ```
@@ -501,9 +501,9 @@ let new_scratchpad = hybrid.quantum().put_scratchpad(
 **Strategy 3: Parallel Operation (Transition Period)**
 ```
 1. Autonomi network continues running for existing CRDT data
-2. Users gradually create new identities on Saorsa
+2. Users gradually create new identities on PQ network
 3. Applications support both networks during transition
-4. Eventually deprecate Autonomi access
+4. Eventually deprecate legacy access
 ```
 
 #### Chunk Migration: The Easy Case
@@ -515,26 +515,26 @@ Chunks are content-addressed and immutable - they can be directly migrated:
 let chunk = hybrid.legacy().get_chunk(&xorname).await?;
 hybrid.quantum().store_chunk(chunk.data()).await?;
 
-// Address is hash(content) - identical on both networks ✅
+// Address is hash(content) - identical on both networks
 ```
 
 #### Security Implications
 
-| Aspect | Autonomi (Legacy) | Saorsa (New) |
+| Aspect | Autonomi (Legacy) | Autonomi (New) |
 |--------|-------------------|--------------|
 | **Signatures** | Ed25519 | ML-DSA-65 |
-| **Quantum Safe** | ❌ Vulnerable | ✅ Protected |
-| **CRDT Updates** | Via Autonomi only | Via Saorsa only |
+| **Quantum Safe** | Vulnerable | Protected |
+| **CRDT Updates** | Via Autonomi only | Via Autonomi PQ only |
 | **Identity** | Ed25519 pubkey | ML-DSA-65 pubkey |
 
-**Critical**: Users cannot update their Autonomi CRDT data through saorsa-nodes. To update legacy data, they must connect to the Autonomi network directly (which continues to run ant-nodes).
+**Critical**: Users cannot update their Autonomi CRDT data through PQ ant-nodes. To update legacy data, they must connect to the Autonomi network directly (which continues to run legacy ant-nodes).
 
 #### Long-Term Vision
 
 ```
 Phase 1 (Now):     Both networks operate, HybridClient bridges them
-Phase 2 (Transition): Users migrate to Saorsa identities, Autonomi read-only
-Phase 3 (Future):  Autonomi deprecated, Saorsa is the primary network
+Phase 2 (Transition): Users migrate to PQ identities, legacy read-only
+Phase 3 (Future):  Legacy deprecated, PQ network is the primary network
 ```
 
 The goal is not to maintain classical crypto forever, but to provide a **clean migration path** where users can:
@@ -550,12 +550,12 @@ The goal is not to maintain classical crypto forever, but to provide a **clean m
 
 | Component | Status | Description |
 |-----------|--------|-------------|
-| **Core Library** | ✅ Complete | Full node implementation with client APIs |
-| **Data Types** | ✅ Complete | Chunk, Scratchpad, Pointer, GraphEntry |
-| **Payment Verification** | ✅ Complete | Autonomi lookup + EVM verification + LRU cache |
-| **Migration Decryption** | ✅ Complete | AES-256-GCM-SIV decryption for ant-node data |
-| **Auto-Upgrade** | ✅ Complete | Cross-platform with ML-DSA-65 signature verification |
-| **E2E Test Infrastructure** | ✅ Complete | Real P2P testnet with 25+ nodes |
+| **Core Library** | Complete | Full node implementation with client APIs |
+| **Data Types** | Complete | Chunk, Scratchpad, Pointer, GraphEntry |
+| **Payment Verification** | Complete | Autonomi lookup + EVM verification + LRU cache |
+| **Migration Decryption** | Complete | AES-256-GCM-SIV decryption for legacy ant-node data |
+| **Auto-Upgrade** | Complete | Cross-platform with ML-DSA-65 signature verification |
+| **E2E Test Infrastructure** | Complete | Real P2P testnet with 25+ nodes |
 
 ### Test Coverage
 
@@ -563,7 +563,7 @@ The goal is not to maintain classical crypto forever, but to provide a **clean m
 Library Unit Tests:     104 passing
 E2E Unit Tests:          35 passing
 E2E Integration Tests:   49 passing (real P2P testnet)
-────────────────────────────────────
+------------------------------------
 Total:                  188 tests
 ```
 
@@ -582,21 +582,21 @@ The migration system is **fully implemented** and ready for use:
 
 1. **Decryption Module** (`src/migration/decrypt.rs`)
    - AES-256-GCM-SIV decryption with HKDF key derivation
-   - Handles embedded nonces from ant-node format
+   - Handles embedded nonces from legacy ant-node format
    - Full round-trip encryption/decryption verified
 
 2. **Scanner Module** (`src/migration/scanner.rs`)
-   - Auto-detection of ant-node data directories
+   - Auto-detection of legacy ant-node data directories
    - Cross-platform path discovery
    - Record enumeration and classification
 
 3. **Client APIs** (`src/client/`)
-   - `QuantumClient`: Pure saorsa-network operations
-   - `LegacyClient`: Read-only access to Autonomi network
+   - `QuantumClient`: Pure Autonomi PQ network operations
+   - `LegacyClient`: Read-only access to Autonomi legacy network
    - `HybridClient`: Seamless access to both networks
 
 4. **Payment Verification** (`src/payment/`)
-   - Three-layer verification: LRU cache → Autonomi lookup → EVM check
+   - Three-layer verification: LRU cache -> Autonomi lookup -> EVM check
    - Legacy data is FREE (already paid on Autonomi)
    - New data requires EVM payment (Arbitrum One)
 
@@ -621,25 +621,25 @@ assert!(harness.anvil().is_healthy().await);
 
 | Phase | Target | Status |
 |-------|--------|--------|
-| **Phase 1** | Core implementation | ✅ Complete |
-| **Phase 2** | E2E test infrastructure | ✅ Complete |
-| **Phase 3** | Testnet deployment | 🔄 In Progress |
-| **Phase 4** | Migration tooling CLI | 📋 Planned |
-| **Phase 5** | Mainnet preparation | 📋 Planned |
+| **Phase 1** | Core implementation | Complete |
+| **Phase 2** | E2E test infrastructure | Complete |
+| **Phase 3** | Testnet deployment | In Progress |
+| **Phase 4** | Migration tooling CLI | Planned |
+| **Phase 5** | Mainnet preparation | Planned |
 
 ---
 
 ## Auto-Upgrade System
 
-saorsa-node automatically stays up-to-date with secure, verified upgrades across **all platforms** - Windows, macOS, and Linux.
+ant-node automatically stays up-to-date with secure, verified upgrades across **all platforms** - Windows, macOS, and Linux.
 
 ### Cross-Platform Support
 
 | Platform | Architecture | Binary |
 |----------|--------------|--------|
-| **Linux** | x86_64, aarch64 | `saorsa-node-linux-*` |
-| **macOS** | x86_64, aarch64 (Apple Silicon) | `saorsa-node-darwin-*` |
-| **Windows** | x86_64 | `saorsa-node-windows-*.exe` |
+| **Linux** | x86_64, aarch64 | `ant-node-linux-*` |
+| **macOS** | x86_64, aarch64 (Apple Silicon) | `ant-node-darwin-*` |
+| **Windows** | x86_64 | `ant-node-windows-*.exe` |
 
 The auto-upgrade system automatically detects the current platform and downloads the correct binary.
 
@@ -654,7 +654,7 @@ The auto-upgrade system automatically detects the current platform and downloads
 
 ### Network-Safe Staged Rollout
 
-To prevent **network collapse** from simultaneous upgrades, saorsa-node implements **randomized staged rollout**:
+To prevent **network collapse** from simultaneous upgrades, ant-node implements **randomized staged rollout**:
 
 **How Staged Rollout Works:**
 - Each node adds a **random delay** (0-24 hours) before applying upgrades
@@ -696,7 +696,7 @@ The only way to change the signing key is a manual upgrade with a new binary.
 
 ### Unattended Operation
 
-saorsa-node is designed for **true unattended operation**:
+ant-node is designed for **true unattended operation**:
 
 - **Zero Intervention**: Nodes upgrade themselves without human action
 - **Self-Healing**: Failed upgrades automatically rollback
@@ -714,10 +714,10 @@ This enables node operators to deploy and forget, knowing their nodes will stay 
 
 ```bash
 # Use stable channel (default)
-saorsa-node --upgrade-channel stable
+ant-node --upgrade-channel stable
 
 # Use beta channel for testing
-saorsa-node --upgrade-channel beta
+ant-node --upgrade-channel beta
 ```
 
 ### Configuration
@@ -726,7 +726,7 @@ saorsa-node --upgrade-channel beta
 [upgrade]
 channel = "stable"
 check_interval_hours = 1
-github_repo = "saorsa-labs/saorsa-node"
+github_repo = "WithAutonomi/ant-node"
 stop_on_upgrade = false  # Set true when running under a service manager
 # staged_rollout_hours = 24  # For staged rollout
 ```
@@ -735,17 +735,17 @@ stop_on_upgrade = false  # Set true when running under a service manager
 
 ## Running as a Service
 
-For production deployments, run saorsa-node under a service manager so it restarts automatically after upgrades.
+For production deployments, run ant-node under a service manager so it restarts automatically after upgrades.
 
 ### systemd (Linux)
 
-A service file is included at `systemd/saorsa-node.service` and installed automatically by RPM/DEB packages.
+A service file is included at `systemd/ant-node.service` and installed automatically by RPM/DEB packages.
 
 ```bash
 # Install and enable
-sudo cp systemd/saorsa-node.service /etc/systemd/system/
+sudo cp systemd/ant-node.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now saorsa-node
+sudo systemctl enable --now ant-node
 ```
 
 Key settings:
@@ -755,7 +755,7 @@ Key settings:
 
 ### launchd (macOS)
 
-Create a plist at `~/Library/LaunchAgents/com.saorsa.node.plist`:
+Create a plist at `~/Library/LaunchAgents/com.autonomi.node.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -764,10 +764,10 @@ Create a plist at `~/Library/LaunchAgents/com.saorsa.node.plist`:
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.saorsa.node</string>
+    <string>com.autonomi.node</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/saorsa-node</string>
+        <string>/usr/local/bin/ant-node</string>
         <string>--stop-on-upgrade</string>
     </array>
     <key>KeepAlive</key>
@@ -779,20 +779,20 @@ Create a plist at `~/Library/LaunchAgents/com.saorsa.node.plist`:
 ```
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.saorsa.node.plist
+launchctl load ~/Library/LaunchAgents/com.autonomi.node.plist
 ```
 
 ### Windows Service
 
-Use [WinSW](https://github.com/winsw/winsw) or [NSSM](https://nssm.cc/) to wrap saorsa-node as a Windows service.
+Use [WinSW](https://github.com/winsw/winsw) or [NSSM](https://nssm.cc/) to wrap ant-node as a Windows service.
 
-With WinSW, create `saorsa-node-service.xml`:
+With WinSW, create `ant-node-service.xml`:
 
 ```xml
 <service>
-  <id>saorsa-node</id>
-  <name>Saorsa Node</name>
-  <executable>C:\saorsa\saorsa-node.exe</executable>
+  <id>ant-node</id>
+  <name>Ant Node</name>
+  <executable>C:\ant-node\ant-node.exe</executable>
   <arguments>--stop-on-upgrade</arguments>
   <onfailure action="restart" delay="5 sec"/>
 </service>
@@ -808,7 +808,7 @@ Without `--stop-on-upgrade`, the node spawns the upgraded binary as a new proces
 
 ## Architecture
 
-saorsa-node follows a **thin wrapper** design philosophy, adding minimal code on top of saorsa-core.
+ant-node follows a **thin wrapper** design philosophy, adding minimal code on top of saorsa-core.
 
 ### Component Responsibilities
 
@@ -820,13 +820,13 @@ saorsa-node follows a **thin wrapper** design philosophy, adding minimal code on
 | **Security** | saorsa-core | Rate limiting, blacklisting, diversity scoring |
 | **Content Storage** | saorsa-core | Local chunk storage |
 | **Replication** | saorsa-core | Data redundancy management |
-| **Auto-Upgrade** | saorsa-node | Binary update system |
-| **Migration** | saorsa-node | ant-node data import |
-| **CLI** | saorsa-node | User interface |
+| **Auto-Upgrade** | ant-node | Binary update system |
+| **Migration** | ant-node | Legacy ant-node data import |
+| **CLI** | ant-node | User interface |
 
 ### Code Size
 
-saorsa-node adds approximately **1,000 lines** of new code:
+ant-node adds approximately **1,000 lines** of new code:
 - Easy to audit
 - Minimal attack surface
 - Clear separation of concerns
@@ -834,9 +834,9 @@ saorsa-node adds approximately **1,000 lines** of new code:
 ### Dependency Chain
 
 ```
-saorsa-node
-    └── saorsa-core
-            └── saorsa-pqc (ML-DSA, ML-KEM)
+ant-node
+    +-- saorsa-core
+            +-- saorsa-pqc (ML-DSA, ML-KEM)
 ```
 
 ---
@@ -852,31 +852,31 @@ saorsa-node
 
 ```bash
 # Clone the repository
-git clone https://github.com/saorsa-labs/saorsa-node
-cd saorsa-node
+git clone https://github.com/WithAutonomi/ant-node
+cd ant-node
 
 # Build release binary
 cargo build --release
 
 # Binary location
-./target/release/saorsa-node --version
+./target/release/ant-node --version
 ```
 
 ### Run with Defaults
 
 ```bash
 # Start node with default settings
-./target/release/saorsa-node
+./target/release/ant-node
 ```
 
 ### Join Testnet
 
 ```bash
 # Connect to testnet bootstrap nodes
-./target/release/saorsa-node --testnet
+./target/release/ant-node --testnet
 
 # Or specify bootstrap peers manually
-./target/release/saorsa-node \
+./target/release/ant-node \
     --bootstrap "165.22.4.178:12000" \
     --bootstrap "164.92.111.156:12000"
 ```
@@ -884,14 +884,14 @@ cargo build --release
 **Testnet Bootstrap Nodes:**
 | Node | Location | Address |
 |------|----------|---------|
-| saorsa-bootstrap-1 | NYC (DigitalOcean) | `165.22.4.178:12000` |
-| saorsa-bootstrap-2 | SFO (DigitalOcean) | `164.92.111.156:12000` |
+| ant-bootstrap-1 | NYC (DigitalOcean) | `165.22.4.178:12000` |
+| ant-bootstrap-2 | SFO (DigitalOcean) | `164.92.111.156:12000` |
 
 ### Full Configuration
 
 ```bash
-./target/release/saorsa-node \
-    --root-dir ~/.saorsa \
+./target/release/ant-node \
+    --root-dir ~/.ant-node \
     --port 12000 \
     --ip-version dual \
     --upgrade-channel stable \
@@ -904,12 +904,12 @@ cargo build --release
 ## CLI Reference
 
 ```
-saorsa-node [OPTIONS]
+ant-node [OPTIONS]
 
 Options:
     --root-dir <PATH>
         Node data directory
-        [default: ~/.saorsa]
+        [default: ~/.ant-node]
 
     --port <PORT>
         Listening port (0 for automatic selection)
@@ -924,7 +924,7 @@ Options:
         Example: /ip4/1.2.3.4/udp/12000/quic-v1
 
     --migrate-ant-data <PATH>
-        Path to ant-node data directory to migrate
+        Path to legacy ant-node data directory to migrate
         Use 'auto' for automatic detection
 
     --upgrade-channel <CHANNEL>
@@ -949,27 +949,27 @@ Options:
 Configuration sources (highest to lowest priority):
 
 1. **Command-line arguments**
-2. **Environment variables** (`SAORSA_*`)
-3. **Configuration file** (`~/.saorsa/config.toml`)
+2. **Environment variables** (`ANT_*`)
+3. **Configuration file** (`~/.ant-node/config.toml`)
 
 ### Environment Variables
 
 ```bash
-export SAORSA_ROOT_DIR=~/.saorsa
-export SAORSA_PORT=12000
-export SAORSA_IP_VERSION=dual
-export SAORSA_LOG_LEVEL=info
-export SAORSA_AUTO_UPGRADE=true
-export SAORSA_UPGRADE_CHANNEL=stable
+export ANT_ROOT_DIR=~/.ant-node
+export ANT_PORT=12000
+export ANT_IP_VERSION=dual
+export ANT_LOG_LEVEL=info
+export ANT_AUTO_UPGRADE=true
+export ANT_UPGRADE_CHANNEL=stable
 ```
 
 ### Configuration File
 
-`~/.saorsa/config.toml`:
+`~/.ant-node/config.toml`:
 
 ```toml
 [node]
-root_dir = "~/.saorsa"
+root_dir = "~/.ant-node"
 port = 0  # Auto-select
 
 [network]
@@ -983,7 +983,7 @@ bootstrap = [
 # Upgrades are always enabled; configure behavior here
 channel = "stable"
 check_interval_hours = 1
-github_repo = "saorsa-labs/saorsa-node"
+github_repo = "WithAutonomi/ant-node"
 stop_on_upgrade = false
 
 [migration]
@@ -1043,7 +1043,7 @@ All security-relevant events are logged:
 Enable detailed logging:
 
 ```bash
-RUST_LOG=saorsa_node=debug,saorsa_core=debug ./saorsa-node
+RUST_LOG=ant_node=debug,saorsa_core=debug ./ant-node
 ```
 
 ---
@@ -1052,9 +1052,9 @@ RUST_LOG=saorsa_node=debug,saorsa_core=debug ./saorsa-node
 
 | Project | Description | Repository |
 |---------|-------------|------------|
-| **saorsa-core** | Core networking and security library | [github.com/dirvine/saorsa-core](https://github.com/dirvine/saorsa-core) |
-| **saorsa-pqc** | Post-quantum cryptography primitives | [github.com/dirvine/saorsa-pqc](https://github.com/dirvine/saorsa-pqc) |
-| **saorsa-cli** | Unified CLI for file and chunk operations with EVM payments | Built into saorsa-node |
+| **saorsa-core** | Core networking and security library | [github.com/WithAutonomi/saorsa-core](https://github.com/WithAutonomi/saorsa-core) |
+| **saorsa-pqc** | Post-quantum cryptography primitives | [github.com/WithAutonomi/saorsa-pqc](https://github.com/WithAutonomi/saorsa-pqc) |
+| **ant-cli** | Unified CLI for file and chunk operations with EVM payments | Built into ant-node |
 
 ---
 
@@ -1091,4 +1091,4 @@ cargo fmt
 
 ---
 
-**saorsa-node**: Securing the future of decentralized data, one quantum-proof node at a time.
+**ant-node**: Securing the future of decentralized data, one quantum-proof node at a time.

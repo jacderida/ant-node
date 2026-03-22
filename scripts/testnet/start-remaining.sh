@@ -5,10 +5,10 @@
 set -e
 
 WORKERS=(
-    "142.93.52.129"   # saorsa-worker-1 (nodes 1-49)
-    "24.199.82.114"   # saorsa-worker-2 (nodes 51-99)
-    "192.34.62.192"   # saorsa-worker-3 (nodes 100-149)
-    "159.223.131.196" # saorsa-worker-4 (nodes 150-199)
+    "142.93.52.129"   # ant-worker-1 (nodes 1-49)
+    "24.199.82.114"   # ant-worker-2 (nodes 51-99)
+    "192.34.62.192"   # ant-worker-3 (nodes 100-149)
+    "159.223.131.196" # ant-worker-4 (nodes 150-199)
 )
 
 echo "=== Starting Remaining Nodes ==="
@@ -17,7 +17,7 @@ echo "=== Starting Remaining Nodes ==="
 echo "Starting nodes 1-49 on worker-1..."
 ssh -o StrictHostKeyChecking=no root@${WORKERS[0]} "
     for i in \$(seq 1 49); do
-        systemctl start saorsa-node-\${i} 2>/dev/null || true
+        systemctl start ant-node-\${i} 2>/dev/null || true
         sleep 0.5
     done
     echo 'Worker-1 nodes started'
@@ -27,7 +27,7 @@ ssh -o StrictHostKeyChecking=no root@${WORKERS[0]} "
 echo "Starting nodes 51-99 on worker-2..."
 ssh -o StrictHostKeyChecking=no root@${WORKERS[1]} "
     for i in \$(seq 51 99); do
-        systemctl start saorsa-node-\${i} 2>/dev/null || true
+        systemctl start ant-node-\${i} 2>/dev/null || true
         sleep 0.5
     done
     echo 'Worker-2 nodes started'
@@ -37,7 +37,7 @@ ssh -o StrictHostKeyChecking=no root@${WORKERS[1]} "
 echo "Starting nodes 100-149 on worker-3..."
 ssh -o StrictHostKeyChecking=no root@${WORKERS[2]} "
     for i in \$(seq 100 149); do
-        systemctl start saorsa-node-\${i} 2>/dev/null || true
+        systemctl start ant-node-\${i} 2>/dev/null || true
         sleep 0.5
     done
     echo 'Worker-3 nodes started'
@@ -47,7 +47,7 @@ ssh -o StrictHostKeyChecking=no root@${WORKERS[2]} "
 echo "Starting nodes 150-199 on worker-4..."
 ssh -o StrictHostKeyChecking=no root@${WORKERS[3]} "
     for i in \$(seq 150 199); do
-        systemctl start saorsa-node-\${i} 2>/dev/null || true
+        systemctl start ant-node-\${i} 2>/dev/null || true
         sleep 0.5
     done
     echo 'Worker-4 nodes started'

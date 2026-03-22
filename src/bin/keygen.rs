@@ -1,4 +1,4 @@
-//! ML-DSA-65 key management utility for saorsa-node release signing.
+//! ML-DSA-65 key management utility for ant-node release signing.
 //!
 //! This utility provides:
 //! - Keypair generation for release signing
@@ -8,9 +8,9 @@
 //! # Usage
 //!
 //! ```text
-//! saorsa-keygen generate [output-dir]    Generate a new keypair
-//! saorsa-keygen sign --key <key> --input <file> --output <sig>
-//! saorsa-keygen verify --key <key> --input <file> --signature <sig>
+//! ant-keygen generate [output-dir]    Generate a new keypair
+//! ant-keygen sign --key <key> --input <file> --output <sig>
+//! ant-keygen verify --key <key> --input <file> --signature <sig>
 //! ```
 
 // This is a standalone CLI tool that exits on any error, so expect/unwrap is acceptable
@@ -26,11 +26,11 @@ use std::path::PathBuf;
 use std::process;
 
 /// Signing context for domain separation (prevents cross-protocol attacks).
-const SIGNING_CONTEXT: &[u8] = b"saorsa-node-release-v1";
+const SIGNING_CONTEXT: &[u8] = b"ant-node-release-v1";
 
 #[derive(Parser)]
-#[command(name = "saorsa-keygen")]
-#[command(about = "ML-DSA-65 key management for saorsa-node releases")]
+#[command(name = "ant-keygen")]
+#[command(about = "ML-DSA-65 key management for ant-node releases")]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -86,7 +86,7 @@ fn main() {
 }
 
 fn generate_keypair(output_dir: &PathBuf) {
-    println!("ML-DSA-65 Keypair Generator for saorsa-node releases\n");
+    println!("ML-DSA-65 Keypair Generator for ant-node releases\n");
 
     // Create output directory if it doesn't exist
     fs::create_dir_all(output_dir).expect("Failed to create output directory");

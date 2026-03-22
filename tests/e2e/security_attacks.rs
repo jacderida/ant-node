@@ -1,7 +1,7 @@
 //! Security attack tests: adversarial payment bypass attempts.
 //!
 //! These tests simulate a malicious attacker trying to store data on the
-//! saorsa network WITHOUT paying. Every test uses `payment_enforcement: true`
+//! Autonomi network WITHOUT paying. Every test uses `payment_enforcement: true`
 //! on all nodes. Every test MUST verify the attack is REJECTED.
 //!
 //! The attacker cannot modify source code -- only craft malicious messages.
@@ -11,13 +11,13 @@
 use super::harness::TestHarness;
 use super::testnet::TestNetworkConfig;
 use ant_evm::ProofOfPayment;
-use evmlib::testnet::Testnet;
-use rand::Rng;
-use saorsa_node::ant_protocol::{
+use ant_node::ant_protocol::{
     ChunkMessage, ChunkMessageBody, ChunkPutRequest, ChunkPutResponse, ProtocolError,
 };
-use saorsa_node::compute_address;
-use saorsa_node::payment::PaymentProof;
+use ant_node::compute_address;
+use ant_node::payment::PaymentProof;
+use evmlib::testnet::Testnet;
+use rand::Rng;
 use serial_test::serial;
 use std::time::Duration;
 use tokio::time::sleep;

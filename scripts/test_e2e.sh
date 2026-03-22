@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# End-to-end integration test for saorsa-node file upload/download with EVM payments.
+# End-to-end integration test for ant-node file upload/download with EVM payments.
 #
 # This script:
 # 1. Builds release binaries
@@ -20,11 +20,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 UGLY_FILES_DIR="${PROJECT_DIR}/ugly_files"
 TEST_RUN_ID="$$_$(date +%s)"
-MANIFEST_FILE="/tmp/saorsa_e2e_manifest_${TEST_RUN_ID}.json"
-DOWNLOAD_DIR="/tmp/saorsa_e2e_download_${TEST_RUN_ID}"
-LOG_FILE="/tmp/saorsa_e2e_devnet_${TEST_RUN_ID}.log"
-CLI_LOG="/tmp/saorsa_e2e_cli_${TEST_RUN_ID}.log"
-CLI_STDOUT="/tmp/saorsa_e2e_cli_stdout_${TEST_RUN_ID}.txt"
+MANIFEST_FILE="/tmp/ant_e2e_manifest_${TEST_RUN_ID}.json"
+DOWNLOAD_DIR="/tmp/ant_e2e_download_${TEST_RUN_ID}"
+LOG_FILE="/tmp/ant_e2e_devnet_${TEST_RUN_ID}.log"
+CLI_LOG="/tmp/ant_e2e_cli_${TEST_RUN_ID}.log"
+CLI_STDOUT="/tmp/ant_e2e_cli_stdout_${TEST_RUN_ID}.txt"
 
 DEVNET_PID=""
 PASS_COUNT=0
@@ -77,7 +77,7 @@ parse_field() {
 }
 
 echo "=============================================="
-echo "  saorsa-node E2E Integration Test"
+echo "  ant-node E2E Integration Test"
 echo "=============================================="
 echo ""
 
@@ -88,25 +88,25 @@ cargo build --release 2>&1 | tail -3
 echo "Build complete."
 echo ""
 
-SAORSA_DEVNET="${PROJECT_DIR}/target/release/saorsa-devnet"
-SAORSA_CLI="${PROJECT_DIR}/target/release/saorsa-cli"
+ANT_DEVNET="${PROJECT_DIR}/target/release/ant-devnet"
+ANT_CLI="${PROJECT_DIR}/target/release/ant-cli"
 
-if [ ! -f "${SAORSA_DEVNET}" ]; then
-    echo "ERROR: saorsa-devnet binary not found at ${SAORSA_DEVNET}"
+if [ ! -f "${ANT_DEVNET}" ]; then
+    echo "ERROR: ant-devnet binary not found at ${ANT_DEVNET}"
     exit 1
 fi
-if [ ! -f "${SAORSA_CLI}" ]; then
-    echo "ERROR: saorsa-cli binary not found at ${SAORSA_CLI}"
+if [ ! -f "${ANT_CLI}" ]; then
+    echo "ERROR: ant-cli binary not found at ${ANT_CLI}"
     exit 1
 fi
 
 # Step 2: Start devnet with EVM
-DEVNET_NODES="${SAORSA_TEST_DEVNET_NODES:-5}"
-BOOTSTRAP_COUNT="${SAORSA_TEST_BOOTSTRAP_COUNT:-2}"
+DEVNET_NODES="${ANT_TEST_DEVNET_NODES:-5}"
+BOOTSTRAP_COUNT="${ANT_TEST_BOOTSTRAP_COUNT:-2}"
 echo "=== Step 2: Starting devnet with EVM (${DEVNET_NODES} nodes, ${BOOTSTRAP_COUNT} bootstrap) ==="
 mkdir -p "${DOWNLOAD_DIR}"
 
-RUST_LOG=warn "${SAORSA_DEVNET}" \
+RUST_LOG=warn "${ANT_DEVNET}" \
     --nodes "${DEVNET_NODES}" \
     --bootstrap-count "${BOOTSTRAP_COUNT}" \
     --enable-evm \
@@ -167,7 +167,7 @@ else
 fi
 
 # Wait for network to stabilize
-STABILIZE_SECS="${SAORSA_TEST_STABILIZE_SECS:-15}"
+STABILIZE_SECS="${ANT_TEST_STABILIZE_SECS:-15}"
 echo "Waiting ${STABILIZE_SECS} seconds for network stabilization..."
 sleep "${STABILIZE_SECS}"
 echo ""
@@ -178,8 +178,8 @@ ALL_TX_HASHES=""
 # Step 3 & 4: Upload and download each file in ugly_files/
 echo "=== Step 3: File upload/download tests ==="
 
-# Max file size for E2E tests (default 1MB; override with SAORSA_TEST_MAX_FILE_SIZE)
-MAX_FILE_SIZE="${SAORSA_TEST_MAX_FILE_SIZE:-1048576}"
+# Max file size for E2E tests (default 1MB; override with ANT_TEST_MAX_FILE_SIZE)
+MAX_FILE_SIZE="${ANT_TEST_MAX_FILE_SIZE:-1048576}"
 
 # Find test files (skip directories, .DS_Store, and files larger than MAX_FILE_SIZE)
 TEST_FILES=()
@@ -198,8 +198,8 @@ fi
 # If no ugly_files found, create a synthetic test file
 if [ ${#TEST_FILES[@]} -eq 0 ]; then
     echo "No test files in ${UGLY_FILES_DIR}, creating synthetic test file..."
-    SYNTHETIC_FILE="/tmp/saorsa_e2e_synthetic_${TEST_RUN_ID}.txt"
-    echo "saorsa E2E test payload: $(date -u +%Y-%m-%dT%H:%M:%SZ) run=${TEST_RUN_ID}" > "${SYNTHETIC_FILE}"
+    SYNTHETIC_FILE="/tmp/ant_e2e_synthetic_${TEST_RUN_ID}.txt"
+    echo "ant E2E test payload: $(date -u +%Y-%m-%dT%H:%M:%SZ) run=${TEST_RUN_ID}" > "${SYNTHETIC_FILE}"
     TEST_FILES+=("${SYNTHETIC_FILE}")
 fi
 
@@ -211,7 +211,7 @@ for filepath in "${TEST_FILES[@]}"; do
 
     # Upload with payment - write stdout to file to avoid terminal ANSI leakage
     echo "  Uploading..."
-    SECRET_KEY="${WALLET_KEY}" "${SAORSA_CLI}" \
+    SECRET_KEY="${WALLET_KEY}" "${ANT_CLI}" \
         --devnet-manifest "${MANIFEST_FILE}" \
         --evm-network local \
         --timeout-secs 120 \
@@ -257,7 +257,7 @@ for filepath in "${TEST_FILES[@]}"; do
     # Download and verify
     DOWNLOAD_PATH="${DOWNLOAD_DIR}/${filename}"
     echo "  Downloading..."
-    SECRET_KEY="${WALLET_KEY}" "${SAORSA_CLI}" \
+    SECRET_KEY="${WALLET_KEY}" "${ANT_CLI}" \
         --devnet-manifest "${MANIFEST_FILE}" \
         --evm-network local \
         --timeout-secs 120 \
@@ -345,7 +345,7 @@ done
 
 if [ -n "${REJECTION_FILE}" ]; then
     echo "  Attempting upload WITHOUT SECRET_KEY (should fail at client)..."
-    REJECTION_OUTPUT=$("${SAORSA_CLI}" \
+    REJECTION_OUTPUT=$("${ANT_CLI}" \
         --devnet-manifest "${MANIFEST_FILE}" \
         --evm-network local \
         --timeout-secs 10 \
@@ -370,13 +370,13 @@ echo ""
 # Step 7: Test chunk put rejection without wallet
 echo "=== Step 7: Chunk put rejection without wallet ==="
 echo "  Attempting chunk put WITHOUT SECRET_KEY (should fail at client)..."
-echo "test data for rejection e2e" > /tmp/saorsa_rejection_test_${TEST_RUN_ID}.txt
-CHUNK_REJECT_OUTPUT=$("${SAORSA_CLI}" \
+echo "test data for rejection e2e" > /tmp/ant_rejection_test_${TEST_RUN_ID}.txt
+CHUNK_REJECT_OUTPUT=$("${ANT_CLI}" \
     --devnet-manifest "${MANIFEST_FILE}" \
     --evm-network local \
     --timeout-secs 10 \
     --log-level error \
-    chunk put /tmp/saorsa_rejection_test_${TEST_RUN_ID}.txt 2>&1 || true)
+    chunk put /tmp/ant_rejection_test_${TEST_RUN_ID}.txt 2>&1 || true)
 
 CLEAN_CHUNK_OUTPUT=$(echo "${CHUNK_REJECT_OUTPUT}" | strip_ansi)
 

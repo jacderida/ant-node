@@ -1,4 +1,4 @@
-//! Local fullness-based pricing algorithm for saorsa-node.
+//! Local fullness-based pricing algorithm for ant-node.
 //!
 //! Mirrors the logarithmic pricing curve from autonomi's `MerklePaymentVault` contract:
 //! - Empty node → price ≈ `MIN_PRICE` (floor)

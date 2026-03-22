@@ -2,10 +2,10 @@
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
     <Product
         Id="*"
-        Name="Saorsa Node"
+        Name="Ant Node"
         Language="1033"
         Version="$(var.ProductVersion)"
-        Manufacturer="Saorsa Labs"
+        Manufacturer="Autonomi"
         UpgradeCode="E8A7B5F2-3C9D-4E1A-B2F8-7D6C5A4E3B2D">
 
         <Package
@@ -13,20 +13,20 @@
             Compressed="yes"
             InstallScope="perMachine"
             Platform="x64"
-            Description="Saorsa Node - Quantum-proof decentralized network node"
+            Description="Ant Node - Quantum-proof decentralized network node"
             Comments="Pure post-quantum cryptography network node"/>
 
         <MajorUpgrade
-            DowngradeErrorMessage="A newer version of Saorsa Node is already installed."/>
+            DowngradeErrorMessage="A newer version of Ant Node is already installed."/>
 
         <MediaTemplate EmbedCab="yes"/>
 
-        <Icon Id="SaorsaIcon" SourceFile="wix\saorsa.ico"/>
-        <Property Id="ARPPRODUCTICON" Value="SaorsaIcon"/>
-        <Property Id="ARPHELPLINK" Value="https://github.com/saorsa-labs/saorsa-node"/>
-        <Property Id="ARPURLINFOABOUT" Value="https://github.com/saorsa-labs/saorsa-node"/>
+        <Icon Id="AntIcon" SourceFile="wix\ant.ico"/>
+        <Property Id="ARPPRODUCTICON" Value="AntIcon"/>
+        <Property Id="ARPHELPLINK" Value="https://github.com/WithAutonomi/ant-node"/>
+        <Property Id="ARPURLINFOABOUT" Value="https://github.com/WithAutonomi/ant-node"/>
 
-        <Feature Id="MainFeature" Title="Saorsa Node" Level="1">
+        <Feature Id="MainFeature" Title="Ant Node" Level="1">
             <ComponentGroupRef Id="BinariesGroup"/>
             <ComponentRef Id="PathEnvComponent"/>
         </Feature>
@@ -42,7 +42,7 @@
     <Fragment>
         <Directory Id="TARGETDIR" Name="SourceDir">
             <Directory Id="ProgramFiles64Folder">
-                <Directory Id="INSTALLFOLDER" Name="Saorsa">
+                <Directory Id="INSTALLFOLDER" Name="Autonomi">
                     <Directory Id="BinFolder" Name="bin"/>
                 </Directory>
             </Directory>
@@ -51,14 +51,14 @@
 
     <Fragment>
         <ComponentGroup Id="BinariesGroup" Directory="BinFolder">
-            <Component Id="SaorsaNodeComponent" Guid="*" Win64="yes">
-                <File Id="SaorsaNodeExe"
-                      Source="target\x86_64-pc-windows-msvc\release\saorsa-node.exe"
+            <Component Id="AntNodeComponent" Guid="*" Win64="yes">
+                <File Id="AntNodeExe"
+                      Source="target\x86_64-pc-windows-msvc\release\ant-node.exe"
                       KeyPath="yes"/>
             </Component>
-            <Component Id="SaorsaKeygenComponent" Guid="*" Win64="yes">
-                <File Id="SaorsaKeygenExe"
-                      Source="target\x86_64-pc-windows-msvc\release\saorsa-keygen.exe"
+            <Component Id="AntKeygenComponent" Guid="*" Win64="yes">
+                <File Id="AntKeygenExe"
+                      Source="target\x86_64-pc-windows-msvc\release\ant-keygen.exe"
                       KeyPath="yes"/>
             </Component>
         </ComponentGroup>

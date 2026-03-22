@@ -1,13 +1,13 @@
 //! Test harness that orchestrates the test network and EVM testnet.
 //!
 //! The `TestHarness` provides a unified interface for E2E tests, managing
-//! both the saorsa node network and optional Anvil EVM testnet.
+//! both the ant node network and optional Anvil EVM testnet.
 
 use super::anvil::TestAnvil;
 use super::testnet::{TestNetwork, TestNetworkConfig, TestNode};
+use ant_node::client::XorName;
 use evmlib::common::TxHash;
 use saorsa_core::P2PNode;
-use saorsa_node::client::XorName;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::info;
@@ -153,7 +153,7 @@ impl PaymentTracker {
 /// Test harness that manages the complete test environment.
 ///
 /// The harness coordinates:
-/// - A network of 25 saorsa nodes
+/// - A network of 25 ant nodes
 /// - Optional Anvil EVM testnet for payment verification
 /// - Payment tracking for verifying cache behavior
 /// - Helper methods for common test operations

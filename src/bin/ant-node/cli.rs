@@ -1,32 +1,32 @@
 //! Command-line interface definition.
 
-use clap::{Parser, ValueEnum};
-use saorsa_node::config::{
+use ant_node::config::{
     BootstrapCacheConfig, EvmNetworkConfig, IpVersion, NetworkMode, NodeConfig, PaymentConfig,
     UpgradeChannel,
 };
+use clap::{Parser, ValueEnum};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-/// Pure quantum-proof network node for the Saorsa decentralized network.
+/// Pure quantum-proof network node for the Autonomi decentralized network.
 #[derive(Parser, Debug)]
-#[command(name = "saorsa-node")]
+#[command(name = "ant-node")]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
     /// Root directory for node data.
-    #[arg(long, env = "SAORSA_ROOT_DIR")]
+    #[arg(long, env = "ANT_ROOT_DIR")]
     pub root_dir: Option<PathBuf>,
 
     /// Listening port (0 for auto-select).
-    #[arg(long, short, default_value = "0", env = "SAORSA_PORT")]
+    #[arg(long, short, default_value = "0", env = "ANT_PORT")]
     pub port: u16,
 
     /// IP version to use.
-    #[arg(long, value_enum, default_value = "dual", env = "SAORSA_IP_VERSION")]
+    #[arg(long, value_enum, default_value = "dual", env = "ANT_IP_VERSION")]
     pub ip_version: CliIpVersion,
 
     /// Bootstrap peer addresses.
-    #[arg(long, short, env = "SAORSA_BOOTSTRAP")]
+    #[arg(long, short, env = "ANT_BOOTSTRAP")]
     pub bootstrap: Vec<SocketAddr>,
 
     /// Release channel for upgrades.
@@ -34,16 +34,16 @@ pub struct Cli {
         long,
         value_enum,
         default_value = "stable",
-        env = "SAORSA_UPGRADE_CHANNEL"
+        env = "ANT_UPGRADE_CHANNEL"
     )]
     pub upgrade_channel: CliUpgradeChannel,
 
     /// Cache capacity for verified `XorName` values.
-    #[arg(long, default_value = "100000", env = "SAORSA_CACHE_CAPACITY")]
+    #[arg(long, default_value = "100000", env = "ANT_CACHE_CAPACITY")]
     pub cache_capacity: usize,
 
     /// EVM wallet address for receiving payments (e.g., "0x...").
-    #[arg(long, env = "SAORSA_REWARDS_ADDRESS")]
+    #[arg(long, env = "ANT_REWARDS_ADDRESS")]
     pub rewards_address: Option<String>,
 
     /// EVM network for payment processing.
@@ -51,12 +51,12 @@ pub struct Cli {
         long,
         value_enum,
         default_value = "arbitrum-one",
-        env = "SAORSA_EVM_NETWORK"
+        env = "ANT_EVM_NETWORK"
     )]
     pub evm_network: CliEvmNetwork,
 
     /// Metrics port for Prometheus scraping (0 to disable).
-    #[arg(long, default_value = "9100", env = "SAORSA_METRICS_PORT")]
+    #[arg(long, default_value = "9100", env = "ANT_METRICS_PORT")]
     pub metrics_port: u16,
 
     /// Log level.
@@ -64,18 +64,18 @@ pub struct Cli {
     pub log_level: CliLogLevel,
 
     /// Log output format.
-    #[arg(long, value_enum, default_value = "text", env = "SAORSA_LOG_FORMAT")]
+    #[arg(long, value_enum, default_value = "text", env = "ANT_LOG_FORMAT")]
     pub log_format: CliLogFormat,
 
     /// Directory for log file output.
     /// When set, logs are written to files in this directory instead of stdout.
-    /// Files rotate daily and are named saorsa-node.YYYY-MM-DD.log.
-    #[arg(long, env = "SAORSA_LOG_DIR")]
+    /// Files rotate daily and are named ant-node.YYYY-MM-DD.log.
+    #[arg(long, env = "ANT_LOG_DIR")]
     pub log_dir: Option<PathBuf>,
 
     /// Maximum number of rotated log files to retain (only used with --log-dir).
     /// Oldest files are deleted when this limit is reached. Rotation is daily.
-    #[arg(long, default_value = "7", env = "SAORSA_LOG_MAX_FILES")]
+    #[arg(long, default_value = "7", env = "ANT_LOG_MAX_FILES")]
     pub log_max_files: usize,
 
     /// Network mode (production, testnet, or development).
@@ -85,7 +85,7 @@ pub struct Cli {
         long,
         value_enum,
         default_value = "production",
-        env = "SAORSA_NETWORK_MODE"
+        env = "ANT_NETWORK_MODE"
     )]
     pub network_mode: CliNetworkMode,
 
@@ -104,11 +104,11 @@ pub struct Cli {
     pub disable_bootstrap_cache: bool,
 
     /// Directory for bootstrap cache files.
-    #[arg(long, env = "SAORSA_BOOTSTRAP_CACHE_DIR")]
+    #[arg(long, env = "ANT_BOOTSTRAP_CACHE_DIR")]
     pub bootstrap_cache_dir: Option<PathBuf>,
 
     /// Maximum peers to cache in the bootstrap cache.
-    #[arg(long, default_value = "10000", env = "SAORSA_BOOTSTRAP_CACHE_CAPACITY")]
+    #[arg(long, default_value = "10000", env = "ANT_BOOTSTRAP_CACHE_CAPACITY")]
     pub bootstrap_cache_capacity: usize,
 }
 

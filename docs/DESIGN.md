@@ -1,11 +1,11 @@
-# saorsa-node Design Document
+# ant-node Design Document
 
 ## Overview
 
-Build a **pure quantum-proof network node** (`saorsa-node`) that:
+Build a **pure quantum-proof network node** (`ant-node`) that:
 1. Uses `saorsa-core` for networking, NAT traversal, and PQC crypto
 2. Stays clean - no legacy protocol dependencies
-3. Auto-migrates local ant-node data on startup
+3. Auto-migrates local legacy ant-node data on startup
 4. Implements auto-upgrade with ML-DSA signature verification
 5. Supports dual IPv4/IPv6 DHT for maximum connectivity
 6. Features geographic routing, Sybil resistance, and trust-based routing
@@ -13,14 +13,14 @@ Build a **pure quantum-proof network node** (`saorsa-node`) that:
 ## Architecture Philosophy
 
 **Clean separation of concerns:**
-- **saorsa-node** = Pure quantum-proof node (no legacy baggage)
-- **saorsa-cli** = Client layer (file/chunk operations with EVM payments)
-- **Auto-migration** = Nodes discover and upload local ant-node data
+- **ant-node** = Pure quantum-proof node (no legacy baggage)
+- **ant-cli** = Client layer (file/chunk operations with EVM payments)
+- **Auto-migration** = Nodes discover and upload local legacy ant-node data
 - **Dual IP DHT** = IPv4 and IPv6 close groups for resilience
 
 This avoids the complexity of bridge nodes by pushing migration logic to:
 1. **Clients** - which naturally access data and can write to new network
-2. **Node startup** - which can scan for local ant-node data and migrate it
+2. **Node startup** - which can scan for local legacy ant-node data and migrate it
 
 ---
 
@@ -29,53 +29,53 @@ This avoids the complexity of bridge nodes by pushing migration logic to:
 ### How Migration Works
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                      TRANSITION PERIOD                          │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│   ┌─────────────┐         ┌─────────────────┐                  │
-│   │ ant-network │ ◄─────► │   saorsa-cli    │                  │
-│   │ (classical) │  read   │ (client layer)  │                  │
-│   └─────────────┘         └────────┬────────┘                  │
-│                                    │ write                      │
-│                                    ▼                            │
-│                           ┌─────────────────┐                  │
-│   ┌─────────────┐        │ saorsa-network  │                   │
-│   │ant-node data│ ──────►│ (quantum-proof) │                   │
-│   │   on disk   │ migrate │                 │                   │
-│   └─────────────┘        └─────────────────┘                   │
-│         ▲                         ▲                             │
-│         │ scan                    │                             │
-│   ┌─────┴─────────────────────────┴─────┐                      │
-│   │           saorsa-node               │                      │
-│   │    (pure quantum-proof node)        │                      │
-│   └─────────────────────────────────────┘                      │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
++-------------------------------------------------------------+
+|                      TRANSITION PERIOD                          |
++-------------------------------------------------------------+
+|                                                                 |
+|   +-----------+         +-----------------+                  |
+|   | ant-network | <----> |   ant-cli       |                  |
+|   | (classical) |  read   | (client layer)  |                  |
+|   +-----------+         +--------+--------+                  |
+|                                    | write                      |
+|                                    v                            |
+|                           +-----------------+                  |
+|   +-----------+        | autonomi-network |                   |
+|   |ant-node data| ----->| (quantum-proof) |                   |
+|   |   on disk   | migrate |                 |                   |
+|   +-----------+        +-----------------+                   |
+|         ^                         ^                             |
+|         | scan                    |                             |
+|   +-----+-----------------------+-+                      |
+|   |           ant-node                |                      |
+|   |    (pure quantum-proof node)        |                      |
+|   +-----------------------------------+                      |
+|                                                                 |
++-------------------------------------------------------------+
 ```
 
 ### Client Bridge Behavior
 
 ```rust
-impl SaorsaClient {
+impl AutonomiClient {
     async fn get_data(&self, address: &DataAddress) -> Result<Data> {
-        // 1. Try saorsa-network first (quantum-proof)
-        if let Ok(data) = self.saorsa_network.get(address).await {
+        // 1. Try autonomi-network first (quantum-proof)
+        if let Ok(data) = self.autonomi_network.get(address).await {
             return Ok(data);
         }
 
         // 2. Fall back to ant-network (legacy)
         let data = self.ant_network.get(address).await?;
 
-        // 3. Migrate to saorsa-network (lazy migration)
-        self.saorsa_network.put(&data).await?;
+        // 3. Migrate to autonomi-network (lazy migration)
+        self.autonomi_network.put(&data).await?;
 
         Ok(data)
     }
 
     async fn put_data(&self, data: &Data) -> Result<DataAddress> {
         // New data goes ONLY to quantum-proof network
-        self.saorsa_network.put(data).await
+        self.autonomi_network.put(data).await
     }
 }
 ```
@@ -83,14 +83,14 @@ impl SaorsaClient {
 ### Node Auto-Migration on Startup
 
 ```rust
-impl SaorsaNode {
+impl AntNode {
     async fn startup(&mut self) -> Result<()> {
         // 1. Normal node startup
         self.initialize_network().await?;
 
-        // 2. Scan for local ant-node data directories
+        // 2. Scan for local legacy ant-node data directories
         if let Some(ant_data_dir) = self.find_ant_node_data() {
-            info!("Found ant-node data at {:?}, starting migration", ant_data_dir);
+            info!("Found legacy ant-node data at {:?}, starting migration", ant_data_dir);
             self.migrate_local_ant_data(ant_data_dir).await?;
         }
 
@@ -102,7 +102,7 @@ impl SaorsaNode {
         let mut stats = MigrationStats::default();
 
         for record in reader.read_all_records() {
-            // Store on saorsa-network
+            // Store on autonomi-network
             self.dht_manager.put(record.key, record.value).await?;
             stats.migrated += 1;
         }
@@ -132,12 +132,12 @@ impl SaorsaNode {
 ### Project Structure (Thin Wrapper - Leverages saorsa-core)
 
 ```
-saorsa-node/
+ant-node/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs                    # Library exports
 │   ├── bin/
-│   │   └── saorsa-node/
+│   │   └── ant-node/
 │   │       ├── main.rs           # CLI entry point
 │   │       ├── cli.rs            # Command-line parsing (clap)
 │   │       └── rpc_service.rs    # Admin RPC service (optional)
@@ -147,9 +147,9 @@ saorsa-node/
 │   ├── config.rs                 # Configuration (wraps saorsa-core configs)
 │   ├── event.rs                  # NodeEvent system
 │   │
-│   ├── migration/                # ant-node data migration (NEW CODE)
+│   ├── migration/                # Legacy ant-node data migration (NEW CODE)
 │   │   ├── mod.rs
-│   │   ├── scanner.rs            # Find ant-node data directories
+│   │   ├── scanner.rs            # Find legacy ant-node data directories
 │   │   ├── ant_record_reader.rs  # Decrypt AES-256-GCM-SIV records
 │   │   └── uploader.rs           # Upload via NetworkCoordinator
 │   │
@@ -176,9 +176,9 @@ saorsa-node/
 
 ### Core Components
 
-**KEY INSIGHT: saorsa-core already provides ALL security, networking, and DHT features. saorsa-node is a thin wrapper!**
+**KEY INSIGHT: saorsa-core already provides ALL security, networking, and DHT features. ant-node is a thin wrapper!**
 
-#### 1. SaorsaNode (Thin Wrapper Around saorsa-core)
+#### 1. AntNode (Thin Wrapper Around saorsa-core)
 
 ```rust
 use saorsa_core::{
@@ -192,7 +192,7 @@ use saorsa_core::{
 
 pub struct RunningNode {
     shutdown_sender: watch::Sender<bool>,
-    // USE SAORSA-CORE DIRECTLY - NO REIMPLEMENTATION!
+    // USE ANT-CORE DIRECTLY - NO REIMPLEMENTATION!
     node: Arc<P2PNode>,                     // Integrates ALL components
     bootstrap: Arc<BootstrapManager>,       // 30,000 peer cache
     // Events
@@ -208,7 +208,7 @@ pub struct NodeBuilder {
 }
 ```
 
-#### 2. Dual IPv4/IPv6 - ALREADY IN SAORSA-CORE!
+#### 2. Dual IPv4/IPv6 - ALREADY IN ANT-CORE!
 
 **File:** `saorsa-core/src/messaging/network_config.rs`
 
@@ -240,7 +240,7 @@ pub struct DualStackNetworkNode {
 pub async fn connect_happy_eyeballs(&self, targets: &[SocketAddr]) -> Result<PeerId>
 ```
 
-#### 3. Sybil Resistance - ALREADY IN SAORSA-CORE!
+#### 3. Sybil Resistance - ALREADY IN ANT-CORE!
 
 **File:** `saorsa-core/src/security.rs` (1,245 lines)
 
@@ -267,7 +267,7 @@ pub struct IPv6NodeID {
 }
 ```
 
-#### 4. EigenTrust - ALREADY IN SAORSA-CORE!
+#### 4. EigenTrust - ALREADY IN ANT-CORE!
 
 **File:** `saorsa-core/src/adaptive/trust.rs` (825 lines)
 
@@ -287,7 +287,7 @@ let score = node.peer_trust(&peer_id);
 node.report_trust_event(&peer_id, TrustEvent::SuccessfulResponse);
 ```
 
-#### 5. Geographic Routing - ALREADY IN SAORSA-CORE!
+#### 5. Geographic Routing - ALREADY IN ANT-CORE!
 
 **File:** `saorsa-core/src/dht/geographic_routing.rs`
 
@@ -301,7 +301,7 @@ use saorsa_core::dht::geographic_routing::{GeographicRegion, LatencyAwareSelecti
 // ASN diversity enforcement
 ```
 
-#### 6. Security - ALREADY IN SAORSA-CORE!
+#### 6. Security - ALREADY IN ANT-CORE!
 
 ```rust
 // IP diversity enforcement for Sybil resistance
@@ -328,24 +328,24 @@ node.peer_trust(&peer)   // Quick trust score lookup
 node.report_trust_event(&peer, event)  // Report trust signals
 ```
 
-#### 8. What saorsa-node ACTUALLY Needs to Build
+#### 8. What ant-node ACTUALLY Needs to Build
 
 **Only these components are truly new:**
 
 ```rust
 /// Auto-upgrade system (not in saorsa-core)
 pub struct UpgradeMonitor {
-    github_repo: String,                      // "saorsa-labs/saorsa-node"
+    github_repo: String,                      // "WithAutonomi/ant-node"
     release_signing_key: MlDsaPublicKey,      // Embedded in binary
     check_interval: Duration,                 // Default: 1 hour
     rollback_dir: PathBuf,                    // For failed upgrades
 }
 
-/// ant-node data migration (not in saorsa-core)
+/// Legacy ant-node data migration (not in saorsa-core)
 pub struct AntDataMigrator {
     ant_data_dir: PathBuf,
     // Reads AES-256-GCM-SIV encrypted records
-    // Uploads to saorsa-network
+    // Uploads to autonomi-network
 }
 
 /// Node lifecycle and CLI (wrapper around saorsa-core)
@@ -368,15 +368,15 @@ pub struct NodeLifecycle {
 - IP diversity enforcement for Sybil resistance
 - P2PNode that integrates everything
 
-**saorsa-node only needs to build**:
+**ant-node only needs to build**:
 1. Auto-upgrade system (Phase 1 Critical)
-2. ant-node data migration
+2. Legacy ant-node data migration
 3. Node lifecycle/CLI wrapper
 4. Configuration/startup glue
 
 ### Phase 1: Repository Setup & Core Structure
 
-- [ ] Initialize git repo, push to `saorsa-labs/saorsa-node` on GitHub
+- [ ] Initialize git repo, push to `WithAutonomi/ant-node` on GitHub
 - [ ] Create Cargo.toml with saorsa-core, saorsa-pqc dependencies
 - [ ] Create project structure
 - [ ] Implement NodeBuilder that configures and creates NetworkCoordinator
@@ -393,11 +393,11 @@ pub struct NodeLifecycle {
 - [ ] Rollback functionality (backup current binary)
 - [ ] CLI flag: `--upgrade-channel`
 
-### Phase 3: ant-node Data Migration
+### Phase 3: Legacy ant-node Data Migration
 
-**Read and re-encrypt ant-node records for the new network**
+**Read and re-encrypt legacy ant-node records for the new network**
 
-- [ ] Directory scanner for common ant-node paths
+- [ ] Directory scanner for common legacy ant-node paths
 - [ ] AES-256-GCM-SIV decryption (read-only, for migration)
 - [ ] Upload via coordinator.dht.put() or coordinator.storage.store()
 - [ ] Progress tracking and resume capability
@@ -414,7 +414,7 @@ pub struct NodeLifecycle {
 - [ ] Single node startup/shutdown test
 - [ ] Multi-node network test (local)
 - [ ] DHT put/get test via NetworkCoordinator
-- [ ] Migration test (mock ant-node data)
+- [ ] Migration test (mock legacy ant-node data)
 - [ ] Auto-upgrade test (mock release)
 - [ ] Test IPv4-only, IPv6-only, dual-stack scenarios
 
@@ -422,7 +422,7 @@ pub struct NodeLifecycle {
 
 - [ ] README.md with quick start
 - [ ] API documentation
-- [ ] Migration guide from ant-node
+- [ ] Migration guide from legacy ant-node
 - [ ] Release workflow with ML-DSA signing
 - [ ] CI/CD pipeline (GitHub Actions)
 
@@ -431,15 +431,15 @@ pub struct NodeLifecycle {
 ## Key Design Decisions (Finalized)
 
 ### 1. Node Architecture: Pure Quantum-Proof (No Legacy)
-- **No libp2p** - saorsa-node is clean, uses only ant-quic + saorsa-core
-- **Client is the bridge** - saorsa-cli handles reading from ant-network
-- **Node auto-migrates** - scans local ant-node data and uploads to network
+- **No libp2p** - ant-node is clean, uses only ant-quic + saorsa-core
+- **Client is the bridge** - ant-cli handles reading from ant-network
+- **Node auto-migrates** - scans local legacy ant-node data and uploads to network
 - **Rationale**: Simpler node, cleaner security model, easier maintenance
 
 ### 2. Storage Encryption: ChaCha20-Poly1305 (Quantum-Resistant)
-- **Disk**: ChaCha20-Poly1305 (new format, not ant-node compatible)
+- **Disk**: ChaCha20-Poly1305 (new format, not legacy ant-node compatible)
 - **Network**: ML-KEM-768 for key exchange, ChaCha20-Poly1305 for symmetric
-- **Migration**: ant-node data is read and re-encrypted during upload
+- **Migration**: Legacy ant-node data is read and re-encrypted during upload
 - **Rationale**: Full quantum-resistance, clean break from legacy crypto
 
 ### 3. Identity: Fresh ML-DSA-65 Keypairs
@@ -461,8 +461,8 @@ pub struct NodeLifecycle {
 - **Rationale**: Production-grade security
 
 ### 6. Migration Strategy: Client-as-Bridge + Node Auto-Migration
-- Client reads from both networks, writes to saorsa-network only
-- Nodes scan for local ant-node data and upload automatically
+- Client reads from both networks, writes to Autonomi network only
+- Nodes scan for local legacy ant-node data and upload automatically
 - Organic migration through usage
 - **Rationale**: No bridge nodes, smooth transition
 
@@ -482,9 +482,9 @@ pub struct NodeLifecycle {
 saorsa-core = { path = "../saorsa-core" }
 saorsa-pqc = { path = "../saorsa-pqc" }  # ML-DSA for upgrade signature verification
 
-# Migration: Decrypt ant-node data (read-only)
-aes-gcm-siv = "0.11"    # Decrypt existing ant-node records
-hkdf = "0.12"           # Key derivation for ant-node format
+# Migration: Decrypt legacy ant-node data (read-only)
+aes-gcm-siv = "0.11"    # Decrypt existing legacy ant-node records
+hkdf = "0.12"           # Key derivation for legacy ant-node format
 
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
@@ -524,7 +524,7 @@ tokio-test = "0.4"
 
 ### Migration Speed Risk
 - **Risk**: Data migration may be slow if users don't access old data
-- **Mitigation**: Node auto-migration uploads local ant-node data proactively
+- **Mitigation**: Node auto-migration uploads local legacy ant-node data proactively
 - **Mitigation**: Popular data migrates first through client usage
 - **Mitigation**: Optional bulk migration tool for operators
 

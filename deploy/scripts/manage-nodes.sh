@@ -1,47 +1,47 @@
 #!/bin/bash
-# Saorsa Node Manager - Start/stop/status for multiple nodes
+# Autonomi Node Manager - Start/stop/status for multiple nodes
 # Usage: ./manage-nodes.sh [action] [options]
 set -euo pipefail
 
 ACTION="${1:-status}"
-NODE_PATTERN="${2:-saorsa-node-*}"
+NODE_PATTERN="${2:-ant-node-*}"
 METRICS_BASE_PORT="${METRICS_BASE_PORT:-9100}"
 
 # Count nodes by matching systemd services
 get_node_count() {
     systemctl list-units --all --type=service \
-        | grep -c "saorsa-node-[0-9]" || echo "0"
+        | grep -c "ant-node-[0-9]" || echo "0"
 }
 
 # Get list of node indices
 get_node_indices() {
     systemctl list-units --all --type=service \
-        | grep "saorsa-node-[0-9]" \
-        | sed 's/.*saorsa-node-\([0-9]*\).*/\1/' \
+        | grep "ant-node-[0-9]" \
+        | sed 's/.*ant-node-\([0-9]*\).*/\1/' \
         | sort -n
 }
 
 case "$ACTION" in
     start)
-        echo "Starting all saorsa nodes..."
+        echo "Starting all ant nodes..."
         for i in $(get_node_indices); do
-            systemctl start "saorsa-node-$i" 2>/dev/null || true
+            systemctl start "ant-node-$i" 2>/dev/null || true
         done
         echo "Started $(get_node_count) nodes"
         ;;
 
     stop)
-        echo "Stopping all saorsa nodes..."
+        echo "Stopping all ant nodes..."
         for i in $(get_node_indices); do
-            systemctl stop "saorsa-node-$i" 2>/dev/null || true
+            systemctl stop "ant-node-$i" 2>/dev/null || true
         done
         echo "Stopped all nodes"
         ;;
 
     restart)
-        echo "Restarting all saorsa nodes..."
+        echo "Restarting all ant nodes..."
         for i in $(get_node_indices); do
-            systemctl restart "saorsa-node-$i" 2>/dev/null || true
+            systemctl restart "ant-node-$i" 2>/dev/null || true
             sleep 0.2  # Stagger restarts
         done
         echo "Restarted $(get_node_count) nodes"
@@ -54,7 +54,7 @@ case "$ACTION" in
         FAILED_NODES=""
 
         for i in $(get_node_indices); do
-            if systemctl is-active --quiet "saorsa-node-$i"; then
+            if systemctl is-active --quiet "ant-node-$i"; then
                 ((RUNNING++)) || true
             else
                 ((FAILED++)) || true
@@ -62,7 +62,7 @@ case "$ACTION" in
             fi
         done
 
-        echo "=== Saorsa Node Status ==="
+        echo "=== Autonomi Node Status ==="
         echo "Total nodes: $TOTAL"
         echo "Running: $RUNNING"
         echo "Failed: $FAILED"
@@ -70,7 +70,7 @@ case "$ACTION" in
             echo "Failed nodes:$FAILED_NODES"
         fi
         echo ""
-        echo "Use 'systemctl status saorsa-node-N' for individual node details"
+        echo "Use 'systemctl status ant-node-N' for individual node details"
         ;;
 
     health)
@@ -88,7 +88,7 @@ case "$ACTION" in
             else
                 ((UNHEALTHY++)) || true
                 # Get more details for unhealthy nodes
-                if systemctl is-active --quiet "saorsa-node-$i"; then
+                if systemctl is-active --quiet "ant-node-$i"; then
                     PEERS=$(curl -s --max-time 2 "http://localhost:$PORT/metrics" 2>/dev/null \
                         | grep -E "^p2p_network_peer_count" | awk '{print $2}' || echo "?")
                     echo "Node $i (port $PORT): unhealthy (peers: $PEERS)"
@@ -126,24 +126,24 @@ case "$ACTION" in
     logs)
         NODE_ID="${2:-0}"
         echo "=== Logs for node $NODE_ID ==="
-        journalctl -u "saorsa-node-$NODE_ID" -f --no-pager
+        journalctl -u "ant-node-$NODE_ID" -f --no-pager
         ;;
 
     cleanup)
-        echo "Cleaning up all saorsa nodes..."
+        echo "Cleaning up all ant nodes..."
 
         # Stop all nodes
         for i in $(get_node_indices); do
-            systemctl stop "saorsa-node-$i" 2>/dev/null || true
-            systemctl disable "saorsa-node-$i" 2>/dev/null || true
-            rm -f "/etc/systemd/system/saorsa-node-$i.service"
+            systemctl stop "ant-node-$i" 2>/dev/null || true
+            systemctl disable "ant-node-$i" 2>/dev/null || true
+            rm -f "/etc/systemd/system/ant-node-$i.service"
         done
 
         systemctl daemon-reload
 
         # Remove data directories
-        rm -rf /var/lib/saorsa/nodes
-        rm -rf /var/log/saorsa
+        rm -rf /var/lib/ant/nodes
+        rm -rf /var/log/ant
 
         echo "Cleanup complete"
         ;;

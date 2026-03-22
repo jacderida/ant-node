@@ -1,6 +1,6 @@
 //! Live testnet tests for load testing and data verification.
 //!
-//! These tests connect to the live saorsa testnet for comprehensive testing.
+//! These tests connect to the live Autonomi testnet for comprehensive testing.
 //! They are designed to be run via shell scripts that set environment variables.
 //! When environment variables are not set, the tests skip gracefully.
 //!
@@ -23,7 +23,7 @@ use std::time::Duration;
 
 /// Get bootstrap addresses from environment or use defaults.
 fn get_bootstrap_addrs() -> Vec<SocketAddr> {
-    let bootstrap_str = env::var("SAORSA_TEST_BOOTSTRAP")
+    let bootstrap_str = env::var("ANT_TEST_BOOTSTRAP")
         .unwrap_or_else(|_| "142.93.52.129:12000,24.199.82.114:12000".to_string());
 
     bootstrap_str

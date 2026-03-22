@@ -41,7 +41,7 @@ pub const NODE_STORAGE_LIMIT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 
-/// Builder for constructing a saorsa node.
+/// Builder for constructing an Ant node.
 pub struct NodeBuilder {
     config: NodeConfig,
 }
@@ -59,7 +59,7 @@ impl NodeBuilder {
     ///
     /// Returns an error if the node fails to start.
     pub async fn build(mut self) -> Result<RunningNode> {
-        info!("Building saorsa-node with config: {:?}", self.config);
+        info!("Building ant-node with config: {:?}", self.config);
 
         // Validate rewards address in production
         if self.config.network_mode == NetworkMode::Production {
@@ -424,7 +424,7 @@ impl NodeBuilder {
     }
 }
 
-/// A running saorsa node.
+/// A running Ant node.
 pub struct RunningNode {
     config: NodeConfig,
     p2p_node: Arc<P2PNode>,

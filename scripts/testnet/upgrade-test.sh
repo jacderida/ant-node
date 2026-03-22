@@ -12,7 +12,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WORKERS=("142.93.52.129" "24.199.82.114" "192.34.62.192" "159.223.131.196")
 START_INDICES=(0 50 100 150)
 
-echo "=== Saorsa Upgrade Test ==="
+echo "=== Autonomi Upgrade Test ==="
 echo "Testing auto-upgrade functionality across 200-node testnet"
 echo ""
 
@@ -21,8 +21,8 @@ get_all_versions() {
     echo "--- Current Versions ---"
     for i in "${!WORKERS[@]}"; do
         IP="${WORKERS[$i]}"
-        VERSION=$(ssh -o StrictHostKeyChecking=no root@$IP "/usr/local/bin/saorsa-node --version 2>/dev/null | head -1" || echo "unknown")
-        RUNNING=$(ssh -o StrictHostKeyChecking=no root@$IP "pgrep -c saorsa-node 2>/dev/null" || echo "0")
+        VERSION=$(ssh -o StrictHostKeyChecking=no root@$IP "/usr/local/bin/ant-node --version 2>/dev/null | head -1" || echo "unknown")
+        RUNNING=$(ssh -o StrictHostKeyChecking=no root@$IP "pgrep -c ant-node 2>/dev/null" || echo "0")
         echo "Worker $((i+1)) ($IP): $VERSION - $RUNNING nodes running"
     done
     echo ""
@@ -34,7 +34,7 @@ check_upgrade_config() {
     for i in "${!WORKERS[@]}"; do
         IP="${WORKERS[$i]}"
         echo -n "Worker $((i+1)) ($IP): "
-        RUNNING=$(ssh -o StrictHostKeyChecking=no root@$IP "pgrep -c saorsa-node 2>/dev/null" || echo "0")
+        RUNNING=$(ssh -o StrictHostKeyChecking=no root@$IP "pgrep -c ant-node 2>/dev/null" || echo "0")
         echo "$RUNNING nodes running (auto-upgrade always enabled)"
     done
     echo ""
@@ -65,11 +65,11 @@ monitor_upgrade() {
             IP="${WORKERS[$i]}"
 
             # Count nodes on target version (check logs for version)
-            RUNNING=$(ssh -o StrictHostKeyChecking=no root@$IP "pgrep -c saorsa-node 2>/dev/null" || echo "0")
+            RUNNING=$(ssh -o StrictHostKeyChecking=no root@$IP "pgrep -c ant-node 2>/dev/null" || echo "0")
             TOTAL_NODES=$((TOTAL_NODES + RUNNING))
 
             # Check if binary is updated
-            CURRENT_VER=$(ssh -o StrictHostKeyChecking=no root@$IP "/usr/local/bin/saorsa-node --version 2>/dev/null | grep -oP 'saorsa-node \K[0-9.]+'" || echo "0")
+            CURRENT_VER=$(ssh -o StrictHostKeyChecking=no root@$IP "/usr/local/bin/ant-node --version 2>/dev/null | grep -oP 'ant-node \K[0-9.]+'" || echo "0")
             if [ "$CURRENT_VER" = "$TARGET_VERSION" ]; then
                 TOTAL_UPGRADED=$((TOTAL_UPGRADED + RUNNING))
             fi
@@ -101,7 +101,7 @@ get_latest_release
 
 echo ""
 echo "=== Phase 2: Check for Pending Upgrade ==="
-CURRENT_VER=$(ssh -o StrictHostKeyChecking=no root@${WORKERS[0]} "/usr/local/bin/saorsa-node --version 2>/dev/null | grep -oP 'saorsa-node \K[0-9.]+'" || echo "0")
+CURRENT_VER=$(ssh -o StrictHostKeyChecking=no root@${WORKERS[0]} "/usr/local/bin/ant-node --version 2>/dev/null | grep -oP 'ant-node \K[0-9.]+'" || echo "0")
 LATEST_VER=$(gh release view --json tagName -q '.tagName' 2>/dev/null | sed 's/v//' || echo "unknown")
 
 echo "Current version: $CURRENT_VER"

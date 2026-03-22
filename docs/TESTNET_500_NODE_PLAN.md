@@ -2,7 +2,7 @@
 
 ## Version Information
 
-- **saorsa-node**: v0.1.0
+- **ant-node**: v0.1.0
 - **saorsa-core**: v0.7.6
 - **Target**: 500 nodes across 5 Digital Ocean workers
 
@@ -75,9 +75,9 @@
 | Test | Description | Pass Criteria |
 |------|-------------|---------------|
 | Cloud-init execution | Worker VMs bootstrap correctly | All 100 nodes per worker start |
-| Systemd services | All node services running | `systemctl status saorsa-node-*` shows active |
+| Systemd services | All node services running | `systemctl status ant-node-*` shows active |
 | Resource limits | Memory/CPU limits enforced | < 350MB per node |
-| Log collection | Logs accessible | `/var/log/saorsa/node-*.log` populated |
+| Log collection | Logs accessible | `/var/log/ant/node-*.log` populated |
 
 ---
 
@@ -241,7 +241,7 @@
 | Metric | Healthy Range | Alert Threshold |
 |--------|---------------|-----------------|
 | `ip_diversity_rejections_total` (rate) | < 1/min | > 10/min (possible attack) |
-| Max nodes per IP | ≤ 50 | > 50 (limit breached) |
+| Max nodes per IP | <= 50 | > 50 (limit breached) |
 
 ### 5.9 Geographic Diversity Enforcement (NEW in 0.7.5)
 | Test | Description | Pass Criteria |
@@ -255,7 +255,7 @@
 |--------|---------------|-----------------|
 | `geographic_diversity_rejections_total` (rate) | < 1/min | > 10/min |
 | `nodes_per_region{region="..."}` | Even distribution | Single region > 40% |
-| Regions covered | ≥ 3 | < 3 regions |
+| Regions covered | >= 3 | < 3 regions |
 
 ### 5.10 Trust Enforcement (NEW in 0.7.6)
 | Test | Description | Pass Criteria |
@@ -367,7 +367,7 @@
 | Witness Failures | `dht_security_witness_failures_total` increases |
 | Node Evictions | `dht_security_nodes_evicted_total` increases |
 
-### Dashboard Panels (see grafana-saorsa-complete.json)
+### Dashboard Panels (see grafana-ant-node-complete.json)
 1. **Network Overview** - Total nodes, health status, system status
 2. **Security Dashboard** - Attack scores, BFT mode, evictions
 3. **Trust Metrics** - EigenTrust, witness validation, interactions

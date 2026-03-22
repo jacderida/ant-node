@@ -40,7 +40,7 @@ pub fn disable_app_nap() -> Result<AppNapActivity, String> {
         let options: u64 = 0x00FF_FFFF;
 
         let reason =
-            NSString::from_str("saorsa-node: P2P network daemon performing background operations");
+            NSString::from_str("ant-node: P2P network daemon performing background operations");
 
         let activity: AppNapActivity = msg_send![
             &process_info,

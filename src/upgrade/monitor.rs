@@ -77,7 +77,7 @@ impl UpgradeMonitor {
             Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| Version::new(0, 0, 0));
 
         let client = reqwest::Client::builder()
-            .user_agent(concat!("saorsa-node/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("ant-node/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_else(|e| {
@@ -134,7 +134,7 @@ impl UpgradeMonitor {
         current_version: Version,
     ) -> Self {
         let client = reqwest::Client::builder()
-            .user_agent(concat!("saorsa-node/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("ant-node/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_else(|e| {
@@ -645,7 +645,7 @@ mod tests {
     #[test]
     fn test_stable_channel_filters_beta() {
         let monitor = UpgradeMonitor::new(
-            "saorsa-labs/saorsa-node".to_string(),
+            "WithAutonomi/ant-node".to_string(),
             UpgradeChannel::Stable,
             24,
         );
@@ -661,7 +661,7 @@ mod tests {
     #[test]
     fn test_beta_channel_accepts_beta() {
         let monitor = UpgradeMonitor::new(
-            "saorsa-labs/saorsa-node".to_string(),
+            "WithAutonomi/ant-node".to_string(),
             UpgradeChannel::Beta,
             24,
         );
@@ -680,11 +680,11 @@ mod tests {
             "prerelease": false,
             "assets": [
                 {
-                    "name": "saorsa-node-x86_64-unknown-linux-gnu",
+                    "name": "ant-node-x86_64-unknown-linux-gnu",
                     "browser_download_url": "https://example.com/binary"
                 },
                 {
-                    "name": "saorsa-node-x86_64-unknown-linux-gnu.sig",
+                    "name": "ant-node-x86_64-unknown-linux-gnu.sig",
                     "browser_download_url": "https://example.com/binary.sig"
                 }
             ]
@@ -717,27 +717,27 @@ mod tests {
         // Test with archive format (CLI releases)
         let assets = vec![
             Asset {
-                name: "saorsa-node-cli-linux-x64.tar.gz".to_string(),
+                name: "ant-node-cli-linux-x64.tar.gz".to_string(),
                 browser_download_url: "https://example.com/linux".to_string(),
             },
             Asset {
-                name: "saorsa-node-cli-linux-x64.tar.gz.sig".to_string(),
+                name: "ant-node-cli-linux-x64.tar.gz.sig".to_string(),
                 browser_download_url: "https://example.com/linux.sig".to_string(),
             },
             Asset {
-                name: "saorsa-node-cli-macos-arm64.tar.gz".to_string(),
+                name: "ant-node-cli-macos-arm64.tar.gz".to_string(),
                 browser_download_url: "https://example.com/macos".to_string(),
             },
             Asset {
-                name: "saorsa-node-cli-macos-arm64.tar.gz.sig".to_string(),
+                name: "ant-node-cli-macos-arm64.tar.gz.sig".to_string(),
                 browser_download_url: "https://example.com/macos.sig".to_string(),
             },
             Asset {
-                name: "saorsa-node-cli-windows-x64.zip".to_string(),
+                name: "ant-node-cli-windows-x64.zip".to_string(),
                 browser_download_url: "https://example.com/windows".to_string(),
             },
             Asset {
-                name: "saorsa-node-cli-windows-x64.zip.sig".to_string(),
+                name: "ant-node-cli-windows-x64.zip.sig".to_string(),
                 browser_download_url: "https://example.com/windows.sig".to_string(),
             },
         ];
@@ -759,21 +759,21 @@ mod tests {
     #[test]
     fn test_is_binary_asset() {
         // Archive formats should be identified (CLI releases)
-        assert!(is_binary_asset("saorsa-node-cli-linux-x64.tar.gz"));
-        assert!(is_binary_asset("saorsa-node-cli-macos-arm64.tar.gz"));
-        assert!(is_binary_asset("saorsa-node-cli-windows-x64.zip"));
+        assert!(is_binary_asset("ant-node-cli-linux-x64.tar.gz"));
+        assert!(is_binary_asset("ant-node-cli-macos-arm64.tar.gz"));
+        assert!(is_binary_asset("ant-node-cli-windows-x64.zip"));
 
         // Signature and metadata files should be excluded
-        assert!(!is_binary_asset("saorsa-node.sig"));
-        assert!(!is_binary_asset("saorsa-node.sha256"));
-        assert!(!is_binary_asset("saorsa-node.md5"));
+        assert!(!is_binary_asset("ant-node.sig"));
+        assert!(!is_binary_asset("ant-node.sha256"));
+        assert!(!is_binary_asset("ant-node.md5"));
         assert!(!is_binary_asset("RELEASE_NOTES.txt"));
         assert!(!is_binary_asset("README.md"));
 
         // Installer packages should be excluded (handled separately)
-        assert!(!is_binary_asset("saorsa-node.deb"));
-        assert!(!is_binary_asset("saorsa-node.rpm"));
-        assert!(!is_binary_asset("saorsa-node.msi"));
+        assert!(!is_binary_asset("ant-node.deb"));
+        assert!(!is_binary_asset("ant-node.rpm"));
+        assert!(!is_binary_asset("ant-node.msi"));
     }
 
     /// Test 10: Monitor check interval
@@ -808,7 +808,7 @@ mod tests {
             "aarch64" => "arm64",
             _ => std::env::consts::ARCH,
         };
-        let archive_name = format!("saorsa-node-cli-{friendly_os}-{friendly_arch}.{archive_ext}");
+        let archive_name = format!("ant-node-cli-{friendly_os}-{friendly_arch}.{archive_ext}");
 
         let release = GitHubRelease {
             tag_name: "v1.1.0".to_string(),
@@ -910,11 +910,11 @@ mod tests {
     #[test]
     fn test_monitor_repo() {
         let monitor = UpgradeMonitor::new(
-            "saorsa-labs/saorsa-node".to_string(),
+            "WithAutonomi/ant-node".to_string(),
             UpgradeChannel::Stable,
             24,
         );
-        assert_eq!(monitor.repo(), "saorsa-labs/saorsa-node");
+        assert_eq!(monitor.repo(), "WithAutonomi/ant-node");
     }
 
     /// Test 16: Current version getter
@@ -975,9 +975,9 @@ mod tests {
         let os = std::env::consts::OS;
         // On Windows, binary assets require .exe extension
         #[cfg(windows)]
-        let bin_name = format!("saorsa-node-{arch}-{os}.exe");
+        let bin_name = format!("ant-node-{arch}-{os}.exe");
         #[cfg(not(windows))]
-        let bin_name = format!("saorsa-node-{arch}-{os}");
+        let bin_name = format!("ant-node-{arch}-{os}");
         let releases = vec![
             GitHubRelease {
                 tag_name: "v1.1.0-beta.1".to_string(),
@@ -1026,9 +1026,9 @@ mod tests {
         let os = std::env::consts::OS;
         // On Windows, binary assets require .exe extension
         #[cfg(windows)]
-        let bin_name = format!("saorsa-node-{arch}-{os}.exe");
+        let bin_name = format!("ant-node-{arch}-{os}.exe");
         #[cfg(not(windows))]
-        let bin_name = format!("saorsa-node-{arch}-{os}");
+        let bin_name = format!("ant-node-{arch}-{os}");
         let releases = vec![
             GitHubRelease {
                 tag_name: "v1.1.0".to_string(),

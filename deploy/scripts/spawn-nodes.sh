@@ -1,7 +1,7 @@
 #!/bin/bash
-# Saorsa Node Spawner - Deploy multiple nodes on a single host
+# Autonomi Node Spawner - Deploy multiple nodes on a single host
 # Usage: ./spawn-nodes.sh [count] [bootstrap1] [bootstrap2] ...
-# Env: SAORSA_VERSION=0.1.0 to download a specific version from GitHub
+# Env: ANT_VERSION=0.1.0 to download a specific version from GitHub
 set -euo pipefail
 
 # Configuration
@@ -10,11 +10,11 @@ shift || true
 BOOTSTRAP_NODES=("${@:-165.22.4.178:12000 164.92.111.156:12000}")
 
 # Directories
-BASE_DIR="/var/lib/saorsa/nodes"
-LOG_DIR="/var/log/saorsa"
-BINARY_PATH="${SAORSA_BINARY:-/usr/local/bin/saorsa-node}"
+BASE_DIR="/var/lib/ant/nodes"
+LOG_DIR="/var/log/ant"
+BINARY_PATH="${ANT_BINARY:-/usr/local/bin/ant-node}"
 METRICS_BASE_PORT="${METRICS_BASE_PORT:-9100}"
-SAORSA_VERSION="${SAORSA_VERSION:-}"
+ANT_VERSION="${ANT_VERSION:-}"
 
 # Resource limits per node
 MEMORY_LIMIT="350M"
@@ -32,22 +32,22 @@ download_binary() {
         *) echo "Unsupported architecture: $arch"; exit 1 ;;
     esac
 
-    local url="https://github.com/saorsa-labs/saorsa-node/releases/download/v${version}/saorsa-node-cli-${PLATFORM}.tar.gz"
+    local url="https://github.com/WithAutonomi/ant-node/releases/download/v${version}/ant-node-cli-${PLATFORM}.tar.gz"
 
-    echo "Downloading saorsa-node v${version} for ${PLATFORM}..."
-    curl -L -o /tmp/saorsa-node.tar.gz "$url"
+    echo "Downloading ant-node v${version} for ${PLATFORM}..."
+    curl -L -o /tmp/ant-node.tar.gz "$url"
 
     echo "Extracting..."
-    tar -xzf /tmp/saorsa-node.tar.gz -C /tmp
-    mv /tmp/saorsa-node "$BINARY_PATH"
-    mv /tmp/saorsa-keygen /usr/local/bin/saorsa-keygen 2>/dev/null || true
+    tar -xzf /tmp/ant-node.tar.gz -C /tmp
+    mv /tmp/ant-node "$BINARY_PATH"
+    mv /tmp/ant-keygen /usr/local/bin/ant-keygen 2>/dev/null || true
     chmod +x "$BINARY_PATH"
-    rm -f /tmp/saorsa-node.tar.gz
+    rm -f /tmp/ant-node.tar.gz
 
-    echo "Installed saorsa-node v${version} to $BINARY_PATH"
+    echo "Installed ant-node v${version} to $BINARY_PATH"
 }
 
-echo "=== Saorsa Multi-Node Spawner ==="
+echo "=== Autonomi Multi-Node Spawner ==="
 echo "Nodes to spawn: $NODE_COUNT"
 echo "Bootstrap nodes: ${BOOTSTRAP_NODES[*]}"
 echo "Binary: $BINARY_PATH"
@@ -55,23 +55,23 @@ echo "Base directory: $BASE_DIR"
 echo ""
 
 # Download if version specified and binary missing
-if [[ -n "$SAORSA_VERSION" ]] && [[ ! -x "$BINARY_PATH" ]]; then
-    download_binary "$SAORSA_VERSION"
+if [[ -n "$ANT_VERSION" ]] && [[ ! -x "$BINARY_PATH" ]]; then
+    download_binary "$ANT_VERSION"
 fi
 
 # Check binary exists
 if [[ ! -x "$BINARY_PATH" ]]; then
-    echo "ERROR: saorsa-node binary not found at $BINARY_PATH"
-    echo "Set SAORSA_VERSION to download, or SAORSA_BINARY to use an existing binary"
+    echo "ERROR: ant-node binary not found at $BINARY_PATH"
+    echo "Set ANT_VERSION to download, or ANT_BINARY to use an existing binary"
     exit 1
 fi
 
 # Create directories
 mkdir -p "$BASE_DIR" "$LOG_DIR"
 
-# Create saorsa user if not exists
-if ! id -u saorsa &>/dev/null; then
-    useradd -r -s /bin/false saorsa || true
+# Create ant user if not exists
+if ! id -u ant &>/dev/null; then
+    useradd -r -s /bin/false ant || true
 fi
 
 # Build bootstrap args
@@ -84,25 +84,25 @@ done
 for i in $(seq 0 $((NODE_COUNT - 1))); do
     NODE_DIR="$BASE_DIR/node-$i"
     METRICS_PORT=$((METRICS_BASE_PORT + i))
-    SERVICE_NAME="saorsa-node-$i"
+    SERVICE_NAME="ant-node-$i"
 
     echo "Creating node $i..."
 
     # Create node directory
     mkdir -p "$NODE_DIR"
-    chown saorsa:saorsa "$NODE_DIR"
+    chown ant:ant "$NODE_DIR"
 
     # Create systemd service
     cat > "/etc/systemd/system/$SERVICE_NAME.service" <<EOF
 [Unit]
-Description=Saorsa Node $i
+Description=Autonomi Node $i
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=saorsa
-Group=saorsa
+User=ant
+Group=ant
 ExecStart=$BINARY_PATH \\
     --root-dir $NODE_DIR \\
     --port 0 \\
@@ -152,9 +152,9 @@ echo "=== Deployment Complete ==="
 echo "Spawned $NODE_COUNT nodes"
 echo ""
 echo "Check status with:"
-echo "  systemctl status 'saorsa-node-*'"
+echo "  systemctl status 'ant-node-*'"
 echo "  ./manage-nodes.sh status"
 echo ""
 echo "View logs:"
-echo "  journalctl -u saorsa-node-0 -f"
+echo "  journalctl -u ant-node-0 -f"
 echo "  tail -f $LOG_DIR/node-0.log"

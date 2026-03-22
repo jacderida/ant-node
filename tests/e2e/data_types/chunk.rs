@@ -53,7 +53,7 @@ impl ChunkTestFixture {
     /// Compute content address for data (BLAKE3 hash).
     #[must_use]
     pub fn compute_address(data: &[u8]) -> [u8; 32] {
-        saorsa_node::compute_address(data)
+        ant_node::compute_address(data)
     }
 }
 
@@ -64,13 +64,13 @@ mod tests {
 
     use crate::{TestHarness, TestNetwork};
     use ant_evm::RewardsAddress;
-    use evmlib::testnet::Testnet;
-    use rand::seq::SliceRandom;
-    use saorsa_node::payment::{
+    use ant_node::payment::{
         EvmVerifierConfig, PaymentVerifier, PaymentVerifierConfig, QuoteGenerator,
         QuotingMetricsTracker,
     };
-    use saorsa_node::storage::{AntProtocol, LmdbStorage, LmdbStorageConfig};
+    use ant_node::storage::{AntProtocol, LmdbStorage, LmdbStorageConfig};
+    use evmlib::testnet::Testnet;
+    use rand::seq::SliceRandom;
     use serial_test::serial;
 
     /// Test 1: Content address computation is deterministic
@@ -463,7 +463,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     #[serial]
     async fn test_chunk_rejected_without_payment() -> color_eyre::Result<()> {
-        use saorsa_node::ant_protocol::{
+        use ant_node::ant_protocol::{
             ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkMessageBody, ChunkPutRequest,
             ChunkPutResponse,
         };

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Testnet endurance test - runs data type tests in a loop for 12-24 hours
-# Run from the saorsa-node project root
+# Run from the ant-node project root
 # Usage: ./scripts/testnet/testnet-endurance.sh [duration_hours]
 
 set -e
@@ -23,7 +23,7 @@ cd "$PROJECT_ROOT"
 
 mkdir -p "$LOG_DIR"
 
-echo "=== Saorsa Testnet Endurance Test ===" | tee -a "$LOG_FILE"
+echo "=== Autonomi Testnet Endurance Test ===" | tee -a "$LOG_FILE"
 echo "Duration: ${DURATION_HOURS} hours" | tee -a "$LOG_FILE"
 echo "Bootstrap: ${BOOTSTRAP}" | tee -a "$LOG_FILE"
 echo "Log file: ${LOG_FILE}" | tee -a "$LOG_FILE"
@@ -35,8 +35,8 @@ echo "Building test binary..." | tee -a "$LOG_FILE"
 cargo build --release 2>&1 | tee -a "$LOG_FILE"
 
 # Export test configuration
-export SAORSA_TEST_BOOTSTRAP="$BOOTSTRAP"
-export SAORSA_TEST_EXTERNAL=true
+export ANT_TEST_BOOTSTRAP="$BOOTSTRAP"
+export ANT_TEST_EXTERNAL=true
 export RUST_LOG=info
 
 while [ $(date +%s) -lt $END ]; do
@@ -63,7 +63,7 @@ while [ $(date +%s) -lt $END ]; do
     for PORT in 9100 9101 9102; do
         METRICS=$(curl -s --connect-timeout 5 "http://165.22.4.178:${PORT}/metrics" 2>/dev/null | head -50)
         if [ -n "$METRICS" ]; then
-            echo "$METRICS" | grep -E "^(saorsa_|p2p_|peer_|routing_)" >> "$LOG_FILE"
+            echo "$METRICS" | grep -E "^(ant_|p2p_|peer_|routing_)" >> "$LOG_FILE"
             break
         fi
     done

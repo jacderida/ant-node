@@ -1,6 +1,6 @@
 //! Disk cache for downloaded upgrade binaries.
 //!
-//! When multiple saorsa-node instances detect the same upgrade, only the first
+//! When multiple ant-node instances detect the same upgrade, only the first
 //! one needs to download and verify the archive.  `BinaryCache` stores the
 //! extracted binary alongside a SHA-256 integrity metadata file so that
 //! subsequent nodes can copy it directly.
@@ -47,9 +47,9 @@ impl BinaryCache {
     #[must_use]
     pub fn cached_binary_path(&self, version: &str) -> PathBuf {
         let name = if cfg!(windows) {
-            format!("saorsa-node-{version}.exe")
+            format!("ant-node-{version}.exe")
         } else {
-            format!("saorsa-node-{version}")
+            format!("ant-node-{version}")
         };
         self.cache_dir.join(name)
     }
@@ -99,7 +99,7 @@ impl BinaryCache {
 
         // Write binary to a temp file then rename into place.
         // Remove dest first on Windows where rename fails if it exists.
-        let tmp_bin = self.cache_dir.join(format!(".saorsa-node-{version}.tmp"));
+        let tmp_bin = self.cache_dir.join(format!(".ant-node-{version}.tmp"));
         fs::copy(source_path, &tmp_bin)?;
         let _ = fs::remove_file(&dest);
         fs::rename(&tmp_bin, &dest)?;
@@ -119,9 +119,7 @@ impl BinaryCache {
             .map_err(|e| Error::Upgrade(format!("Failed to serialize binary cache meta: {e}")))?;
 
         // Write metadata to a temp file then rename into place
-        let tmp_meta = self
-            .cache_dir
-            .join(format!(".saorsa-node-{version}.meta.tmp"));
+        let tmp_meta = self.cache_dir.join(format!(".ant-node-{version}.meta.tmp"));
         let mut f = File::create(&tmp_meta)?;
         f.write_all(meta_json.as_bytes())?;
         f.sync_all()?;
@@ -160,9 +158,9 @@ impl BinaryCache {
 
     fn meta_path(&self, version: &str) -> PathBuf {
         let name = if cfg!(windows) {
-            format!("saorsa-node-{version}.exe.meta.json")
+            format!("ant-node-{version}.exe.meta.json")
         } else {
-            format!("saorsa-node-{version}.meta.json")
+            format!("ant-node-{version}.meta.json")
         };
         self.cache_dir.join(name)
     }

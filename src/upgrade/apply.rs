@@ -51,7 +51,7 @@ impl AutoApplyUpgrader {
         Self {
             current_version,
             client: reqwest::Client::builder()
-                .user_agent(concat!("saorsa-node/", env!("CARGO_PKG_VERSION")))
+                .user_agent(concat!("ant-node/", env!("CARGO_PKG_VERSION")))
                 .timeout(std::time::Duration::from_secs(300))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
@@ -178,7 +178,7 @@ impl AutoApplyUpgrader {
 
         // Create temp directory for upgrade
         let temp_dir = tempfile::Builder::new()
-            .prefix("saorsa-upgrade-")
+            .prefix("ant-upgrade-")
             .tempdir_in(binary_dir)
             .map_err(|e| Error::Upgrade(format!("Failed to create temp dir: {e}")))?;
 
@@ -220,7 +220,7 @@ impl AutoApplyUpgrader {
             "{}.backup",
             current_binary
                 .file_name()
-                .map_or_else(|| "saorsa-node".into(), |s| s.to_string_lossy())
+                .map_or_else(|| "ant-node".into(), |s| s.to_string_lossy())
         ));
         info!("Creating backup at {}...", backup_path.display());
         if let Err(e) = fs::copy(&current_binary, &backup_path) {
@@ -323,7 +323,7 @@ impl AutoApplyUpgrader {
                 let dest = dest_dir.join(
                     cached_path
                         .file_name()
-                        .unwrap_or_else(|| std::ffi::OsStr::new("saorsa-node")),
+                        .unwrap_or_else(|| std::ffi::OsStr::new("ant-node")),
                 );
                 if let Err(e) = fs::copy(&cached_path, &dest) {
                     warn!("Failed to copy from cache, will re-download: {e}");
@@ -354,7 +354,7 @@ impl AutoApplyUpgrader {
                 let dest = dest_dir.join(
                     cached_path
                         .file_name()
-                        .unwrap_or_else(|| std::ffi::OsStr::new("saorsa-node")),
+                        .unwrap_or_else(|| std::ffi::OsStr::new("ant-node")),
                 );
                 fs::copy(&cached_path, &dest)?;
                 return Ok(dest);
@@ -388,7 +388,7 @@ impl AutoApplyUpgrader {
         let sig_path = dest_dir.join("signature");
 
         // Step 1: Download archive
-        info!("Downloading saorsa-node binary...");
+        info!("Downloading ant-node binary...");
         self.download(&info.download_url, &archive_path).await?;
 
         // Step 2: Download signature
@@ -415,7 +415,7 @@ impl AutoApplyUpgrader {
         Ok(extracted_binary)
     }
 
-    /// Extract the saorsa-node binary from an archive (tar.gz or zip).
+    /// Extract the ant-node binary from an archive (tar.gz or zip).
     ///
     /// The archive format is detected by magic bytes:
     /// - `1f 8b` → gzip (tar.gz)
@@ -437,16 +437,16 @@ impl AutoApplyUpgrader {
         }
     }
 
-    /// Extract the saorsa-node binary from a tar.gz archive.
+    /// Extract the ant-node binary from a tar.gz archive.
     fn extract_from_tar_gz(archive_path: &Path, dest_dir: &Path) -> Result<PathBuf> {
         let file = File::open(archive_path)?;
         let decoder = GzDecoder::new(file);
         let mut archive = Archive::new(decoder);
 
         let binary_name = if cfg!(windows) {
-            "saorsa-node.exe"
+            "ant-node.exe"
         } else {
-            "saorsa-node"
+            "ant-node"
         };
         let extracted_binary = dest_dir.join(binary_name);
 
@@ -460,10 +460,10 @@ impl AutoApplyUpgrader {
                 .path()
                 .map_err(|e| Error::Upgrade(format!("Invalid path in archive: {e}")))?;
 
-            // Look for the saorsa-node binary
+            // Look for the ant-node binary
             if let Some(name) = path.file_name() {
                 let name_str = name.to_string_lossy();
-                if name_str == "saorsa-node" || name_str == "saorsa-node.exe" {
+                if name_str == "ant-node" || name_str == "ant-node.exe" {
                     debug!("Found binary in tar.gz archive: {}", path.display());
 
                     // Stream directly to disk to avoid large heap allocations
@@ -486,20 +486,20 @@ impl AutoApplyUpgrader {
         }
 
         Err(Error::Upgrade(
-            "saorsa-node binary not found in tar.gz archive".to_string(),
+            "ant-node binary not found in tar.gz archive".to_string(),
         ))
     }
 
-    /// Extract the saorsa-node binary from a zip archive.
+    /// Extract the ant-node binary from a zip archive.
     fn extract_from_zip(archive_path: &Path, dest_dir: &Path) -> Result<PathBuf> {
         let file = File::open(archive_path)?;
         let mut archive = zip::ZipArchive::new(file)
             .map_err(|e| Error::Upgrade(format!("Failed to open zip archive: {e}")))?;
 
         let binary_name = if cfg!(windows) {
-            "saorsa-node.exe"
+            "ant-node.exe"
         } else {
-            "saorsa-node"
+            "ant-node"
         };
         let extracted_binary = dest_dir.join(binary_name);
 
@@ -515,7 +515,7 @@ impl AutoApplyUpgrader {
 
             if let Some(name) = path.file_name() {
                 let name_str = name.to_string_lossy();
-                if name_str == "saorsa-node" || name_str == "saorsa-node.exe" {
+                if name_str == "ant-node" || name_str == "ant-node.exe" {
                     debug!("Found binary in zip archive: {}", path.display());
 
                     // Stream directly to disk to avoid large heap allocations
@@ -538,7 +538,7 @@ impl AutoApplyUpgrader {
         }
 
         Err(Error::Upgrade(
-            "saorsa-node binary not found in zip archive".to_string(),
+            "ant-node binary not found in zip archive".to_string(),
         ))
     }
 
@@ -659,7 +659,7 @@ impl AutoApplyUpgrader {
 /// cannot be parsed.  Uses `tokio::process::Command` with a 5-second timeout
 /// to avoid blocking the async runtime.
 ///
-/// Output format is expected to be "saorsa-node X.Y.Z" or "saorsa-node X.Y.Z-rc.N".
+/// Output format is expected to be "ant-node X.Y.Z" or "ant-node X.Y.Z-rc.N".
 async fn on_disk_version(binary_path: &Path) -> Option<Version> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -671,7 +671,7 @@ async fn on_disk_version(binary_path: &Path) -> Option<Version> {
     .ok()?
     .ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let version_str = stdout.trim().strip_prefix("saorsa-node ")?;
+    let version_str = stdout.trim().strip_prefix("ant-node ")?;
     Version::parse(version_str).ok()
 }
 
@@ -748,7 +748,7 @@ mod tests {
     fn test_extract_binary_from_tar_gz() {
         let dir = tempfile::tempdir().unwrap();
         let content = b"fake-binary-content";
-        let archive = create_tar_gz_archive(dir.path(), "saorsa-node", content);
+        let archive = create_tar_gz_archive(dir.path(), "ant-node", content);
 
         let dest = tempfile::tempdir().unwrap();
         let result = AutoApplyUpgrader::extract_binary(&archive, dest.path());
@@ -763,7 +763,7 @@ mod tests {
     fn test_extract_binary_from_zip() {
         let dir = tempfile::tempdir().unwrap();
         let content = b"fake-binary-content";
-        let archive = create_zip_archive(dir.path(), "saorsa-node", content);
+        let archive = create_zip_archive(dir.path(), "ant-node", content);
 
         let dest = tempfile::tempdir().unwrap();
         let result = AutoApplyUpgrader::extract_binary(&archive, dest.path());
@@ -778,7 +778,7 @@ mod tests {
     fn test_extract_binary_from_zip_with_exe() {
         let dir = tempfile::tempdir().unwrap();
         let content = b"fake-windows-binary";
-        let archive = create_zip_archive(dir.path(), "saorsa-node.exe", content);
+        let archive = create_zip_archive(dir.path(), "ant-node.exe", content);
 
         let dest = tempfile::tempdir().unwrap();
         let result = AutoApplyUpgrader::extract_binary(&archive, dest.path());
@@ -793,7 +793,7 @@ mod tests {
     fn test_extract_binary_from_tar_gz_nested_path() {
         let dir = tempfile::tempdir().unwrap();
         let content = b"nested-binary";
-        let archive = create_tar_gz_archive(dir.path(), "some/nested/path/saorsa-node", content);
+        let archive = create_tar_gz_archive(dir.path(), "some/nested/path/ant-node", content);
 
         let dest = tempfile::tempdir().unwrap();
         let result = AutoApplyUpgrader::extract_binary(&archive, dest.path());

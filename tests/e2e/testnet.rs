@@ -1,7 +1,7 @@
 //! Test network infrastructure for spawning and managing multiple nodes.
 //!
 //! This module provides the core infrastructure for creating a local testnet
-//! of 25 saorsa nodes for E2E testing.
+//! of 25 ant nodes for E2E testing.
 //!
 //! ## Protocol-Based Testing
 //!
@@ -14,6 +14,16 @@
 //! - LMDB storage persistence
 
 use ant_evm::RewardsAddress;
+use ant_node::ant_protocol::{
+    ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkMessageBody, ChunkPutRequest,
+    ChunkPutResponse, CHUNK_PROTOCOL_ID,
+};
+use ant_node::client::{send_and_await_chunk_response, DataChunk, XorName};
+use ant_node::payment::{
+    EvmVerifierConfig, PaymentVerifier, PaymentVerifierConfig, QuoteGenerator,
+    QuotingMetricsTracker,
+};
+use ant_node::storage::{AntProtocol, LmdbStorage, LmdbStorageConfig};
 use bytes::Bytes;
 use evmlib::Network as EvmNetwork;
 use futures::future::join_all;
@@ -23,16 +33,6 @@ use saorsa_core::{
     identity::NodeIdentity, IPDiversityConfig as CoreDiversityConfig, MultiAddr,
     NodeConfig as CoreNodeConfig, P2PEvent, P2PNode,
 };
-use saorsa_node::ant_protocol::{
-    ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkMessageBody, ChunkPutRequest,
-    ChunkPutResponse, CHUNK_PROTOCOL_ID,
-};
-use saorsa_node::client::{send_and_await_chunk_response, DataChunk, XorName};
-use saorsa_node::payment::{
-    EvmVerifierConfig, PaymentVerifier, PaymentVerifierConfig, QuoteGenerator,
-    QuotingMetricsTracker,
-};
-use saorsa_node::storage::{AntProtocol, LmdbStorage, LmdbStorageConfig};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,18 +46,18 @@ use tracing::{debug, info, warn};
 // Test Isolation Constants
 // =============================================================================
 //
-// NOTE: E2E tests use a SEPARATE port range from production saorsa-node.
+// NOTE: E2E tests use a SEPARATE port range from production ant-node.
 //
-// - Production saorsa-node: 10000-10999 (see CLAUDE.md)
+// - Production ant-node: 10000-10999 (see CLAUDE.md)
 // - E2E tests: 20000-60000 (this file)
 //
 // This separation prevents test conflicts with:
 // 1. Running local development nodes (which use 10000-10999)
 // 2. Parallel test execution (via random port allocation)
-// 3. Other Saorsa services (ant-quic: 9000-9999, communitas: 11000-11999)
+// 3. Other Autonomi services (ant-quic: 9000-9999, communitas: 11000-11999)
 
 /// Minimum port for random test allocation.
-/// Avoids well-known ports, production ranges, and other Saorsa services.
+/// Avoids well-known ports, production ranges, and other Autonomi services.
 pub const TEST_PORT_RANGE_MIN: u16 = 20_000;
 
 /// Maximum port for random test allocation.
@@ -233,7 +233,7 @@ impl Default for TestNetworkConfig {
 
         // Random suffix for unique temp directory
         let suffix: u64 = rng.gen();
-        let test_data_dir = std::env::temp_dir().join(format!("saorsa_test_{suffix:x}"));
+        let test_data_dir = std::env::temp_dir().join(format!("ant_test_{suffix:x}"));
 
         Self {
             node_count: DEFAULT_NODE_COUNT,
@@ -790,7 +790,7 @@ impl TestNode {
     /// Compute content address for chunk data (BLAKE3 hash).
     #[must_use]
     pub fn compute_chunk_address(data: &[u8]) -> XorName {
-        saorsa_node::compute_address(data)
+        ant_node::compute_address(data)
     }
 }
 
@@ -1107,13 +1107,13 @@ impl TestNetwork {
         debug!("Starting node {} on port {}", node.index, node.port);
         *node.state.write().await = NodeState::Starting;
 
-        // Build configuration for saorsa-core P2PNode.
+        // Build configuration for saorsa-core P2PNode (saorsa-core is an external crate).
         // .local(true) auto-enables allow_loopback for test nodes on 127.0.0.1.
         let mut core_config = CoreNodeConfig::builder()
             .port(node.port)
             .local(true)
             .connection_timeout(Duration::from_secs(TEST_CORE_CONNECTION_TIMEOUT_SECS))
-            .max_message_size(saorsa_node::ant_protocol::MAX_WIRE_MESSAGE_SIZE)
+            .max_message_size(ant_node::ant_protocol::MAX_WIRE_MESSAGE_SIZE)
             .build()
             .map_err(|e| TestnetError::Core(format!("Failed to create core config: {e}")))?;
 
@@ -1565,10 +1565,7 @@ mod tests {
         // Port is randomly generated in range 20000-60000
         assert!(config.base_port >= 20000 && config.base_port < 60000);
         // Data dir has unique suffix
-        assert!(config
-            .test_data_dir
-            .to_string_lossy()
-            .contains("saorsa_test_"));
+        assert!(config.test_data_dir.to_string_lossy().contains("ant_test_"));
     }
 
     #[test]

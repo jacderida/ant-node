@@ -1,4 +1,4 @@
-//! Quoting metrics tracking for saorsa-node.
+//! Quoting metrics tracking for ant-node.
 //!
 //! Tracks metrics used for quote generation, including:
 //! - `received_payment_count` - number of payments received

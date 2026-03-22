@@ -1,5 +1,5 @@
 # =============================================================================
-# SECURITY-FOCUSED .gitignore for saorsa-node
+# SECURITY-FOCUSED .gitignore for ant-node
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -133,7 +133,7 @@ $RECYCLE.BIN/
 # Node data directories (may contain keys)
 node_data/
 data/
-.saorsa/
+.ant-node/
 .ant/
 .antnode/
 

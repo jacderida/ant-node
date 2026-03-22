@@ -1,11 +1,11 @@
-//! Error types for saorsa-node.
+//! Error types for ant-node.
 
 use thiserror::Error;
 
 /// Result type alias using the crate's Error type.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Errors that can occur in saorsa-node.
+/// Errors that can occur in ant-node.
 #[derive(Error, Debug)]
 pub enum Error {
     /// Configuration error.
@@ -16,7 +16,7 @@ pub enum Error {
     #[error("node startup failed: {0}")]
     Startup(String),
 
-    /// Network error from saorsa-core.
+    /// Network error from the core networking layer.
     #[error("network error: {0}")]
     Network(String),
 

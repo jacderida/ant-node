@@ -1,11 +1,11 @@
-//! saorsa-node CLI entry point.
+//! ant-node CLI entry point.
 
 mod cli;
 mod platform;
 
+use ant_node::NodeBuilder;
 use clap::Parser;
 use cli::{Cli, CliLogFormat};
-use saorsa_node::NodeBuilder;
 use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{fmt, EnvFilter, Layer};
@@ -45,7 +45,7 @@ async fn main() -> color_eyre::Result<()> {
             let file_appender = tracing_appender::rolling::Builder::new()
                 .rotation(tracing_appender::rolling::Rotation::DAILY)
                 .max_log_files(log_max_files)
-                .filename_prefix("saorsa-node")
+                .filename_prefix("ant-node")
                 .filename_suffix("log")
                 .build(dir)?;
             let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
@@ -56,7 +56,7 @@ async fn main() -> color_eyre::Result<()> {
             let file_appender = tracing_appender::rolling::Builder::new()
                 .rotation(tracing_appender::rolling::Rotation::DAILY)
                 .max_log_files(log_max_files)
-                .filename_prefix("saorsa-node")
+                .filename_prefix("ant-node")
                 .filename_suffix("log")
                 .build(dir)?;
             let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
@@ -78,8 +78,8 @@ async fn main() -> color_eyre::Result<()> {
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
-        commit = env!("SAORSA_GIT_COMMIT"),
-        "saorsa-node starting"
+        commit = env!("ANT_GIT_COMMIT"),
+        "ant-node starting"
     );
 
     // Prevent macOS App Nap from throttling background timer operations.

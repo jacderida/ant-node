@@ -24,6 +24,7 @@ pub type AppNapActivity = objc2::rc::Retained<objc2::runtime::NSObject>;
 ///
 /// Returns an error string if the activity could not be created.
 #[cfg(target_os = "macos")]
+#[allow(clippy::unnecessary_wraps)] // Result kept for caller compatibility with non-macOS variant
 pub fn disable_app_nap() -> Result<AppNapActivity, String> {
     #[allow(unsafe_code)]
     // SAFETY: We call well-documented Cocoa APIs through the objc2 safe

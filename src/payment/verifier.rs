@@ -26,7 +26,7 @@ use tracing::{debug, info};
 ///
 /// This minimum ensures the proof contains at least a basic cryptographic hash or identifier.
 /// Proofs smaller than this are rejected as they cannot contain sufficient payment information.
-const MIN_PAYMENT_PROOF_SIZE_BYTES: usize = 32;
+pub const MIN_PAYMENT_PROOF_SIZE_BYTES: usize = 32;
 
 /// Maximum allowed size for a payment proof in bytes (256 KB).
 ///
@@ -34,7 +34,7 @@ const MIN_PAYMENT_PROOF_SIZE_BYTES: usize = 32;
 /// Merkle proofs include 16 candidate nodes (each with ~1,952-byte ML-DSA pub key
 /// and ~3,309-byte signature) plus merkle branch hashes, totaling ~130 KB.
 /// 256 KB provides headroom while still capping memory during verification.
-const MAX_PAYMENT_PROOF_SIZE_BYTES: usize = 262_144;
+pub const MAX_PAYMENT_PROOF_SIZE_BYTES: usize = 262_144;
 
 /// Maximum age of a payment quote before it's considered expired (24 hours).
 /// Prevents replaying old cheap quotes against nearly-full nodes.
@@ -1489,5 +1489,456 @@ mod tests {
             let found = verifier.pool_cache.lock().get(&other_hash).cloned();
             assert!(found.is_none(), "Unknown pool hash should not be in cache");
         }
+    }
+
+    // =========================================================================
+    // Merkle verification unit tests
+    // =========================================================================
+
+    /// Helper: build 16 validly-signed ML-DSA-65 candidate nodes.
+    fn make_candidate_nodes(
+        timestamp: u64,
+    ) -> [ant_evm::merkle_payments::MerklePaymentCandidateNode;
+           ant_evm::merkle_payments::CANDIDATES_PER_POOL] {
+        use ant_evm::merkle_payments::{MerklePaymentCandidateNode, CANDIDATES_PER_POOL};
+        use saorsa_core::MlDsa65;
+        use saorsa_pqc::pqc::types::MlDsaSecretKey;
+        use saorsa_pqc::pqc::MlDsaOperations;
+
+        std::array::from_fn::<_, CANDIDATES_PER_POOL, _>(|i| {
+            let ml_dsa = MlDsa65::new();
+            let (pub_key, secret_key) = ml_dsa.generate_keypair().expect("keygen");
+            let metrics = ant_evm::QuotingMetrics {
+                data_size: 1024,
+                data_type: 0,
+                close_records_stored: i * 10,
+                records_per_type: vec![],
+                max_records: 500,
+                received_payment_count: 0,
+                live_time: 100,
+                network_density: None,
+                network_size: None,
+            };
+            #[allow(clippy::cast_possible_truncation)]
+            let reward_address = RewardsAddress::new([i as u8; 20]);
+            let msg =
+                MerklePaymentCandidateNode::bytes_to_sign(&metrics, &reward_address, timestamp);
+            let sk = MlDsaSecretKey::from_bytes(secret_key.as_bytes()).expect("sk");
+            let signature = ml_dsa.sign(&sk, &msg).expect("sign").as_bytes().to_vec();
+
+            MerklePaymentCandidateNode {
+                pub_key: pub_key.as_bytes().to_vec(),
+                quoting_metrics: metrics,
+                reward_address,
+                merkle_payment_timestamp: timestamp,
+                signature,
+            }
+        })
+    }
+
+    /// Helper: build a valid `MerklePaymentProof` with real ML-DSA-65
+    /// signatures. Returns the raw proof, pool hash, xorname, and timestamp.
+    fn make_valid_merkle_proof() -> (
+        ant_evm::merkle_payments::MerklePaymentProof,
+        evmlib::merkle_batch_payment::PoolHash,
+        [u8; 32],
+        u64,
+    ) {
+        use ant_evm::merkle_payments::{
+            MerklePaymentCandidatePool, MerklePaymentProof, MerkleTree,
+        };
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_secs();
+
+        let addresses: Vec<xor_name::XorName> = (0..4u8)
+            .map(|i| xor_name::XorName::from_content(&[i]))
+            .collect();
+        let tree = MerkleTree::from_xornames(addresses.clone()).expect("tree");
+
+        let candidate_nodes = make_candidate_nodes(timestamp);
+
+        let reward_candidates = tree
+            .reward_candidates(timestamp)
+            .expect("reward candidates");
+        let midpoint_proof = reward_candidates
+            .first()
+            .expect("at least one candidate")
+            .clone();
+
+        let pool = MerklePaymentCandidatePool {
+            midpoint_proof,
+            candidate_nodes,
+        };
+
+        let first_address = *addresses.first().expect("first address");
+        let address_proof = tree
+            .generate_address_proof(0, first_address)
+            .expect("proof");
+
+        let merkle_proof = MerklePaymentProof::new(first_address, address_proof, pool);
+        let pool_hash = merkle_proof.winner_pool_hash();
+        let xorname = first_address.0;
+
+        (merkle_proof, pool_hash, xorname, timestamp)
+    }
+
+    /// Helper: build a minimal valid `MerklePaymentProof` with real ML-DSA-65
+    /// signatures. Returns `(xorname, serialized_tagged_proof, pool_hash, timestamp)`.
+    fn make_valid_merkle_proof_bytes() -> (
+        [u8; 32],
+        Vec<u8>,
+        evmlib::merkle_batch_payment::PoolHash,
+        u64,
+    ) {
+        let (merkle_proof, pool_hash, xorname, timestamp) = make_valid_merkle_proof();
+        let tagged = crate::payment::proof::serialize_merkle_proof(&merkle_proof)
+            .expect("serialize merkle proof");
+        (xorname, tagged, pool_hash, timestamp)
+    }
+
+    #[tokio::test]
+    async fn test_merkle_address_mismatch_rejected() {
+        let verifier = create_test_verifier();
+        let (_correct_xorname, tagged_proof, _pool_hash, _ts) = make_valid_merkle_proof_bytes();
+
+        // Use a DIFFERENT xorname than what the proof was built for
+        let wrong_xorname = [0xFFu8; 32];
+
+        let result = verifier
+            .verify_payment(&wrong_xorname, Some(&tagged_proof))
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Should reject merkle proof address mismatch"
+        );
+        let err_msg = format!("{}", result.expect_err("should fail"));
+        assert!(
+            err_msg.contains("address mismatch") || err_msg.contains("Merkle proof address"),
+            "Error should mention address mismatch: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_merkle_malformed_body_rejected() {
+        let verifier = create_test_verifier();
+        let xorname = [0xA3u8; 32];
+
+        // Valid merkle tag but truncated/corrupted msgpack body
+        let mut bad_proof = vec![crate::ant_protocol::PROOF_TAG_MERKLE];
+        bad_proof.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        bad_proof.extend_from_slice(&[0x00; 10]);
+        // pad to minimum size
+        while bad_proof.len() < MIN_PAYMENT_PROOF_SIZE_BYTES {
+            bad_proof.push(0x00);
+        }
+
+        let result = verifier.verify_payment(&xorname, Some(&bad_proof)).await;
+
+        assert!(result.is_err(), "Should reject malformed merkle body");
+        let err_msg = format!("{}", result.expect_err("should fail"));
+        assert!(
+            err_msg.contains("deserialize") || err_msg.contains("Failed"),
+            "Error should mention deserialization: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_merkle_proof_serialized_size_within_limits() {
+        let (_xorname, tagged_proof, _pool_hash, _ts) = make_valid_merkle_proof_bytes();
+
+        // 16 ML-DSA-65 candidates (~1952 pub key + ~3309 sig each) ≈ 84 KB + tree data
+        assert!(
+            tagged_proof.len() >= MIN_PAYMENT_PROOF_SIZE_BYTES,
+            "Merkle proof ({} bytes) should be >= min {} bytes",
+            tagged_proof.len(),
+            MIN_PAYMENT_PROOF_SIZE_BYTES
+        );
+        assert!(
+            tagged_proof.len() <= MAX_PAYMENT_PROOF_SIZE_BYTES,
+            "Merkle proof ({} bytes) should be <= max {} bytes",
+            tagged_proof.len(),
+            MAX_PAYMENT_PROOF_SIZE_BYTES
+        );
+    }
+
+    #[test]
+    fn test_merkle_proof_tag_is_correct() {
+        let (_xorname, tagged_proof, _pool_hash, _ts) = make_valid_merkle_proof_bytes();
+
+        assert_eq!(
+            tagged_proof.first().copied(),
+            Some(crate::ant_protocol::PROOF_TAG_MERKLE),
+            "First byte must be the merkle tag"
+        );
+        assert_eq!(
+            crate::payment::proof::detect_proof_type(&tagged_proof),
+            Some(crate::payment::proof::ProofType::Merkle)
+        );
+    }
+
+    #[test]
+    fn test_pool_cache_eviction() {
+        use evmlib::merkle_batch_payment::PoolHash;
+
+        let config = PaymentVerifierConfig {
+            evm: EvmVerifierConfig::default(),
+            cache_capacity: 100,
+            local_rewards_address: RewardsAddress::new([1u8; 20]),
+        };
+        let verifier = PaymentVerifier::new(config);
+
+        // Fill the pool cache to capacity (DEFAULT_POOL_CACHE_CAPACITY = 1000)
+        for i in 0..DEFAULT_POOL_CACHE_CAPACITY {
+            let mut hash: PoolHash = [0u8; 32];
+            // Write index bytes into the hash
+            let idx_bytes = i.to_le_bytes();
+            for (j, b) in idx_bytes.iter().enumerate() {
+                if j < 32 {
+                    hash[j] = *b;
+                }
+            }
+            let info = ant_evm::merkle_payments::OnChainPaymentInfo {
+                depth: 4,
+                merkle_payment_timestamp: 1_700_000_000,
+                paid_node_addresses: vec![],
+            };
+            verifier.pool_cache.lock().put(hash, info);
+        }
+
+        assert_eq!(
+            verifier.pool_cache.lock().len(),
+            DEFAULT_POOL_CACHE_CAPACITY
+        );
+
+        // Insert one more — should evict the oldest
+        let overflow_hash: PoolHash = [0xFFu8; 32];
+        let info = ant_evm::merkle_payments::OnChainPaymentInfo {
+            depth: 8,
+            merkle_payment_timestamp: 1_800_000_000,
+            paid_node_addresses: vec![],
+        };
+        verifier.pool_cache.lock().put(overflow_hash, info);
+
+        // Size should still be at capacity (not capacity + 1)
+        assert_eq!(
+            verifier.pool_cache.lock().len(),
+            DEFAULT_POOL_CACHE_CAPACITY
+        );
+
+        // The new entry should be present
+        let found = verifier.pool_cache.lock().get(&overflow_hash).cloned();
+        assert!(
+            found.is_some(),
+            "Newly inserted pool hash should be present"
+        );
+        assert_eq!(found.expect("info").depth, 8);
+    }
+
+    #[test]
+    fn test_pool_cache_concurrent_access() {
+        use evmlib::merkle_batch_payment::PoolHash;
+        use std::sync::Arc;
+
+        let verifier = Arc::new(create_test_verifier());
+
+        let mut handles = Vec::new();
+        for i in 0..20u8 {
+            let v = verifier.clone();
+            handles.push(std::thread::spawn(move || {
+                let hash: PoolHash = [i; 32];
+                let info = ant_evm::merkle_payments::OnChainPaymentInfo {
+                    depth: i,
+                    merkle_payment_timestamp: u64::from(i) * 1000,
+                    paid_node_addresses: vec![],
+                };
+                v.pool_cache.lock().put(hash, info);
+
+                // Read back
+                let found = v.pool_cache.lock().get(&hash).cloned();
+                assert!(found.is_some(), "Entry {i} should be readable after insert");
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("thread panicked");
+        }
+
+        // All 20 entries should be present (well under 1000 capacity)
+        assert_eq!(verifier.pool_cache.lock().len(), 20);
+    }
+
+    #[tokio::test]
+    async fn test_merkle_tampered_candidate_signature_rejected() {
+        let verifier = create_test_verifier();
+
+        let (mut merkle_proof, _pool_hash, xorname, timestamp) = make_valid_merkle_proof();
+
+        // Tamper the first candidate's signature
+        if let Some(byte) = merkle_proof
+            .winner_pool
+            .candidate_nodes
+            .first_mut()
+            .and_then(|c| c.signature.first_mut())
+        {
+            *byte ^= 0xFF;
+        }
+
+        // Recompute pool hash after tampering (signature change alters the hash)
+        let tampered_pool_hash = merkle_proof.winner_pool_hash();
+
+        // Pre-populate pool cache so we skip the on-chain query
+        {
+            let info = ant_evm::merkle_payments::OnChainPaymentInfo {
+                depth: 4,
+                merkle_payment_timestamp: timestamp,
+                paid_node_addresses: vec![],
+            };
+            verifier.pool_cache.lock().put(tampered_pool_hash, info);
+        }
+
+        let tagged =
+            crate::payment::proof::serialize_merkle_proof(&merkle_proof).expect("serialize");
+
+        let result = verifier.verify_payment(&xorname, Some(&tagged)).await;
+
+        assert!(
+            result.is_err(),
+            "Should reject merkle proof with tampered candidate signature"
+        );
+        let err_msg = format!("{}", result.expect_err("should fail"));
+        assert!(
+            err_msg.contains("Invalid ML-DSA-65 signature"),
+            "Error should mention invalid signature: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_merkle_timestamp_mismatch_rejected() {
+        let verifier = create_test_verifier();
+
+        let (xorname, tagged, pool_hash, timestamp) = make_valid_merkle_proof_bytes();
+
+        // Pre-populate pool cache with a DIFFERENT timestamp than the candidates
+        {
+            let mismatched_ts = timestamp + 9999;
+            let info = ant_evm::merkle_payments::OnChainPaymentInfo {
+                depth: 4,
+                merkle_payment_timestamp: mismatched_ts,
+                paid_node_addresses: vec![],
+            };
+            verifier.pool_cache.lock().put(pool_hash, info);
+        }
+
+        let result = verifier.verify_payment(&xorname, Some(&tagged)).await;
+
+        assert!(
+            result.is_err(),
+            "Should reject merkle proof with timestamp mismatch"
+        );
+        let err_msg = format!("{}", result.expect_err("should fail"));
+        assert!(
+            err_msg.contains("timestamp mismatch"),
+            "Error should mention timestamp mismatch: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_merkle_paid_node_index_out_of_bounds_rejected() {
+        let verifier = create_test_verifier();
+        let (xorname, tagged_proof, pool_hash, ts) = make_valid_merkle_proof_bytes();
+
+        // The test tree has 4 addresses → depth 2. We must match the tree depth
+        // so verify_merkle_proof passes the depth check, then the paid node
+        // index out-of-bounds check fires.
+        {
+            let info = ant_evm::merkle_payments::OnChainPaymentInfo {
+                depth: 2,
+                merkle_payment_timestamp: ts,
+                paid_node_addresses: vec![
+                    // First paid node: valid (matches candidate 0)
+                    (RewardsAddress::new([0u8; 20]), 0),
+                    // Second paid node: index 999 is way beyond CANDIDATES_PER_POOL (16)
+                    (RewardsAddress::new([1u8; 20]), 999),
+                ],
+            };
+            verifier.pool_cache.lock().put(pool_hash, info);
+        }
+
+        let result = verifier.verify_payment(&xorname, Some(&tagged_proof)).await;
+
+        assert!(
+            result.is_err(),
+            "Should reject paid node index out of bounds"
+        );
+        let err_msg = format!("{}", result.expect_err("should fail"));
+        assert!(
+            err_msg.contains("out of bounds"),
+            "Error should mention out of bounds: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_merkle_paid_node_address_mismatch_rejected() {
+        let verifier = create_test_verifier();
+        let (xorname, tagged_proof, pool_hash, ts) = make_valid_merkle_proof_bytes();
+
+        // Tree has depth 2, so provide 2 paid node entries.
+        // Both use valid indices but the second has a wrong reward address.
+        {
+            let info = ant_evm::merkle_payments::OnChainPaymentInfo {
+                depth: 2,
+                merkle_payment_timestamp: ts,
+                paid_node_addresses: vec![
+                    // Index 0 with matching address [0x00; 20]
+                    (RewardsAddress::new([0u8; 20]), 0),
+                    // Index 1 with WRONG address — candidate 1's address is [0x01; 20]
+                    (RewardsAddress::new([0xFF; 20]), 1),
+                ],
+            };
+            verifier.pool_cache.lock().put(pool_hash, info);
+        }
+
+        let result = verifier.verify_payment(&xorname, Some(&tagged_proof)).await;
+
+        assert!(result.is_err(), "Should reject paid node address mismatch");
+        let err_msg = format!("{}", result.expect_err("should fail"));
+        assert!(
+            err_msg.contains("address mismatch"),
+            "Error should mention address mismatch: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_merkle_wrong_depth_rejected() {
+        let verifier = create_test_verifier();
+        let (xorname, tagged_proof, pool_hash, ts) = make_valid_merkle_proof_bytes();
+
+        // Pre-populate pool cache with depth=3 but only 1 paid node address
+        // (depth must equal paid_node_addresses.len())
+        {
+            let info = ant_evm::merkle_payments::OnChainPaymentInfo {
+                depth: 3,
+                merkle_payment_timestamp: ts,
+                paid_node_addresses: vec![(RewardsAddress::new([0u8; 20]), 0)],
+            };
+            verifier.pool_cache.lock().put(pool_hash, info);
+        }
+
+        let result = verifier.verify_payment(&xorname, Some(&tagged_proof)).await;
+
+        assert!(
+            result.is_err(),
+            "Should reject mismatched depth vs paid node count"
+        );
+        let err_msg = format!("{}", result.expect_err("should fail"));
+        assert!(
+            err_msg.contains("Wrong number of paid nodes")
+                || err_msg.contains("verification failed"),
+            "Error should mention depth/count mismatch: {err_msg}"
+        );
     }
 }

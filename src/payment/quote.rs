@@ -746,4 +746,154 @@ mod tests {
             "Tampered timestamp should invalidate the ML-DSA-65 signature"
         );
     }
+
+    // =========================================================================
+    // verify_merkle_candidate_signature — direct tests
+    // =========================================================================
+
+    /// Helper: create a validly-signed `MerklePaymentCandidateNode`.
+    fn make_valid_merkle_candidate() -> MerklePaymentCandidateNode {
+        let ml_dsa = MlDsa65::new();
+        let (public_key, secret_key) = ml_dsa.generate_keypair().expect("keygen");
+
+        let rewards_address = RewardsAddress::new([0xABu8; 20]);
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_secs();
+        let metrics = ant_evm::QuotingMetrics {
+            data_size: 4096,
+            data_type: 0,
+            close_records_stored: 10,
+            records_per_type: vec![],
+            max_records: 500,
+            received_payment_count: 3,
+            live_time: 600,
+            network_density: None,
+            network_size: None,
+        };
+
+        let msg = MerklePaymentCandidateNode::bytes_to_sign(&metrics, &rewards_address, timestamp);
+        let sk = MlDsaSecretKey::from_bytes(secret_key.as_bytes()).expect("sk");
+        let signature = ml_dsa.sign(&sk, &msg).expect("sign").as_bytes().to_vec();
+
+        MerklePaymentCandidateNode {
+            pub_key: public_key.as_bytes().to_vec(),
+            quoting_metrics: metrics,
+            reward_address: rewards_address,
+            merkle_payment_timestamp: timestamp,
+            signature,
+        }
+    }
+
+    #[test]
+    fn test_verify_merkle_candidate_valid_signature() {
+        let candidate = make_valid_merkle_candidate();
+        assert!(
+            verify_merkle_candidate_signature(&candidate),
+            "Freshly signed merkle candidate must verify"
+        );
+    }
+
+    #[test]
+    fn test_verify_merkle_candidate_tampered_pub_key() {
+        let mut candidate = make_valid_merkle_candidate();
+        // Flip a byte in the public key
+        if let Some(byte) = candidate.pub_key.first_mut() {
+            *byte ^= 0xFF;
+        }
+        assert!(
+            !verify_merkle_candidate_signature(&candidate),
+            "Tampered pub_key must invalidate the signature"
+        );
+    }
+
+    #[test]
+    fn test_verify_merkle_candidate_tampered_reward_address() {
+        let mut candidate = make_valid_merkle_candidate();
+        candidate.reward_address = RewardsAddress::new([0xFFu8; 20]);
+        assert!(
+            !verify_merkle_candidate_signature(&candidate),
+            "Tampered reward_address must invalidate the signature"
+        );
+    }
+
+    #[test]
+    fn test_verify_merkle_candidate_tampered_metrics() {
+        let mut candidate = make_valid_merkle_candidate();
+        candidate.quoting_metrics.data_size = 999_999;
+        assert!(
+            !verify_merkle_candidate_signature(&candidate),
+            "Tampered quoting_metrics must invalidate the signature"
+        );
+    }
+
+    #[test]
+    fn test_verify_merkle_candidate_tampered_signature_byte() {
+        let mut candidate = make_valid_merkle_candidate();
+        if let Some(byte) = candidate.signature.first_mut() {
+            *byte ^= 0xFF;
+        }
+        assert!(
+            !verify_merkle_candidate_signature(&candidate),
+            "Tampered signature byte must fail verification"
+        );
+    }
+
+    #[test]
+    fn test_verify_merkle_candidate_empty_pub_key() {
+        let mut candidate = make_valid_merkle_candidate();
+        candidate.pub_key = vec![];
+        assert!(
+            !verify_merkle_candidate_signature(&candidate),
+            "Empty pub_key must fail verification"
+        );
+    }
+
+    #[test]
+    fn test_verify_merkle_candidate_empty_signature() {
+        let mut candidate = make_valid_merkle_candidate();
+        candidate.signature = vec![];
+        assert!(
+            !verify_merkle_candidate_signature(&candidate),
+            "Empty signature must fail verification"
+        );
+    }
+
+    #[test]
+    fn test_verify_merkle_candidate_wrong_length_signature() {
+        let mut candidate = make_valid_merkle_candidate();
+        // ML-DSA-65 signatures are 3309 bytes; use a truncated one
+        candidate.signature = vec![0xAA; 100];
+        assert!(
+            !verify_merkle_candidate_signature(&candidate),
+            "Wrong-length signature must fail verification"
+        );
+    }
+
+    #[test]
+    fn test_verify_merkle_candidate_wrong_length_pub_key() {
+        let mut candidate = make_valid_merkle_candidate();
+        // ML-DSA-65 pub keys are 1952 bytes; use a truncated one
+        candidate.pub_key = vec![0xBB; 100];
+        assert!(
+            !verify_merkle_candidate_signature(&candidate),
+            "Wrong-length pub_key must fail verification"
+        );
+    }
+
+    #[test]
+    fn test_verify_merkle_candidate_cross_key_rejection() {
+        // Sign with one key pair, then swap in a different valid public key
+        let candidate = make_valid_merkle_candidate();
+        let ml_dsa = MlDsa65::new();
+        let (other_pk, _) = ml_dsa.generate_keypair().expect("keygen");
+
+        let mut swapped = candidate;
+        swapped.pub_key = other_pk.as_bytes().to_vec();
+        assert!(
+            !verify_merkle_candidate_signature(&swapped),
+            "Signature from key A must not verify under key B"
+        );
+    }
 }

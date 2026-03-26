@@ -220,7 +220,6 @@ proptest-regressions/
 
 # Package manager caches
 .cargo/
-!.cargo/config.toml
 
 # Claude/AI assistant files
 .claude/

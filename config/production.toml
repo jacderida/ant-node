@@ -59,9 +59,9 @@ db_size_gb = 0
 [upgrade]
 enabled = false
 channel = "stable"
-check_interval_hours = 1
+check_interval_minutes = 20
 github_repo = "WithAutonomi/ant-node"
-staged_rollout_hours = 1
+staged_rollout_hours = 2
 
 # --- Bootstrap cache ---
 [bootstrap_cache]

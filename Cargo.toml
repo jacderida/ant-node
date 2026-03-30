@@ -28,7 +28,7 @@ path = "src/bin/ant-devnet/main.rs"
 
 [dependencies]
 # Core (provides EVERYTHING: networking, DHT, security, trust, storage)
-saorsa-core = "0.18.1"
+saorsa-core = "0.19.0"
 saorsa-pqc = "0.5"
 
 # Payment verification - autonomi network lookup + EVM payment

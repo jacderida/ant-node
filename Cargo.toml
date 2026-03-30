@@ -19,10 +19,6 @@ name = "ant-node"
 path = "src/bin/ant-node/main.rs"
 
 [[bin]]
-name = "ant-keygen"
-path = "src/bin/keygen.rs"
-
-[[bin]]
 name = "ant-devnet"
 path = "src/bin/ant-devnet/main.rs"
 

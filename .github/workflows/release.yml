@@ -168,7 +168,7 @@ jobs:
         run: |
           cp config/bootstrap_peers.toml target/${{ matrix.target }}/release/
           cd target/${{ matrix.target }}/release
-          tar -czvf ../../../ant-node-cli-${{ matrix.friendly_name }}.tar.gz ${{ matrix.binary }} ant-keygen bootstrap_peers.toml
+          tar -czvf ../../../ant-node-cli-${{ matrix.friendly_name }}.tar.gz ${{ matrix.binary }} bootstrap_peers.toml
           cd ../../..
 
       - name: Create archive (Windows)
@@ -177,7 +177,7 @@ jobs:
         run: |
           Copy-Item "config/bootstrap_peers.toml" "target/${{ matrix.target }}/release/bootstrap_peers.toml"
           Push-Location "target/${{ matrix.target }}/release"
-          Compress-Archive -Path "${{ matrix.binary }}", "ant-keygen.exe", "bootstrap_peers.toml" -DestinationPath "../../../ant-node-cli-${{ matrix.friendly_name }}.zip"
+          Compress-Archive -Path "${{ matrix.binary }}", "bootstrap_peers.toml" -DestinationPath "../../../ant-node-cli-${{ matrix.friendly_name }}.zip"
           Pop-Location
 
       - name: Upload artifact
@@ -192,13 +192,6 @@ jobs:
     needs: [build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -208,20 +201,25 @@ jobs:
       - name: List artifacts
         run: ls -la artifacts/
 
+      - name: Download ant-keygen
+        run: |
+          gh release download --repo WithAutonomi/ant-keygen --pattern 'ant-keygen-linux-x64.tar.gz' --dir /tmp
+          tar -xzf /tmp/ant-keygen-linux-x64.tar.gz -C /tmp
+          chmod +x /tmp/ant-keygen
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Decode signing key
         run: |
           echo "${{ secrets.ANT_NODE_SIGNING_KEY }}" | xxd -r -p > /tmp/signing-key.secret
           chmod 600 /tmp/signing-key.secret
-
-      - name: Build signing tool
-        run: cargo build --release --bin ant-keygen
 
       - name: Sign all release files
         run: |
           for file in artifacts/ant-node-cli-*.tar.gz artifacts/ant-node-cli-*.zip; do
             if [ -f "$file" ]; then
               echo "Signing $file..."
-              ./target/release/ant-keygen sign \
+              /tmp/ant-keygen sign \
                 --key /tmp/signing-key.secret \
                 --input "$file" \
                 --output "${file}.sig"
@@ -317,7 +315,8 @@ jobs:
             ### Verification
 
             All downloads are signed with ML-DSA-65 (FIPS 204) post-quantum signatures.
-            Download the corresponding `.sig` file and verify:
+            Download `ant-keygen` from [WithAutonomi/ant-keygen](https://github.com/WithAutonomi/ant-keygen/releases)
+            and verify:
 
             ```bash
             ant-keygen verify --key release-signing-key.pub --input <file> --signature <file>.sig

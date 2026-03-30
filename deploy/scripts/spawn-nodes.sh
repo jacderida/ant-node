@@ -40,7 +40,6 @@ download_binary() {
     echo "Extracting..."
     tar -xzf /tmp/ant-node.tar.gz -C /tmp
     mv /tmp/ant-node "$BINARY_PATH"
-    mv /tmp/ant-keygen /usr/local/bin/ant-keygen 2>/dev/null || true
     chmod +x "$BINARY_PATH"
     rm -f /tmp/ant-node.tar.gz
 

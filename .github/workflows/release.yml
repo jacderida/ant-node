@@ -390,9 +390,9 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [validate, sign]
+    needs: [validate, sign, publish-crate]
+    if: ${{ always() && !cancelled() && needs.validate.result == 'success' && needs.sign.result == 'success' && (needs.publish-crate.result == 'success' || needs.publish-crate.result == 'skipped') && github.event.inputs.dry_run != 'true' }}
     runs-on: ubuntu-latest
-    if: github.event.inputs.dry_run != 'true'
     steps:
       - uses: actions/checkout@v4
 

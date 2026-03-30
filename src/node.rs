@@ -602,16 +602,41 @@ impl RunningNode {
                                     jittered_duration
                                 },
                                 |remaining| {
-                                    let wake_time = chrono::Utc::now()
-                                        + chrono::Duration::from_std(remaining).unwrap_or_else(|e| {
-                                            warn!("chrono::Duration::from_std failed for rollout delay ({e}), defaulting to 1 minute");
-                                            chrono::Duration::minutes(1)
-                                        });
-                                    info!("Will apply upgrade at {}", wake_time.to_rfc3339());
-                                    remaining
+                                    // If the rollout delay has fully elapsed but the upgrade was
+                                    // not successfully applied, avoid a tight loop by backing off
+                                    // at least one check interval before retrying.
+                                    if remaining.is_zero() {
+                                        let backoff = jittered_interval(monitor.check_interval());
+                                        let next_check = chrono::Utc::now()
+                                            + chrono::Duration::from_std(backoff).unwrap_or_else(|e| {
+                                                warn!("chrono::Duration::from_std failed for backoff ({e}), defaulting to 1 hour");
+                                                chrono::Duration::hours(1)
+                                            });
+                                        info!(
+                                            "Upgrade rollout delay elapsed but previous apply did not succeed; \
+                                             backing off, next check scheduled for {}",
+                                            next_check.to_rfc3339()
+                                        );
+                                        backoff
+                                    } else {
+                                        let wake_time = chrono::Utc::now()
+                                            + chrono::Duration::from_std(remaining).unwrap_or_else(|e| {
+                                                warn!("chrono::Duration::from_std failed for rollout delay ({e}), defaulting to 1 minute");
+                                                chrono::Duration::minutes(1)
+                                            });
+                                        info!("Will apply upgrade at {}", wake_time.to_rfc3339());
+                                        remaining
+                                    }
                                 },
                             );
-                            tokio::time::sleep(sleep_duration).await;
+                            // Use select! so shutdown can interrupt long sleeps
+                            // (e.g. during a full rollout window delay).
+                            tokio::select! {
+                                () = shutdown.cancelled() => {
+                                    break;
+                                }
+                                () = tokio::time::sleep(sleep_duration) => {}
+                            }
                         }
                     }
                 }

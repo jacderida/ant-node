@@ -66,7 +66,6 @@ ssh -o StrictHostKeyChecking=no "root@${BUILD_HOST}" "
 echo "=== Installing on build host ==="
 ssh -o StrictHostKeyChecking=no "root@${BUILD_HOST}" "
     cp /root/ant-node/target/release/ant-node /usr/local/bin/
-    cp /root/ant-node/target/release/ant-keygen /usr/local/bin/ 2>/dev/null || true
     chmod +x /usr/local/bin/ant-node
     /usr/local/bin/ant-node --version
 "

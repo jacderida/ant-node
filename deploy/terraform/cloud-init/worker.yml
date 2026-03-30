@@ -38,18 +38,16 @@ write_files:
       ARCHIVE_URL="https://github.com/WithAutonomi/ant-node/releases/download/v$${ANT_VERSION}/ant-node-cli-$${PLATFORM}.tar.gz"
       SIG_URL="$${ARCHIVE_URL}.sig"
       BINARY_PATH="/usr/local/bin/ant-node"
-      KEYGEN_PATH="/usr/local/bin/ant-keygen"
 
       echo "Downloading ant-node v$${ANT_VERSION} for $${PLATFORM}..."
       cd /tmp
       curl -L -o ant-node.tar.gz "$${ARCHIVE_URL}"
       curl -L -o ant-node.tar.gz.sig "$${SIG_URL}" || echo "No signature file (dev release)"
 
-      # Extract binaries
+      # Extract binary
       tar -xzf ant-node.tar.gz
       mv ant-node "$${BINARY_PATH}"
-      mv ant-keygen "$${KEYGEN_PATH}" || true
-      chmod +x "$${BINARY_PATH}" "$${KEYGEN_PATH}" 2>/dev/null || true
+      chmod +x "$${BINARY_PATH}"
       rm -f ant-node.tar.gz ant-node.tar.gz.sig
 
       echo "Installed ant-node v$${ANT_VERSION}"

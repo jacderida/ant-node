@@ -44,7 +44,6 @@ for i in "${!WORKERS[@]}"; do
         curl -sL '${BINARY_URL}' -o ant-node.tar.gz
         tar xzf ant-node.tar.gz
         mv ant-node /usr/local/bin/
-        mv ant-keygen /usr/local/bin/ 2>/dev/null || true
         chmod +x /usr/local/bin/ant-node
         rm -f ant-node.tar.gz
         /usr/local/bin/ant-node --version

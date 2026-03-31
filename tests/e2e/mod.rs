@@ -58,6 +58,9 @@ mod complete_payment_e2e;
 mod merkle_payment;
 
 #[cfg(test)]
+mod replication;
+
+#[cfg(test)]
 mod security_attacks;
 
 pub use anvil::TestAnvil;

@@ -15,14 +15,16 @@
 
 use ant_node::ant_protocol::{
     ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkMessageBody, ChunkPutRequest,
-    ChunkPutResponse, CHUNK_PROTOCOL_ID,
+    ChunkPutResponse, CHUNK_PROTOCOL_ID, MAX_WIRE_MESSAGE_SIZE,
 };
 use ant_node::client::{send_and_await_chunk_response, DataChunk, XorName};
 use ant_node::payment::{
     EvmVerifierConfig, PaymentVerifier, PaymentVerifierConfig, QuoteGenerator,
     QuotingMetricsTracker,
 };
+use ant_node::replication::config::MAX_REPLICATION_MESSAGE_SIZE;
 use ant_node::storage::{AntProtocol, LmdbStorage, LmdbStorageConfig};
+use ant_node::{ReplicationConfig, ReplicationEngine};
 use bytes::Bytes;
 use evmlib::Network as EvmNetwork;
 use evmlib::RewardsAddress;
@@ -40,6 +42,7 @@ use std::time::Duration;
 use tokio::sync::{broadcast, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 // =============================================================================
@@ -388,6 +391,12 @@ pub struct TestNode {
     /// Populated once the node starts and the protocol router is spawned.
     /// Dropped (and aborted) during teardown so tests don't leave tasks behind.
     pub protocol_task: Option<JoinHandle<()>>,
+
+    /// Replication engine for this test node.
+    pub replication_engine: Option<ReplicationEngine>,
+
+    /// Shutdown token for the replication engine.
+    pub replication_shutdown: Option<CancellationToken>,
 }
 
 impl TestNode {
@@ -410,7 +419,14 @@ impl TestNode {
     pub async fn shutdown(&mut self) -> Result<()> {
         info!("Shutting down test node {}", self.index);
 
-        // Stop protocol handler first
+        // Cancel replication engine first (signals all background tasks to stop)
+        if let Some(shutdown) = self.replication_shutdown.take() {
+            shutdown.cancel();
+        }
+        // Drop the engine so its task handles are released
+        self.replication_engine = None;
+
+        // Stop protocol handler
         if let Some(handle) = self.protocol_task.take() {
             handle.abort();
         }
@@ -1033,6 +1049,8 @@ impl TestNetwork {
             bootstrap_addrs,
             node_identity: Some(identity),
             protocol_task: None,
+            replication_engine: None,
+            replication_shutdown: None,
         })
     }
 
@@ -1126,7 +1144,7 @@ impl TestNetwork {
             .port(node.port)
             .local(true)
             .connection_timeout(Duration::from_secs(TEST_CORE_CONNECTION_TIMEOUT_SECS))
-            .max_message_size(ant_node::ant_protocol::MAX_WIRE_MESSAGE_SIZE)
+            .max_message_size(MAX_REPLICATION_MESSAGE_SIZE.max(MAX_WIRE_MESSAGE_SIZE))
             .build()
             .map_err(|e| TestnetError::Core(format!("Failed to create core config: {e}")))?;
 
@@ -1202,6 +1220,35 @@ impl TestNetwork {
                     }
                 }
             }));
+        }
+
+        // Start replication engine for this node
+        if let (Some(ref p2p), Some(ref protocol)) = (&node.p2p_node, &node.ant_protocol) {
+            let shutdown = CancellationToken::new();
+            let repl_config = ReplicationConfig::default();
+            match ReplicationEngine::new(
+                repl_config,
+                Arc::clone(p2p),
+                protocol.storage(),
+                protocol.payment_verifier_arc(),
+                &node.data_dir,
+                shutdown.clone(),
+            )
+            .await
+            {
+                Ok(mut engine) => {
+                    engine.start();
+                    node.replication_engine = Some(engine);
+                    node.replication_shutdown = Some(shutdown);
+                    debug!("Node {} replication engine started", node.index);
+                }
+                Err(e) => {
+                    warn!(
+                        "Node {} failed to start replication engine: {e}",
+                        node.index
+                    );
+                }
+            }
         }
 
         debug!("Node {} started successfully", node.index);
@@ -1402,6 +1449,11 @@ impl TestNetwork {
             }
 
             debug!("Stopping node {}", node.index);
+            // Cancel replication engine before tearing down P2P
+            if let Some(shutdown) = node.replication_shutdown.take() {
+                shutdown.cancel();
+            }
+            node.replication_engine = None;
             if let Some(handle) = node.protocol_task.take() {
                 handle.abort();
             }

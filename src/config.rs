@@ -86,6 +86,14 @@ pub struct NodeConfig {
     #[serde(default)]
     pub port: u16,
 
+    /// Force IPv4-only mode.
+    ///
+    /// When true, the node binds only on IPv4 instead of dual-stack.
+    /// Use this on hosts without working IPv6 to avoid advertising
+    /// unreachable addresses to the DHT.
+    #[serde(default)]
+    pub ipv4_only: bool,
+
     /// Bootstrap peer addresses.
     #[serde(default)]
     pub bootstrap: Vec<SocketAddr>,
@@ -232,6 +240,7 @@ impl Default for NodeConfig {
         Self {
             root_dir: default_root_dir(),
             port: 0,
+            ipv4_only: false,
             bootstrap: Vec::new(),
             network_mode: NetworkMode::default(),
             testnet: TestnetConfig::default(),

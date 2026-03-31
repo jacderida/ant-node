@@ -928,6 +928,9 @@ Options:
         Listening port (0 for automatic selection)
         [default: 0]
 
+    --ipv4-only
+        Force IPv4-only mode (disable dual-stack).
+        Use on hosts without working IPv6.
 
     --bootstrap <ADDR>
         Bootstrap peer socket addresses (can be specified multiple times)
@@ -999,7 +1002,6 @@ peers = [
 ```bash
 export ANT_ROOT_DIR=~/.ant-node
 export ANT_PORT=12000
-export ANT_IP_VERSION=dual
 export ANT_LOG_LEVEL=info
 export ANT_AUTO_UPGRADE=true
 export ANT_UPGRADE_CHANNEL=stable

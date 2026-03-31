@@ -21,6 +21,12 @@ pub struct Cli {
     #[arg(long, short, default_value = "0", env = "ANT_PORT")]
     pub port: u16,
 
+    /// Force IPv4-only mode (disable dual-stack).
+    /// Use on hosts without working IPv6 to avoid advertising
+    /// unreachable addresses to the DHT.
+    #[arg(long, env = "ANT_IPV4_ONLY")]
+    pub ipv4_only: bool,
+
     /// Bootstrap peer addresses.
     #[arg(long, short, env = "ANT_BOOTSTRAP")]
     pub bootstrap: Vec<SocketAddr>,
@@ -200,6 +206,7 @@ impl Cli {
         }
 
         config.port = self.port;
+        config.ipv4_only = self.ipv4_only;
         config.log_level = self.log_level.into();
         config.network_mode = self.network_mode.into();
 

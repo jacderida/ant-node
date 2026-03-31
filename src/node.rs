@@ -155,7 +155,7 @@ impl NodeBuilder {
 
         let mut core_config = CoreNodeConfig::builder()
             .port(config.port)
-            .ipv6(true)
+            .ipv6(!config.ipv4_only)
             .local(local)
             .max_message_size(config.max_message_size)
             .build()
@@ -859,6 +859,23 @@ mod tests {
         };
         let core = NodeBuilder::build_core_config(&config).expect("core config");
         assert!(core.diversity_config.is_some());
+    }
+
+    #[test]
+    fn test_build_core_config_ipv4_only() {
+        let config = NodeConfig {
+            ipv4_only: true,
+            ..Default::default()
+        };
+        let core = NodeBuilder::build_core_config(&config).expect("core config");
+        assert!(!core.ipv6, "ipv4_only should disable IPv6");
+    }
+
+    #[test]
+    fn test_build_core_config_dual_stack_by_default() {
+        let config = NodeConfig::default();
+        let core = NodeBuilder::build_core_config(&config).expect("core config");
+        assert!(core.ipv6, "dual-stack should be the default");
     }
 
     #[test]

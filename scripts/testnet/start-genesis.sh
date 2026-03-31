@@ -23,6 +23,7 @@ Type=simple
 ExecStart=/usr/local/bin/ant-node \
     --root-dir /var/lib/ant/nodes/node-0 \
     --port 12000 \
+    --ipv4-only \
     --metrics-port 9100 \
     --log-level info \
     --upgrade-channel stable \
@@ -63,6 +64,7 @@ Type=simple
 ExecStart=/usr/local/bin/ant-node \
     --root-dir /var/lib/ant/nodes/node-50 \
     --port 12000 \
+    --ipv4-only \
     -b 142.93.52.129:12000 \
     --metrics-port 9100 \
     --log-level info \

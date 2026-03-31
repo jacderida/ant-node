@@ -497,15 +497,16 @@ mod tests {
         let mut queues = ReplicationQueues::new(10);
         let key = xor_name_from_byte(0x01);
 
-        // Create entry with a backdated timestamp.
+        // Create entry with a backdated timestamp. Use a small subtraction
+        // to avoid `checked_sub` returning `None` on freshly-booted CI runners.
         let mut entry = test_entry(1);
         entry.created_at = Instant::now()
-            .checked_sub(Duration::from_secs(120))
-            .unwrap();
+            .checked_sub(Duration::from_secs(2))
+            .unwrap_or_else(Instant::now);
         queues.pending_verify.insert(key, entry);
 
         assert_eq!(queues.pending_count(), 1);
-        queues.evict_stale(Duration::from_secs(60));
+        queues.evict_stale(Duration::from_secs(1));
         assert_eq!(
             queues.pending_count(),
             0,

@@ -442,7 +442,7 @@ impl LmdbStorage {
     /// Retrieve raw chunk bytes without content-address verification.
     ///
     /// Used by the audit subsystem to compute digests over stored bytes.
-    /// Unlike [`get`], this does not verify `hash(content) == address`.
+    /// Unlike [`Self::get`], this does not verify `hash(content) == address`.
     ///
     /// # Errors
     ///

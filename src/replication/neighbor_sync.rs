@@ -347,14 +347,17 @@ mod tests {
         let mut state = NeighborSyncState::new_cycle(peers);
 
         // Mark peer 1 as synced a long time ago (simulate expired cooldown).
+        // Use a small subtraction (2s) and a smaller cooldown (1s) to avoid
+        // `checked_sub` returning `None` on freshly-booted CI runners where
+        // `Instant::now()` (system uptime) may be very small.
         state.last_sync_times.insert(
             peer_id_from_byte(1),
             Instant::now()
-                .checked_sub(Duration::from_secs(7200))
-                .unwrap(),
+                .checked_sub(Duration::from_secs(2))
+                .unwrap_or_else(Instant::now),
         );
 
-        let cooldown = Duration::from_secs(3600);
+        let cooldown = Duration::from_secs(1);
         let batch = select_sync_batch(&mut state, 2, cooldown);
 
         // Peer 1's cooldown expired so it should be included.
@@ -493,10 +496,11 @@ mod tests {
         let mut state = NeighborSyncState::new_cycle(peers);
         let peer = peer_id_from_byte(1);
 
-        // Record a sync at an old time.
+        // Record a sync at an old time. Use a small subtraction to avoid
+        // `checked_sub` returning `None` on freshly-booted CI runners.
         let old_time = Instant::now()
-            .checked_sub(Duration::from_secs(3600))
-            .unwrap();
+            .checked_sub(Duration::from_secs(2))
+            .unwrap_or_else(Instant::now);
         state.last_sync_times.insert(peer, old_time);
 
         record_successful_sync(&mut state, &peer);

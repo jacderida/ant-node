@@ -10,19 +10,6 @@ pub const NODE_IDENTITY_FILENAME: &str = "node_identity.key";
 /// Subdirectory under the root dir that contains per-node data directories.
 pub const NODES_SUBDIR: &str = "nodes";
 
-/// IP version configuration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum IpVersion {
-    /// IPv4 only.
-    Ipv4,
-    /// IPv6 only.
-    Ipv6,
-    /// Dual-stack (both IPv4 and IPv6).
-    #[default]
-    Dual,
-}
-
 /// Upgrade channel for auto-updates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -98,10 +85,6 @@ pub struct NodeConfig {
     /// Listening port (0 for auto-select).
     #[serde(default)]
     pub port: u16,
-
-    /// IP version to use.
-    #[serde(default)]
-    pub ip_version: IpVersion,
 
     /// Bootstrap peer addresses.
     #[serde(default)]
@@ -249,7 +232,6 @@ impl Default for NodeConfig {
         Self {
             root_dir: default_root_dir(),
             port: 0,
-            ip_version: IpVersion::default(),
             bootstrap: Vec::new(),
             network_mode: NetworkMode::default(),
             testnet: TestnetConfig::default(),

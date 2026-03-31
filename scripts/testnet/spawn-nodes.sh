@@ -58,7 +58,6 @@ Type=simple
 ExecStart=/usr/local/bin/ant-node \\
     --root-dir ${NODE_DIR} \\
     --port ${PORT} \\
-    --ip-version ipv4 \\
     --network-mode testnet \\
     ${BOOTSTRAP_FLAGS} \\
     --metrics-port ${METRICS} \\

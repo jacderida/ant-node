@@ -9,9 +9,6 @@ root_dir = "/var/lib/ant"
 # Listening port (10000-10999 for production)
 port = 10000
 
-# IP version: "ipv4", "ipv6", or "dual"
-ip_version = "dual"
-
 # Bootstrap peer addresses (socket addrs)
 bootstrap = []
 

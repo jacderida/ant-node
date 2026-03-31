@@ -1,8 +1,8 @@
 //! Command-line interface definition.
 
 use ant_node::config::{
-    BootstrapCacheConfig, BootstrapPeersConfig, BootstrapSource, EvmNetworkConfig, IpVersion,
-    NetworkMode, NodeConfig, PaymentConfig, UpgradeChannel,
+    BootstrapCacheConfig, BootstrapPeersConfig, BootstrapSource, EvmNetworkConfig, NetworkMode,
+    NodeConfig, PaymentConfig, UpgradeChannel,
 };
 use clap::{Parser, ValueEnum};
 use std::net::SocketAddr;
@@ -20,10 +20,6 @@ pub struct Cli {
     /// Listening port (0 for auto-select).
     #[arg(long, short, default_value = "0", env = "ANT_PORT")]
     pub port: u16,
-
-    /// IP version to use.
-    #[arg(long, value_enum, default_value = "dual", env = "ANT_IP_VERSION")]
-    pub ip_version: CliIpVersion,
 
     /// Bootstrap peer addresses.
     #[arg(long, short, env = "ANT_BOOTSTRAP")]
@@ -110,17 +106,6 @@ pub struct Cli {
     /// Maximum peers to cache in the bootstrap cache.
     #[arg(long, default_value = "10000", env = "ANT_BOOTSTRAP_CACHE_CAPACITY")]
     pub bootstrap_cache_capacity: usize,
-}
-
-/// IP version CLI enum.
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum CliIpVersion {
-    /// IPv4 only.
-    Ipv4,
-    /// IPv6 only.
-    Ipv6,
-    /// Dual-stack (both IPv4 and IPv6).
-    Dual,
 }
 
 /// Upgrade channel CLI enum.
@@ -215,7 +200,6 @@ impl Cli {
         }
 
         config.port = self.port;
-        config.ip_version = self.ip_version.into();
         config.log_level = self.log_level.into();
         config.network_mode = self.network_mode.into();
 
@@ -263,16 +247,6 @@ impl Cli {
         };
 
         Ok((config, bootstrap_source))
-    }
-}
-
-impl From<CliIpVersion> for IpVersion {
-    fn from(v: CliIpVersion) -> Self {
-        match v {
-            CliIpVersion::Ipv4 => Self::Ipv4,
-            CliIpVersion::Ipv6 => Self::Ipv6,
-            CliIpVersion::Dual => Self::Dual,
-        }
     }
 }
 

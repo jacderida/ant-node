@@ -2,7 +2,7 @@
 
 use crate::ant_protocol::{CHUNK_PROTOCOL_ID, MAX_CHUNK_SIZE};
 use crate::config::{
-    default_nodes_dir, default_root_dir, EvmNetworkConfig, IpVersion, NetworkMode, NodeConfig,
+    default_nodes_dir, default_root_dir, EvmNetworkConfig, NetworkMode, NodeConfig,
     NODE_IDENTITY_FILENAME,
 };
 use crate::error::{Error, Result};
@@ -151,12 +151,11 @@ impl NodeBuilder {
 
     /// Build the saorsa-core `NodeConfig` from our config.
     fn build_core_config(config: &NodeConfig) -> Result<CoreNodeConfig> {
-        let ipv6 = matches!(config.ip_version, IpVersion::Ipv6 | IpVersion::Dual);
         let local = matches!(config.network_mode, NetworkMode::Development);
 
         let mut core_config = CoreNodeConfig::builder()
             .port(config.port)
-            .ipv6(ipv6)
+            .ipv6(true)
             .local(local)
             .max_message_size(config.max_message_size)
             .build()

@@ -91,35 +91,17 @@ pub async fn audit_tick(
             .collect()
     };
 
-    // Step 3: For each key, perform network closest-peer lookup.
-    let mut candidate_peers: HashMap<PeerId, HashSet<XorName>> = HashMap::new();
+    // Step 3: For each key, find closest peers from the local routing table.
+    let mut rt_filtered: HashMap<PeerId, HashSet<XorName>> = HashMap::new();
 
     for key in &seed_keys {
-        match dht
-            .find_closest_nodes_network(key, config.close_group_size)
-            .await
-        {
-            Ok(closest) => {
-                for node in &closest {
-                    if node.peer_id != self_id {
-                        candidate_peers
-                            .entry(node.peer_id)
-                            .or_default()
-                            .insert(*key);
-                    }
-                }
+        let closest = dht
+            .find_closest_nodes_local(key, config.close_group_size)
+            .await;
+        for node in &closest {
+            if node.peer_id != self_id {
+                rt_filtered.entry(node.peer_id).or_default().insert(*key);
             }
-            Err(e) => {
-                debug!("Audit: network lookup for {} failed: {e}", hex::encode(key));
-            }
-        }
-    }
-
-    // Step 4: Filter by LocalRT membership.
-    let mut rt_filtered: HashMap<PeerId, HashSet<XorName>> = HashMap::new();
-    for (peer, keys) in &candidate_peers {
-        if dht.is_in_routing_table(peer).await {
-            rt_filtered.insert(*peer, keys.clone());
         }
     }
 
@@ -363,30 +345,18 @@ async fn handle_audit_failure(
     let dht = p2p_node.dht_manager();
     let mut confirmed_failures = Vec::new();
 
-    // Step 12a-b: Fresh network lookup for each failed key.
+    // Step 12a-b: Fresh local RT lookup for each failed key.
     for key in failed_keys {
-        match dht
-            .find_closest_nodes_network(key, config.close_group_size)
-            .await
-        {
-            Ok(closest) => {
-                if closest.iter().any(|n| n.peer_id == *challenged_peer) {
-                    confirmed_failures.push(*key);
-                } else {
-                    debug!(
-                        "Audit: peer {challenged_peer} not responsible for {} (removed from failure set)",
-                        hex::encode(key)
-                    );
-                }
-            }
-            Err(e) => {
-                debug!(
-                    "Audit: fresh lookup for {} failed: {e}, keeping in failure set",
-                    hex::encode(key)
-                );
-                // On lookup failure, be conservative: keep in failure set.
-                confirmed_failures.push(*key);
-            }
+        let closest = dht
+            .find_closest_nodes_local(key, config.close_group_size)
+            .await;
+        if closest.iter().any(|n| n.peer_id == *challenged_peer) {
+            confirmed_failures.push(*key);
+        } else {
+            debug!(
+                "Audit: peer {challenged_peer} not responsible for {} (removed from failure set)",
+                hex::encode(key)
+            );
         }
     }
 

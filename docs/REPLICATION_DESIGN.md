@@ -106,7 +106,7 @@ Parameter safety constraints (MUST hold):
 21. Verification-request batching is mandatory for unknown-key neighbor-sync verification and preserves per-key quorum semantics: each key receives explicit per-key evidence, and missing/timeout evidence is unresolved per key.
 22. On every `NeighborSyncCycleComplete(self)`, node MUST run a prune pass using current `SelfInclusiveRT(self)`: for stored records where `IsResponsible(self, K)` is false, record `RecordOutOfRangeFirstSeen` if not already set and delete only when `now - RecordOutOfRangeFirstSeen >= PRUNE_HYSTERESIS_DURATION`; clear `RecordOutOfRangeFirstSeen` when back in range. For `PaidForList` entries where `self ∉ PaidCloseGroup(K)`, record `PaidOutOfRangeFirstSeen` if not already set and delete only when `now - PaidOutOfRangeFirstSeen >= PRUNE_HYSTERESIS_DURATION`; clear `PaidOutOfRangeFirstSeen` when back in range. The two timestamps are independent.
 23. Peers claiming bootstrap status are skipped for sync and audit without penalty for up to `BOOTSTRAP_CLAIM_GRACE_PERIOD` from first observation. After the grace period, each continued bootstrap claim emits `BootstrapClaimAbuse` evidence to `TrustEngine` (via `report_trust_event` with `ApplicationFailure(weight)`).
-24. Audit trust-penalty signals require responsibility confirmation: on audit failure, challenger MUST perform fresh network closest-peer lookups for each challenged key and only penalize the peer for keys where it is confirmed responsible by the network.
+24. Audit trust-penalty signals require responsibility confirmation: on audit failure, challenger MUST perform fresh local RT closest-peer lookups for each challenged key and only penalize the peer for keys where it is confirmed responsible.
 
 ## 6. Replication
 
@@ -440,8 +440,8 @@ Challenge-response for claimed holders:
 
 1. Challenger creates unique challenge id + nonce.
 2. Challenger samples `SeedKeys` uniformly at random from locally stored record keys, with `|SeedKeys| = max(floor(sqrt(local_store_key_count)), 1)` (capped at `local_store_key_count`). If local store is empty, the audit tick is idle.
-3. For each `K` in `SeedKeys`, challenger performs one network closest-peer lookup and records the returned closest-peer set for `K`.
-4. Challenger builds `CandidatePeers` as the union of returned peers across all sampled keys, then filters to `CandidatePeersRT = CandidatePeers ∩ LocalRT(self)`.
+3. For each `K` in `SeedKeys`, challenger finds the closest peers from the local routing table and records the returned closest-peer set for `K`.
+4. Challenger builds `CandidatePeers` as the union of returned peers across all sampled keys (all are already in `LocalRT(self)` by construction).
 5. Challenger removes peers from `CandidatePeersRT` for which `RepairOpportunity(P, _)` is false — that is, peers that have never been synced with or have not had at least one subsequent neighbor-sync cycle to repair. Auditing such peers wastes network resources on challenges they cannot pass.
 6. Challenger builds `PeerKeySet(P)` for each `P` in `CandidatePeersRT` as the subset of `SeedKeys` whose lookup result included `P`. This derivation MUST use only lookup results from step 3 (no additional lookup requests).
 7. Challenger removes peers with empty `PeerKeySet(P)`. If no peers remain, the audit tick is idle.
@@ -452,7 +452,7 @@ Challenge-response for claimed holders:
     b. Bootstrapping claim: target asserts it is still bootstrapping. Challenger applies the bootstrap-claim grace logic (Section 6.2 rule 3b): record `BootstrapClaimFirstSeen` if first observation, accept without penalty within `BOOTSTRAP_CLAIM_GRACE_PERIOD`, emit `BootstrapClaimAbuse` evidence if past grace period. Audit tick ends (no digest verification).
 11. On per-key digest response, challenger recomputes the expected `AuditKeyDigest(K_i)` for each challenged key from local copies and verifies equality per key before deadline. Each key is independently classified as passed (digest matches) or failed (mismatch, absent, or malformed).
 12. On any per-key audit failures (timeout, malformed response, or one or more `AuditKeyDigest` mismatches/absences), challenger MUST perform a responsibility confirmation for each failed key before emitting penalty evidence:
-    a. For each failed key `K` in `PeerKeySet(challenged_peer_id)`, perform a fresh network closest-peer lookup for `K`.
+    a. For each failed key `K` in `PeerKeySet(challenged_peer_id)`, perform a fresh local RT closest-peer lookup for `K`.
     b. If `challenged_peer_id` does not appear in the fresh lookup result for key `K`, remove `K` from the failure set (peer is not currently responsible).
     c. If the filtered failure set is empty after all lookups, discard the audit failure entirely — no `AuditFailure` evidence or trust-penalty signal is emitted.
     d. If the filtered failure set is non-empty, emit per-key `AuditFailure` evidence scoped to the confirmed failed keys only.
@@ -596,7 +596,7 @@ Each scenario should assert exact expected outcomes and state transitions.
 29. Audit start gate:
 - Node does not schedule audits before `BootstrapDrained(self)`; first audit tick fires immediately when `BootstrapDrained(self)` transitions to true.
 30. Audit peer selection from sampled keys:
-- Scheduler samples `floor(sqrt(total_keys))` local keys (minimum 1), performs closest-peer lookups, filters peers by `LocalRT(self)`, builds `PeerKeySet` from those lookup results only, and selects one random peer to audit.
+- Scheduler samples `floor(sqrt(total_keys))` local keys (minimum 1), finds closest peers from the local routing table, builds `PeerKeySet` from those results only, and selects one random peer to audit.
 31. Audit periodic cadence with jitter:
 - Consecutive audit ticks occur on randomized intervals bounded by configured `AUDIT_TICK_INTERVAL` window.
 32. Dynamic challenge size:

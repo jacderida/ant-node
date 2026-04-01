@@ -429,7 +429,7 @@ mod tests {
     ///
     /// This test exercises the distance-based reasoning that `admit_hints`
     /// uses, tracing through the same logic path. Full `is_responsible`
-    /// requires a P2PNode for DHT lookups; here we verify the distance
+    /// requires a `P2PNode` for DHT lookups; here we verify the distance
     /// comparison and admission outcome for both close and far keys.
     #[test]
     fn scenario_7_out_of_range_key_rejected() {

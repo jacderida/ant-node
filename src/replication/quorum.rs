@@ -1366,9 +1366,9 @@ mod tests {
                 );
 
                 // Verify the specific Present peers are in sources.
-                for i in 0..5 {
+                for (i, peer) in quorum_peers.iter().enumerate().take(5) {
                     assert!(
-                        sources.contains(&quorum_peers[i]),
+                        sources.contains(peer),
                         "quorum_peer[{i}] responded Present and should be a fetch source"
                     );
                 }

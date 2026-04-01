@@ -589,7 +589,7 @@ mod tests {
     /// are deleted only after `PRUNE_HYSTERESIS_DURATION`. In-range items
     /// have their timestamps cleared.
     ///
-    /// Full `run_prune_pass` requires a live P2PNode. This test verifies
+    /// Full `run_prune_pass` requires a live `P2PNode`. This test verifies
     /// the deterministic trigger condition (cycle completion) and the
     /// combined record + paid-list pruning contract:
     ///   (1) Cycle completes -> prune pass should run.

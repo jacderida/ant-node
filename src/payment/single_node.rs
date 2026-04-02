@@ -1,11 +1,11 @@
 //! `SingleNode` payment mode implementation for ant-node.
 //!
 //! This module implements the `SingleNode` payment strategy from autonomi:
-//! - Client gets 5 quotes from network (`CLOSE_GROUP_SIZE`)
-//! - Sort by price and select median (index 2)
+//! - Client gets `CLOSE_GROUP_SIZE` quotes from network
+//! - Sort by price and select median (index `CLOSE_GROUP_SIZE / 2`)
 //! - Pay ONLY the median-priced node with 3x the quoted amount
-//! - Other 4 nodes get `Amount::ZERO`
-//! - All 5 are submitted for payment and verification
+//! - Other nodes get `Amount::ZERO`
+//! - All are submitted for payment and verification
 //!
 //! Total cost is the same as Standard mode (3x), but with one actual payment.
 //! This saves gas fees while maintaining the same total payment amount.
@@ -49,11 +49,11 @@ pub struct QuotePaymentInfo {
 }
 
 impl SingleNodePayment {
-    /// Create a `SingleNode` payment from 5 quotes and their prices.
+    /// Create a `SingleNode` payment from `CLOSE_GROUP_SIZE` quotes and their prices.
     ///
     /// The quotes are automatically sorted by price (cheapest first).
-    /// The median (index 2) gets 3x its quote price.
-    /// The other 4 get `Amount::ZERO`.
+    /// The median (index `CLOSE_GROUP_SIZE / 2`) gets 3x its quote price.
+    /// The others get `Amount::ZERO`.
     ///
     /// # Arguments
     ///
@@ -61,7 +61,7 @@ impl SingleNodePayment {
     ///
     /// # Errors
     ///
-    /// Returns error if not exactly 5 quotes are provided.
+    /// Returns error if not exactly `CLOSE_GROUP_SIZE` quotes are provided.
     pub fn from_quotes(mut quotes_with_prices: Vec<(PaymentQuote, Amount)>) -> Result<Self> {
         let len = quotes_with_prices.len();
         if len != CLOSE_GROUP_SIZE {
@@ -88,7 +88,7 @@ impl SingleNodePayment {
                 Error::Payment("Price overflow when calculating 3x median".to_string())
             })?;
 
-        // Build quote payment info for all 5 quotes
+        // Build quote payment info for all CLOSE_GROUP_SIZE quotes
         // Use try_from to convert Vec to fixed-size array
         let quotes_vec: Vec<QuotePaymentInfo> = quotes_with_prices
             .into_iter()
@@ -130,7 +130,7 @@ impl SingleNodePayment {
 
     /// Pay for all quotes on-chain using the wallet.
     ///
-    /// Pays 3x to the median quote and 0 to the other 4.
+    /// Pays 3x to the median quote and 0 to the others.
     ///
     /// # Errors
     ///
@@ -287,11 +287,11 @@ mod tests {
         (anvil, url)
     }
 
-    /// Test: Standard 5-quote payment verification (autonomi baseline)
+    /// Test: Standard `CLOSE_GROUP_SIZE`-quote payment verification (autonomi baseline)
     #[tokio::test]
     #[serial]
     #[allow(clippy::expect_used)]
-    async fn test_standard_five_quote_payment() {
+    async fn test_standard_quote_payment() {
         // Use autonomi's setup pattern with increased timeout for CI
         let (node, rpc_url) = start_node_with_timeout();
         let network_token = deploy_network_token_contract(&rpc_url, &node)
@@ -352,11 +352,11 @@ mod tests {
             );
         }
 
-        println!("✓ All 5 payments verified successfully");
-        println!("\n✅ Standard 5-quote payment works!");
+        println!("✓ All {CLOSE_GROUP_SIZE} payments verified successfully");
+        println!("\n✅ Standard {CLOSE_GROUP_SIZE}-quote payment works!");
     }
 
-    /// Test: `SingleNode` payment strategy (1 real + 4 dummy payments)
+    /// Test: `SingleNode` payment strategy (1 real + N-1 dummy payments)
     #[tokio::test]
     #[serial]
     #[allow(clippy::expect_used)]
@@ -372,7 +372,7 @@ mod tests {
 
         let transaction_config = TransactionConfig::default();
 
-        // CHANGE: Create 5 payments: 1 real (3x) + 4 dummy (0x)
+        // Create CLOSE_GROUP_SIZE payments: 1 real (3x) + rest dummy (0x)
         let real_quote_hash = dummy_hash();
         let real_reward_address = dummy_address();
         let real_amount = Amount::from(3u64); // 3x amount
@@ -402,13 +402,16 @@ mod tests {
         // Set provider
         payment_vault.set_provider(network_token.contract.provider().clone());
 
-        // Pay (1 real payment of 3 atto + 4 dummy payments of 0 atto)
+        // Pay (1 real payment of 3 atto + N-1 dummy payments of 0 atto)
         let result = payment_vault
             .pay_for_quotes(quote_payments.clone(), &transaction_config)
             .await;
 
         assert!(result.is_ok(), "Payment failed: {:?}", result.err());
-        println!("✓ Paid: 1 real (3 atto) + 4 dummy (0 atto)");
+        println!(
+            "✓ Paid: 1 real (3 atto) + {} dummy (0 atto)",
+            CLOSE_GROUP_SIZE - 1
+        );
 
         // Verify via completedPayments mapping
 
@@ -444,7 +447,7 @@ mod tests {
     #[test]
     #[allow(clippy::unwrap_used)]
     fn test_from_quotes_median_selection() {
-        let prices: Vec<u64> = vec![50, 30, 10, 40, 20];
+        let prices: Vec<u64> = vec![50, 30, 10, 40, 20, 60, 70];
         let mut quotes_with_prices = Vec::new();
 
         for price in &prices {
@@ -461,20 +464,20 @@ mod tests {
 
         let payment = SingleNodePayment::from_quotes(quotes_with_prices).unwrap();
 
-        // After sorting by price: 10, 20, 30, 40, 50
-        // Median (index 2) = 30, paid amount = 3 * 30 = 90
+        // After sorting by price: 10, 20, 30, 40, 50, 60, 70
+        // Median (index 3) = 40, paid amount = 3 * 40 = 120
         let median_quote = payment.quotes.get(MEDIAN_INDEX).unwrap();
-        assert_eq!(median_quote.amount, Amount::from(90u64));
+        assert_eq!(median_quote.amount, Amount::from(120u64));
 
-        // Other 4 quotes should have Amount::ZERO
+        // Other 6 quotes should have Amount::ZERO
         for (i, q) in payment.quotes.iter().enumerate() {
             if i != MEDIAN_INDEX {
                 assert_eq!(q.amount, Amount::ZERO);
             }
         }
 
-        // Total should be 3 * median price = 90
-        assert_eq!(payment.total_amount(), Amount::from(90u64));
+        // Total should be 3 * median price = 120
+        assert_eq!(payment.total_amount(), Amount::from(120u64));
     }
 
     #[test]
@@ -492,7 +495,7 @@ mod tests {
         let result = SingleNodePayment::from_quotes(vec![]);
         assert!(result.is_err());
         let err_msg = format!("{}", result.expect_err("should fail"));
-        assert!(err_msg.contains("exactly 5"));
+        assert!(err_msg.contains("exactly 7"));
     }
 
     #[test]
@@ -504,14 +507,14 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn test_from_quotes_six_quotes() {
+    fn test_from_quotes_wrong_count_six() {
         let quotes: Vec<_> = (0..6)
             .map(|_| (make_test_quote(1), Amount::from(10u64)))
             .collect();
         let result = SingleNodePayment::from_quotes(quotes);
         assert!(result.is_err());
         let err_msg = format!("{}", result.expect_err("should fail"));
-        assert!(err_msg.contains("exactly 5"));
+        assert!(err_msg.contains("exactly 7"));
     }
 
     #[test]
@@ -552,8 +555,8 @@ mod tests {
     #[test]
     #[allow(clippy::unwrap_used)]
     fn test_tied_median_prices_all_share_median_price() {
-        // Prices: 10, 30, 30, 30, 50 — three quotes tied at median price 30
-        let prices = [10u64, 30, 30, 30, 50];
+        // Prices: 10, 20, 30, 30, 30, 40, 50 — three quotes tied at median price 30
+        let prices = [10u64, 20, 30, 30, 30, 40, 50];
         let mut quotes_with_prices = Vec::new();
 
         for (i, price) in prices.iter().enumerate() {
@@ -561,7 +564,7 @@ mod tests {
                 content: XorName::random(&mut rand::thread_rng()),
                 timestamp: SystemTime::now(),
                 price: Amount::from(*price),
-                #[allow(clippy::cast_possible_truncation)] // i is always < 5
+                #[allow(clippy::cast_possible_truncation)] // i is always < 7
                 rewards_address: RewardsAddress::new([i as u8 + 1; 20]),
                 pub_key: vec![],
                 signature: vec![],
@@ -587,15 +590,15 @@ mod tests {
     #[test]
     #[allow(clippy::unwrap_used)]
     fn test_total_amount_equals_3x_median() {
-        let prices = [100u64, 200, 300, 400, 500];
+        let prices = [100u64, 200, 300, 400, 500, 600, 700];
         let quotes: Vec<_> = prices
             .iter()
             .map(|price| (make_test_quote(1), Amount::from(*price)))
             .collect();
 
         let payment = SingleNodePayment::from_quotes(quotes).unwrap();
-        // Sorted: 100, 200, 300, 400, 500 — median = 300, total = 3 * 300 = 900
-        assert_eq!(payment.total_amount(), Amount::from(900u64));
+        // Sorted: 100, 200, 300, 400, 500, 600, 700 — median = 400, total = 3 * 400 = 1200
+        assert_eq!(payment.total_amount(), Amount::from(1200u64));
     }
 
     /// Test: Complete `SingleNode` flow with real contract prices
@@ -623,7 +626,7 @@ mod tests {
 
         println!("✓ Approved tokens");
 
-        // Create 5 quotes with prices calculated from record counts
+        // Create CLOSE_GROUP_SIZE quotes with prices calculated from record counts
         let chunk_xor = XorName::random(&mut rand::thread_rng());
 
         let mut quotes_with_prices = Vec::new();
@@ -643,7 +646,7 @@ mod tests {
             quotes_with_prices.push((quote, price));
         }
 
-        println!("✓ Got 5 quotes with calculated prices");
+        println!("✓ Got {CLOSE_GROUP_SIZE} quotes with calculated prices");
 
         // Create SingleNode payment (will sort internally and select median)
         let payment = SingleNodePayment::from_quotes(quotes_with_prices)?;

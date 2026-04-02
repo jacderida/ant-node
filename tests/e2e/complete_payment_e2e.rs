@@ -7,7 +7,7 @@
 //! ## Original Test Flow
 //!
 //! 1. **Network Setup**: Spawn 10 live ant nodes + Anvil EVM testnet
-//! 2. **Quote Collection**: Client requests quotes from 5 closest DHT peers
+//! 2. **Quote Collection**: Client requests quotes from `CLOSE_GROUP_SIZE` closest DHT peers
 //! 3. **Price Calculation**: Sort quotes by price, select median
 //! 4. **Payment**: Make on-chain payment (median node 3x, others 0 atto)
 //! 5. **Chunk Storage**: Send chunk + `ProofOfPayment` to network

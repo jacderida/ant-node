@@ -14,15 +14,14 @@ use std::time::Duration;
 
 use rand::Rng;
 
+use crate::ant_protocol::CLOSE_GROUP_SIZE;
+
 // ---------------------------------------------------------------------------
 // Static constants (compile-time reference profile)
 // ---------------------------------------------------------------------------
 
 /// Maximum number of peers per k-bucket in the Kademlia routing table.
 pub const K_BUCKET_SIZE: usize = 20;
-
-/// Close-group width and target holder count per key.
-pub const CLOSE_GROUP_SIZE: usize = 7;
 
 /// Full-network target for required positive presence votes.
 ///

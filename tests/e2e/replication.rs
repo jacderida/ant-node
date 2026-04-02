@@ -1534,7 +1534,7 @@ async fn test_late_joiner_replicates_responsible_chunks() {
     let new_p2p = new_node.p2p_node.as_ref().expect("p2p");
     let new_peer_id = *new_p2p.peer_id();
     let new_storage = new_node.ant_protocol.as_ref().expect("protocol").storage();
-    let close_group_size = ant_node::replication::config::CLOSE_GROUP_SIZE;
+    let close_group_size = ant_node::CLOSE_GROUP_SIZE;
 
     // Determine which chunks the new node should be responsible for.
     let mut responsible_chunks: Vec<[u8; 32]> = Vec::new();

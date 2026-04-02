@@ -25,7 +25,7 @@ pub struct PaymentProof {
 /// The detected type of a payment proof.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProofType {
-    /// `SingleNode` payment (5 quotes, median-paid).
+    /// `SingleNode` payment (`CLOSE_GROUP_SIZE` quotes, median-paid).
     SingleNode,
     /// Merkle batch payment (one tx for many chunks).
     Merkle,

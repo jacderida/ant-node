@@ -32,7 +32,7 @@ pub const MIN_PAYMENT_PROOF_SIZE_BYTES: usize = 32;
 
 /// Maximum allowed size for a payment proof in bytes (256 KB).
 ///
-/// Single-node proofs with 5 ML-DSA-65 quotes reach ~30 KB.
+/// Single-node proofs with 7 ML-DSA-65 quotes reach ~40 KB.
 /// Merkle proofs include 16 candidate nodes (each with ~1,952-byte ML-DSA pub key
 /// and ~3,309-byte signature) plus merkle branch hashes, totaling ~130 KB.
 /// 256 KB provides headroom while still capping memory during verification.
@@ -969,16 +969,16 @@ mod tests {
         let proof_bytes =
             crate::payment::proof::serialize_single_node_proof(&proof).expect("serialize");
 
-        // 5 ML-DSA-65 quotes with ~1952-byte pub keys and ~3309-byte signatures
-        // should produce a proof in the 20-60 KB range
+        // 7 ML-DSA-65 quotes with ~1952-byte pub keys and ~3309-byte signatures
+        // should produce a proof in the 30-80 KB range
         assert!(
             proof_bytes.len() > 20_000,
-            "Real 5-quote ML-DSA proof should be > 20 KB, got {} bytes",
+            "Real 7-quote ML-DSA proof should be > 20 KB, got {} bytes",
             proof_bytes.len()
         );
         assert!(
             proof_bytes.len() < MAX_PAYMENT_PROOF_SIZE_BYTES,
-            "Real 5-quote ML-DSA proof ({} bytes) should fit within {} byte limit",
+            "Real 7-quote ML-DSA proof ({} bytes) should fit within {} byte limit",
             proof_bytes.len(),
             MAX_PAYMENT_PROOF_SIZE_BYTES
         );

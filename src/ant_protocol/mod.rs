@@ -49,7 +49,7 @@ pub mod chunk;
 ///
 /// Clients fetch quotes from the `CLOSE_GROUP_SIZE` closest nodes to a target
 /// address and select the median-priced quote for payment.
-pub const CLOSE_GROUP_SIZE: usize = 5;
+pub const CLOSE_GROUP_SIZE: usize = 7;
 
 /// Minimum number of close group members that must agree for a decision to be valid.
 ///

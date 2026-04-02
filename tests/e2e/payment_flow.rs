@@ -3,10 +3,10 @@
 //! These tests validate the full payment workflow for chunk storage:
 //!
 //! **Payment Workflow**:
-//! 1. Client requests quotes from 5 network nodes via DHT
+//! 1. Client requests quotes from `CLOSE_GROUP_SIZE` network nodes via DHT
 //! 2. Client sorts quotes by price and selects median
 //! 3. Client pays median node 3x on Arbitrum (`SingleNode` payment strategy)
-//! 4. Client sends 0 atto to the other 4 nodes for verification
+//! 4. Client sends 0 atto to the other nodes for verification
 //! 5. Client sends chunk with `ProofOfPayment` to storage nodes
 //! 6. Nodes verify payment on-chain before storing (when EVM verification enabled)
 //! 7. Chunk is retrievable from the network

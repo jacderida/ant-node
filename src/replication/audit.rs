@@ -137,9 +137,8 @@ pub async fn audit_tick(
         return AuditTickResult::Idle;
     }
 
-    // Cap peer_keys to max_audit_challenge_keys so the responder does not
-    // reject our challenge for exceeding its limit.
-    peer_keys.truncate(config.max_audit_challenge_keys);
+    // peer_keys is naturally bounded by audit_sample_count (sqrt-scaled),
+    // so no explicit truncation needed.
 
     // Step 6: Send challenge.
 
@@ -418,7 +417,7 @@ pub async fn handle_audit_challenge(
     storage: &LmdbStorage,
     self_peer_id: &PeerId,
     is_bootstrapping: bool,
-    max_challenge_keys: usize,
+    stored_chunks: usize,
 ) -> AuditResponse {
     if is_bootstrapping {
         return AuditResponse::Bootstrapping {
@@ -438,15 +437,17 @@ pub async fn handle_audit_challenge(
         };
     }
 
-    if challenge.keys.len() > max_challenge_keys {
+    let max_keys = ReplicationConfig::max_incoming_audit_keys(stored_chunks);
+    if challenge.keys.len() > max_keys {
         warn!(
-            "Audit challenge rejected: {} keys exceeds limit of {max_challenge_keys}",
+            "Audit challenge rejected: {} keys exceeds dynamic limit of {max_keys} \
+             (stored_chunks={stored_chunks})",
             challenge.keys.len(),
         );
         return AuditResponse::Rejected {
             challenge_id: challenge.challenge_id,
             reason: format!(
-                "challenge contains {} keys, limit is {max_challenge_keys}",
+                "challenge contains {} keys, limit is {max_keys}",
                 challenge.keys.len()
             ),
         };
@@ -492,14 +493,14 @@ pub async fn handle_audit_challenge(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::replication::config::DEFAULT_MAX_AUDIT_CHALLENGE_KEYS;
     use crate::replication::protocol::compute_audit_digest;
     use crate::replication::types::NeighborSyncState;
     use crate::storage::LmdbStorageConfig;
     use tempfile::TempDir;
 
-    /// Test-friendly max challenge keys (uses the default).
-    const TEST_MAX_KEYS: usize = DEFAULT_MAX_AUDIT_CHALLENGE_KEYS;
+    /// Simulated stored chunk count for tests. Large enough that the dynamic
+    /// incoming audit limit (`2 * sqrt(N)`) never rejects small test challenges.
+    const TEST_STORED_CHUNKS: usize = 1_000_000;
 
     /// Create a test `LmdbStorage` backed by a temp directory.
     async fn create_test_storage() -> (LmdbStorage, TempDir) {
@@ -555,7 +556,7 @@ mod tests {
         let self_id = peer_id_from_bytes(peer_id);
 
         let response =
-            handle_audit_challenge(&challenge, &storage, &self_id, false, TEST_MAX_KEYS).await;
+            handle_audit_challenge(&challenge, &storage, &self_id, false, TEST_STORED_CHUNKS).await;
 
         match response {
             AuditResponse::Digests {
@@ -592,7 +593,7 @@ mod tests {
         let self_id = peer_id_from_bytes(peer_id);
 
         let response =
-            handle_audit_challenge(&challenge, &storage, &self_id, false, TEST_MAX_KEYS).await;
+            handle_audit_challenge(&challenge, &storage, &self_id, false, TEST_STORED_CHUNKS).await;
 
         match response {
             AuditResponse::Digests {
@@ -632,7 +633,7 @@ mod tests {
         let self_id = peer_id_from_bytes(peer_id);
 
         let response =
-            handle_audit_challenge(&challenge, &storage, &self_id, false, TEST_MAX_KEYS).await;
+            handle_audit_challenge(&challenge, &storage, &self_id, false, TEST_STORED_CHUNKS).await;
 
         match response {
             AuditResponse::Digests { digests, .. } => {
@@ -665,7 +666,7 @@ mod tests {
         let self_id = peer_id_from_bytes([0x01; 32]);
 
         let response =
-            handle_audit_challenge(&challenge, &storage, &self_id, true, TEST_MAX_KEYS).await;
+            handle_audit_challenge(&challenge, &storage, &self_id, true, TEST_STORED_CHUNKS).await;
 
         match response {
             AuditResponse::Bootstrapping { challenge_id } => {
@@ -690,7 +691,7 @@ mod tests {
         let self_id = peer_id_from_bytes([0x20; 32]);
 
         let response =
-            handle_audit_challenge(&challenge, &storage, &self_id, false, TEST_MAX_KEYS).await;
+            handle_audit_challenge(&challenge, &storage, &self_id, false, TEST_STORED_CHUNKS).await;
 
         match response {
             AuditResponse::Digests {
@@ -817,7 +818,7 @@ mod tests {
         let self_id = peer_id_from_bytes([0xDD; 32]);
 
         let response =
-            handle_audit_challenge(&challenge, &storage, &self_id, true, TEST_MAX_KEYS).await;
+            handle_audit_challenge(&challenge, &storage, &self_id, true, TEST_STORED_CHUNKS).await;
 
         assert!(
             matches!(response, AuditResponse::Bootstrapping { challenge_id: 200 }),
@@ -859,7 +860,7 @@ mod tests {
         let self_id = peer_id_from_bytes(peer_id);
 
         let response =
-            handle_audit_challenge(&challenge, &storage, &self_id, false, TEST_MAX_KEYS).await;
+            handle_audit_challenge(&challenge, &storage, &self_id, false, TEST_STORED_CHUNKS).await;
 
         match response {
             AuditResponse::Digests { digests, .. } => {
@@ -910,7 +911,7 @@ mod tests {
         let self_id = peer_id_from_bytes(peer_id);
 
         let response =
-            handle_audit_challenge(&challenge, &storage, &self_id, false, TEST_MAX_KEYS).await;
+            handle_audit_challenge(&challenge, &storage, &self_id, false, TEST_STORED_CHUNKS).await;
         match response {
             AuditResponse::Digests { digests, .. } => {
                 assert_eq!(digests.len(), 3);
@@ -1070,7 +1071,7 @@ mod tests {
         let self_id = peer_id_from_bytes(peer_id);
 
         let response =
-            handle_audit_challenge(&challenge, &storage, &self_id, false, TEST_MAX_KEYS).await;
+            handle_audit_challenge(&challenge, &storage, &self_id, false, TEST_STORED_CHUNKS).await;
         match response {
             AuditResponse::Digests { digests, .. } => {
                 assert_eq!(
@@ -1124,7 +1125,7 @@ mod tests {
 
         // Responder is bootstrapping → Bootstrapping response, NOT Digests.
         let response =
-            handle_audit_challenge(&challenge, &storage, &self_id, true, TEST_MAX_KEYS).await;
+            handle_audit_challenge(&challenge, &storage, &self_id, true, TEST_STORED_CHUNKS).await;
         assert!(
             matches!(
                 response,
@@ -1135,7 +1136,7 @@ mod tests {
 
         // Responder is NOT bootstrapping → normal Digests.
         let response =
-            handle_audit_challenge(&challenge, &storage, &self_id, false, TEST_MAX_KEYS).await;
+            handle_audit_challenge(&challenge, &storage, &self_id, false, TEST_STORED_CHUNKS).await;
         assert!(
             matches!(response, AuditResponse::Digests { .. }),
             "drained node should compute digests normally"
@@ -1219,7 +1220,8 @@ mod tests {
         // Challenge with 1 key.
         let challenge1 = make_challenge(3201, nonce, peer_id, vec![addrs[0]]);
         let resp1 =
-            handle_audit_challenge(&challenge1, &storage, &self_id, false, TEST_MAX_KEYS).await;
+            handle_audit_challenge(&challenge1, &storage, &self_id, false, TEST_STORED_CHUNKS)
+                .await;
         if let AuditResponse::Digests { digests, .. } = resp1 {
             assert_eq!(digests.len(), 1, "|PeerKeySet| = 1 → 1 digest");
         }
@@ -1227,7 +1229,8 @@ mod tests {
         // Challenge with 3 keys.
         let challenge3 = make_challenge(3203, nonce, peer_id, addrs[0..3].to_vec());
         let resp3 =
-            handle_audit_challenge(&challenge3, &storage, &self_id, false, TEST_MAX_KEYS).await;
+            handle_audit_challenge(&challenge3, &storage, &self_id, false, TEST_STORED_CHUNKS)
+                .await;
         if let AuditResponse::Digests { digests, .. } = resp3 {
             assert_eq!(digests.len(), 3, "|PeerKeySet| = 3 → 3 digests");
         }
@@ -1235,7 +1238,8 @@ mod tests {
         // Challenge with all 5 keys.
         let challenge5 = make_challenge(3205, nonce, peer_id, addrs.clone());
         let resp5 =
-            handle_audit_challenge(&challenge5, &storage, &self_id, false, TEST_MAX_KEYS).await;
+            handle_audit_challenge(&challenge5, &storage, &self_id, false, TEST_STORED_CHUNKS)
+                .await;
         if let AuditResponse::Digests { digests, .. } = resp5 {
             assert_eq!(digests.len(), 5, "|PeerKeySet| = 5 → 5 digests");
         }
@@ -1243,7 +1247,8 @@ mod tests {
         // Challenge with 0 keys (idle equivalent — no work).
         let challenge0 = make_challenge(3200, nonce, peer_id, vec![]);
         let resp0 =
-            handle_audit_challenge(&challenge0, &storage, &self_id, false, TEST_MAX_KEYS).await;
+            handle_audit_challenge(&challenge0, &storage, &self_id, false, TEST_STORED_CHUNKS)
+                .await;
         if let AuditResponse::Digests { digests, .. } = resp0 {
             assert!(digests.is_empty(), "|PeerKeySet| = 0 → 0 digests (idle)");
         }
@@ -1268,7 +1273,7 @@ mod tests {
 
         // Bootstrapping peer → Bootstrapping response (grace period start).
         let response =
-            handle_audit_challenge(&challenge, &storage, &self_id, true, TEST_MAX_KEYS).await;
+            handle_audit_challenge(&challenge, &storage, &self_id, true, TEST_STORED_CHUNKS).await;
         let challenge_id = match response {
             AuditResponse::Bootstrapping { challenge_id } => challenge_id,
             AuditResponse::Digests { .. } => {

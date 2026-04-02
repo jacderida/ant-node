@@ -112,18 +112,6 @@ const PRUNE_HYSTERESIS_DURATION_SECS: u64 = 6 * 60 * 60; // 6 h
 /// Minimum continuous out-of-range duration before pruning a key.
 pub const PRUNE_HYSTERESIS_DURATION: Duration = Duration::from_secs(PRUNE_HYSTERESIS_DURATION_SECS);
 
-/// Conservative upper-bound estimate for `audit_sample_count`.
-///
-/// `sqrt(5_000_000)` ≈ 2236 — covers a node with ~5 M small chunks.
-const MAX_AUDIT_SAMPLE_ESTIMATE: usize = 2_500;
-
-/// Default maximum number of keys accepted in an incoming audit challenge.
-///
-/// Set to `2 * max_expected_audit_sample` to give margin for legitimate
-/// challengers with larger stores. Challenges exceeding this are rejected
-/// as a `DoS` mitigation.
-pub const DEFAULT_MAX_AUDIT_CHALLENGE_KEYS: usize = 2 * MAX_AUDIT_SAMPLE_ESTIMATE;
-
 /// Protocol identifier for replication operations.
 pub const REPLICATION_PROTOCOL_ID: &str = "autonomi.ant.replication.v1";
 
@@ -195,9 +183,6 @@ pub struct ReplicationConfig {
     pub verification_request_timeout: Duration,
     /// Fetch request timeout.
     pub fetch_request_timeout: Duration,
-    /// Maximum number of keys in an audit challenge. Challenges exceeding
-    /// this are rejected as `DoS` mitigation.
-    pub max_audit_challenge_keys: usize,
     /// Seconds to wait for `DhtNetworkEvent::BootstrapComplete` before
     /// proceeding with bootstrap sync (covers bootstrap nodes with no peers).
     pub bootstrap_complete_timeout_secs: u64,
@@ -224,7 +209,6 @@ impl Default for ReplicationConfig {
             prune_hysteresis_duration: PRUNE_HYSTERESIS_DURATION,
             verification_request_timeout: VERIFICATION_REQUEST_TIMEOUT,
             fetch_request_timeout: FETCH_REQUEST_TIMEOUT,
-            max_audit_challenge_keys: DEFAULT_MAX_AUDIT_CHALLENGE_KEYS,
             bootstrap_complete_timeout_secs: BOOTSTRAP_COMPLETE_TIMEOUT_SECS,
         }
     }
@@ -275,9 +259,6 @@ impl ReplicationConfig {
         if self.neighbor_sync_scope == 0 {
             return Err("neighbor_sync_scope must be >= 1".to_string());
         }
-        if self.max_audit_challenge_keys == 0 {
-            return Err("max_audit_challenge_keys must be >= 1".to_string());
-        }
         Ok(())
     }
 
@@ -325,12 +306,23 @@ impl ReplicationConfig {
         sqrt.max(1).min(total_keys)
     }
 
+    /// Maximum number of keys to accept in an incoming audit challenge.
+    ///
+    /// Scales dynamically: `2 * audit_sample_count(stored_chunks)`. The 2x
+    /// margin accounts for the challenger having a larger store than us and
+    /// therefore sampling more keys.
+    #[must_use]
+    pub fn max_incoming_audit_keys(stored_chunks: usize) -> usize {
+        // Allow at least 1 key so a newly-joined node can still be audited.
+        (2 * Self::audit_sample_count(stored_chunks)).max(1)
+    }
+
     /// Compute the audit response timeout for a challenge with `chunk_count`
     /// keys: `base + per_chunk * chunk_count`.
     #[must_use]
     pub fn audit_response_timeout(&self, chunk_count: usize) -> Duration {
         #[allow(clippy::cast_possible_truncation)]
-        // chunk_count is bounded by max_audit_challenge_keys (default 5_000).
+        // chunk_count is bounded by max_incoming_audit_keys (dynamic, sqrt-scaled).
         let chunks = chunk_count as u32;
         self.audit_response_base + self.audit_response_per_chunk * chunks
     }
@@ -474,6 +466,24 @@ mod tests {
         assert_eq!(ReplicationConfig::audit_sample_count(1_000), 31);
         assert_eq!(ReplicationConfig::audit_sample_count(10_000), 100);
         assert_eq!(ReplicationConfig::audit_sample_count(1_000_000), 1_000);
+    }
+
+    #[test]
+    fn max_incoming_audit_keys_scales_dynamically() {
+        // Empty store: at least 1 key accepted.
+        assert_eq!(ReplicationConfig::max_incoming_audit_keys(0), 1);
+
+        // 1 chunk: 2 * sqrt(1) = 2.
+        assert_eq!(ReplicationConfig::max_incoming_audit_keys(1), 2);
+
+        // 100 chunks: 2 * sqrt(100) = 20.
+        assert_eq!(ReplicationConfig::max_incoming_audit_keys(100), 20);
+
+        // 1M chunks: 2 * sqrt(1_000_000) = 2_000.
+        assert_eq!(ReplicationConfig::max_incoming_audit_keys(1_000_000), 2_000);
+
+        // 5M chunks: 2 * sqrt(5_000_000) = 4_472.
+        assert_eq!(ReplicationConfig::max_incoming_audit_keys(5_000_000), 4_472);
     }
 
     #[test]

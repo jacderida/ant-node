@@ -774,7 +774,6 @@ async fn handle_replication_message(
                 challenge,
                 storage,
                 p2p_node,
-                config,
                 bootstrapping,
                 msg.request_id,
                 rr_message_id,
@@ -1169,23 +1168,23 @@ async fn handle_fetch_request(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn handle_audit_challenge_msg(
     source: &PeerId,
     challenge: &protocol::AuditChallenge,
     storage: &Arc<LmdbStorage>,
     p2p_node: &Arc<P2PNode>,
-    config: &ReplicationConfig,
     is_bootstrapping: bool,
     request_id: u64,
     rr_message_id: Option<&str>,
 ) -> Result<()> {
+    #[allow(clippy::cast_possible_truncation)]
+    let stored_chunks = storage.current_chunks().map_or(0, |c| c as usize);
     let response = audit::handle_audit_challenge(
         challenge,
         storage,
         p2p_node.peer_id(),
         is_bootstrapping,
-        config.max_audit_challenge_keys,
+        stored_chunks,
     )
     .await;
 

@@ -10,7 +10,7 @@
 //! ┌─────────────────────────────────────────────────────────┐
 //! │        AntProtocol (implements Protocol trait)        │
 //! ├─────────────────────────────────────────────────────────┤
-//! │  protocol_id() = "autonomi/ant/chunk/v1"                  │
+//! │  protocol_id() = "autonomi.ant.chunk.v1"                  │
 //! │                                                         │
 //! │  handle(peer_id, data) ──▶ decode AntProtocolMessage │
 //! │                                   │                     │

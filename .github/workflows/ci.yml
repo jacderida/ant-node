@@ -47,8 +47,10 @@ jobs:
         uses: foundry-rs/foundry-toolchain@v1
         with:
           version: nightly
-      - name: Run tests
-        run: cargo test
+      - name: Run unit tests
+        run: cargo test --lib --features test-utils
+      - name: Run e2e tests
+        run: cargo test --test e2e --features test-utils -- --test-threads=1
 
   doc:
     name: Documentation

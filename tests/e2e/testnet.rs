@@ -15,14 +15,16 @@
 
 use ant_node::ant_protocol::{
     ChunkGetRequest, ChunkGetResponse, ChunkMessage, ChunkMessageBody, ChunkPutRequest,
-    ChunkPutResponse, CHUNK_PROTOCOL_ID,
+    ChunkPutResponse, CHUNK_PROTOCOL_ID, MAX_WIRE_MESSAGE_SIZE,
 };
 use ant_node::client::{send_and_await_chunk_response, DataChunk, XorName};
 use ant_node::payment::{
     EvmVerifierConfig, PaymentVerifier, PaymentVerifierConfig, QuoteGenerator,
     QuotingMetricsTracker,
 };
+use ant_node::replication::config::MAX_REPLICATION_MESSAGE_SIZE;
 use ant_node::storage::{AntProtocol, LmdbStorage, LmdbStorageConfig};
+use ant_node::{ReplicationConfig, ReplicationEngine};
 use bytes::Bytes;
 use evmlib::Network as EvmNetwork;
 use evmlib::RewardsAddress;
@@ -40,6 +42,7 @@ use std::time::Duration;
 use tokio::sync::{broadcast, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 // =============================================================================
@@ -388,6 +391,12 @@ pub struct TestNode {
     /// Populated once the node starts and the protocol router is spawned.
     /// Dropped (and aborted) during teardown so tests don't leave tasks behind.
     pub protocol_task: Option<JoinHandle<()>>,
+
+    /// Replication engine for this test node.
+    pub replication_engine: Option<ReplicationEngine>,
+
+    /// Shutdown token for the replication engine.
+    pub replication_shutdown: Option<CancellationToken>,
 }
 
 impl TestNode {
@@ -410,7 +419,15 @@ impl TestNode {
     pub async fn shutdown(&mut self) -> Result<()> {
         info!("Shutting down test node {}", self.index);
 
-        // Stop protocol handler first
+        // Shut down replication engine and await its background tasks so all
+        // Arc<LmdbStorage> clones are released before we drop the engine.
+        if let Some(ref mut engine) = self.replication_engine {
+            engine.shutdown().await;
+        }
+        self.replication_engine = None;
+        self.replication_shutdown = None;
+
+        // Stop protocol handler
         if let Some(handle) = self.protocol_task.take() {
             handle.abort();
         }
@@ -1033,6 +1050,8 @@ impl TestNetwork {
             bootstrap_addrs,
             node_identity: Some(identity),
             protocol_task: None,
+            replication_engine: None,
+            replication_shutdown: None,
         })
     }
 
@@ -1126,7 +1145,7 @@ impl TestNetwork {
             .port(node.port)
             .local(true)
             .connection_timeout(Duration::from_secs(TEST_CORE_CONNECTION_TIMEOUT_SECS))
-            .max_message_size(ant_node::ant_protocol::MAX_WIRE_MESSAGE_SIZE)
+            .max_message_size(MAX_REPLICATION_MESSAGE_SIZE.max(MAX_WIRE_MESSAGE_SIZE))
             .build()
             .map_err(|e| TestnetError::Core(format!("Failed to create core config: {e}")))?;
 
@@ -1202,6 +1221,38 @@ impl TestNetwork {
                     }
                 }
             }));
+        }
+
+        // Start replication engine for this node
+        if let (Some(ref p2p), Some(ref protocol)) = (&node.p2p_node, &node.ant_protocol) {
+            let shutdown = CancellationToken::new();
+            let repl_config = ReplicationConfig::default();
+            let (_fresh_tx, fresh_rx) = tokio::sync::mpsc::unbounded_channel();
+            match ReplicationEngine::new(
+                repl_config,
+                Arc::clone(p2p),
+                protocol.storage(),
+                protocol.payment_verifier_arc(),
+                &node.data_dir,
+                fresh_rx,
+                shutdown.clone(),
+            )
+            .await
+            {
+                Ok(mut engine) => {
+                    let dht_events = p2p.dht_manager().subscribe_events();
+                    engine.start(dht_events);
+                    node.replication_engine = Some(engine);
+                    node.replication_shutdown = Some(shutdown);
+                    debug!("Node {} replication engine started", node.index);
+                }
+                Err(e) => {
+                    warn!(
+                        "Node {} failed to start replication engine: {e}",
+                        node.index
+                    );
+                }
+            }
         }
 
         debug!("Node {} started successfully", node.index);
@@ -1338,6 +1389,42 @@ impl TestNetwork {
         tokio::time::sleep(Duration::from_secs(3)).await;
 
         info!("✅ DHT routing tables warmed up");
+
+        // Wait for all replication engines to exit the bootstrap phase so
+        // that audit and neighbor-sync handlers return operational responses
+        // instead of `Bootstrapping` / `bootstrapping: true`.
+        self.wait_for_replication_bootstrap().await?;
+
+        Ok(())
+    }
+
+    /// Wait for every node's replication engine to complete its bootstrap
+    /// phase.
+    ///
+    /// This ensures `is_bootstrapping` is `false` on all nodes before tests
+    /// that depend on audit or neighbor-sync responses start running.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any node's bootstrap does not complete within
+    /// the timeout.
+    async fn wait_for_replication_bootstrap(&self) -> Result<()> {
+        const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(120);
+
+        for node in &self.nodes {
+            if let Some(ref engine) = node.replication_engine {
+                if !engine.wait_for_bootstrap_complete(BOOTSTRAP_TIMEOUT).await {
+                    return Err(TestnetError::Stabilization(format!(
+                        "Node {} replication bootstrap did not complete within {}s",
+                        node.index,
+                        BOOTSTRAP_TIMEOUT.as_secs(),
+                    )));
+                }
+                debug!("Node {} replication bootstrap complete", node.index,);
+            }
+        }
+
+        info!("✅ All replication engines bootstrapped");
         Ok(())
     }
 
@@ -1402,6 +1489,11 @@ impl TestNetwork {
             }
 
             debug!("Stopping node {}", node.index);
+            if let Some(ref mut engine) = node.replication_engine {
+                engine.shutdown().await;
+            }
+            node.replication_engine = None;
+            node.replication_shutdown = None;
             if let Some(handle) = node.protocol_task.take() {
                 handle.abort();
             }
@@ -1501,6 +1593,84 @@ impl TestNetwork {
         &self.config
     }
 
+    /// Add a new node to an already-running network.
+    ///
+    /// Creates, starts, and bootstraps a fresh node that joins the existing
+    /// network. The node's DHT is warmed up and its replication engine is
+    /// allowed to complete bootstrap before this method returns.
+    ///
+    /// Returns the index of the newly added node.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if node creation, startup, or bootstrap fails.
+    pub async fn add_node(&mut self) -> Result<usize> {
+        const DHT_WARMUP_QUERIES: usize = 10;
+        const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(120);
+
+        let index = self.nodes.len();
+
+        let bootstrap_addrs: Vec<MultiAddr> = self
+            .nodes
+            .get(0..self.config.bootstrap_count)
+            .unwrap_or_default()
+            .iter()
+            .map(|n| MultiAddr::quic(SocketAddr::from((Ipv4Addr::LOCALHOST, n.port))))
+            .collect();
+
+        let node = self.create_node(index, false, bootstrap_addrs).await?;
+        self.start_node(node).await?;
+
+        // Warm the new node's DHT so it discovers existing peers.
+        if let Some(ref p2p) = self.nodes[index].p2p_node {
+            for _ in 0..DHT_WARMUP_QUERIES {
+                let mut addr = [0u8; 32];
+                rand::Rng::fill(&mut rand::thread_rng(), &mut addr);
+                let _ = p2p.dht().find_closest_nodes(&addr, 8).await;
+            }
+        }
+
+        // Also warm existing nodes' DHTs so they discover the new peer.
+        // Without this, existing nodes may not include the new node in
+        // close-group calculations and won't generate replica hints for it.
+        for i in 0..index {
+            if let Some(ref p2p) = self.nodes[i].p2p_node {
+                for _ in 0..DHT_WARMUP_QUERIES {
+                    let mut addr = [0u8; 32];
+                    rand::Rng::fill(&mut rand::thread_rng(), &mut addr);
+                    let _ = p2p.dht().find_closest_nodes(&addr, 8).await;
+                }
+            }
+        }
+
+        // Give DHT time to propagate discoveries bidirectionally.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+
+        // Trigger an early neighbor sync on ALL nodes (existing + new) so
+        // they exchange hints without waiting for the regular 10-20 minute
+        // cadence.  The new node requests hints from its neighbors, and
+        // existing nodes push hints to the new peer.
+        for node in &self.nodes {
+            if let Some(ref engine) = node.replication_engine {
+                engine.trigger_neighbor_sync();
+            }
+        }
+
+        // Wait for replication bootstrap to complete so the node is fully
+        // operational (accepting audits, neighbor sync, etc.).
+        if let Some(ref engine) = self.nodes[index].replication_engine {
+            if !engine.wait_for_bootstrap_complete(BOOTSTRAP_TIMEOUT).await {
+                return Err(TestnetError::Stabilization(format!(
+                    "New node {index} replication bootstrap did not complete within {}s",
+                    BOOTSTRAP_TIMEOUT.as_secs(),
+                )));
+            }
+        }
+
+        info!("New node {index} added and fully bootstrapped");
+        Ok(index)
+    }
+
     /// Shutdown a specific node by index.
     ///
     /// This simulates a node failure during testing. The node is gracefully shut down
@@ -1561,6 +1731,14 @@ impl Drop for TestNetwork {
         // Best-effort synchronous cleanup
         // Note: async cleanup should be done via shutdown() before dropping
         let _ = self.shutdown_tx.send(());
+
+        // Cancel replication engine background tasks so they don't outlive
+        // the test's tokio runtime.
+        for node in &mut self.nodes {
+            if let Some(token) = node.replication_shutdown.take() {
+                token.cancel();
+            }
+        }
 
         // Abort health monitor if still running
         if let Some(handle) = self.health_monitor.take() {

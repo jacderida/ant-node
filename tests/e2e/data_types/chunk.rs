@@ -352,27 +352,30 @@ mod tests {
             }
         }
 
-        // Shut down node 0's storage (simulates node restart):
-        // 1. Abort the protocol task that holds an Arc<AntProtocol>
-        // 2. Drop the node's own Arc<AntProtocol>
+        // Shut down node 0 completely (simulates node restart):
+        // 1. Shut down the replication engine and await its background tasks
+        //    so all Arc<LmdbStorage> clones are released.
+        // 2. Abort the protocol task that holds an Arc<AntProtocol>.
+        // 3. Drop the node's own Arc<AntProtocol>.
         // This ensures the LMDB env is fully closed before reopening.
-        let (protocol_task, data_dir) = {
+        let data_dir = {
             let node = harness
                 .network_mut()
                 .node_mut(0)
                 .expect("Node 0 should exist");
-            let handle = node.protocol_task.take();
+            if let Some(ref mut engine) = node.replication_engine {
+                engine.shutdown().await;
+            }
+            node.replication_engine = None;
+            node.replication_shutdown = None;
             let dir = node.data_dir.clone();
+            if let Some(handle) = node.protocol_task.take() {
+                handle.abort();
+                let _ = handle.await;
+            }
             node.ant_protocol = None;
-            (handle, dir)
+            dir
         };
-
-        // Abort the protocol task and wait for it to fully shut down so the
-        // LMDB env is closed before we reopen it.
-        if let Some(handle) = protocol_task {
-            handle.abort();
-            let _ = handle.await;
-        }
 
         // Recreate AntProtocol from the same data directory (simulates restart)
         let restart_identity = saorsa_core::identity::NodeIdentity::generate()

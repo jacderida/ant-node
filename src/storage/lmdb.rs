@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use tokio::task::spawn_blocking;
 use tracing::{debug, trace, warn};
 
+use crate::ant_protocol::XORNAME_LEN;
+
 /// Default LMDB map size: 32 GiB.
 ///
 /// Node operators can override this via `storage.db_size_gb` in `config.toml`.
@@ -408,6 +410,76 @@ impl LmdbStorage {
     pub fn root_dir(&self) -> &Path {
         &self.config.root_dir
     }
+
+    /// Return all stored record keys.
+    ///
+    /// Iterates the LMDB database in a read transaction. Used by the
+    /// replication subsystem for hint construction and audit sampling.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the LMDB read transaction fails.
+    pub async fn all_keys(&self) -> Result<Vec<XorName>> {
+        let env = self.env.clone();
+        let db = self.db;
+
+        let keys = spawn_blocking(move || -> Result<Vec<XorName>> {
+            let rtxn = env
+                .read_txn()
+                .map_err(|e| Error::Storage(format!("Failed to create read txn: {e}")))?;
+            let mut keys = Vec::new();
+            let iter = db
+                .iter(&rtxn)
+                .map_err(|e| Error::Storage(format!("Failed to iterate database: {e}")))?;
+            for result in iter {
+                let (key_bytes, _) =
+                    result.map_err(|e| Error::Storage(format!("Failed to read entry: {e}")))?;
+                if key_bytes.len() == XORNAME_LEN {
+                    let mut key = [0u8; XORNAME_LEN];
+                    key.copy_from_slice(key_bytes);
+                    keys.push(key);
+                } else {
+                    tracing::warn!(
+                        "LmdbStorage: skipping entry with unexpected key length {} (expected {XORNAME_LEN})",
+                        key_bytes.len()
+                    );
+                }
+            }
+            Ok(keys)
+        })
+        .await
+        .map_err(|e| Error::Storage(format!("all_keys task failed: {e}")))?;
+
+        keys
+    }
+
+    /// Retrieve raw chunk bytes without content-address verification.
+    ///
+    /// Used by the audit subsystem to compute digests over stored bytes.
+    /// Unlike [`Self::get`], this does not verify `hash(content) == address`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the LMDB read transaction fails.
+    pub async fn get_raw(&self, address: &XorName) -> Result<Option<Vec<u8>>> {
+        let key = *address;
+        let env = self.env.clone();
+        let db = self.db;
+
+        let value = spawn_blocking(move || -> Result<Option<Vec<u8>>> {
+            let rtxn = env
+                .read_txn()
+                .map_err(|e| Error::Storage(format!("Failed to create read txn: {e}")))?;
+            let val = db
+                .get(&rtxn, key.as_ref())
+                .map_err(|e| Error::Storage(format!("Failed to get chunk: {e}")))?;
+            Ok(val.map(Vec::from))
+        })
+        .await
+        .map_err(|e| Error::Storage(format!("get_raw task failed: {e}")))?;
+
+        value
+    }
 }
 
 #[cfg(test)]
@@ -643,5 +715,45 @@ mod tests {
             let retrieved = storage.get(&address).await.expect("get");
             assert_eq!(retrieved, Some(content.to_vec()));
         }
+    }
+
+    #[tokio::test]
+    async fn test_all_keys() {
+        let (storage, _temp) = create_test_storage().await;
+
+        // Empty storage
+        let keys = storage.all_keys().await.expect("all_keys empty");
+        assert!(keys.is_empty());
+
+        // Store some chunks
+        let content1 = b"chunk one for keys";
+        let content2 = b"chunk two for keys";
+        let addr1 = LmdbStorage::compute_address(content1);
+        let addr2 = LmdbStorage::compute_address(content2);
+        storage.put(&addr1, content1).await.expect("put 1");
+        storage.put(&addr2, content2).await.expect("put 2");
+
+        let mut keys = storage.all_keys().await.expect("all_keys");
+        keys.sort_unstable();
+        let mut expected = vec![addr1, addr2];
+        expected.sort_unstable();
+        assert_eq!(keys, expected);
+    }
+
+    #[tokio::test]
+    async fn test_get_raw() {
+        let (storage, _temp) = create_test_storage().await;
+
+        let content = b"raw test data";
+        let address = LmdbStorage::compute_address(content);
+        storage.put(&address, content).await.expect("put");
+
+        // get_raw returns bytes without verification
+        let raw = storage.get_raw(&address).await.expect("get_raw");
+        assert_eq!(raw, Some(content.to_vec()));
+
+        // Non-existent key
+        let missing = storage.get_raw(&[0xFF; 32]).await.expect("get_raw missing");
+        assert!(missing.is_none());
     }
 }

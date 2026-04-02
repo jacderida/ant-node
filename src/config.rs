@@ -133,9 +133,11 @@ pub struct NodeConfig {
     /// Maximum application-layer message size in bytes.
     ///
     /// Tunes the QUIC stream receive window and per-stream read buffer.
-    /// Default: [`MAX_WIRE_MESSAGE_SIZE`](crate::ant_protocol::MAX_WIRE_MESSAGE_SIZE)
-    /// (5 MiB — sufficient for 4 MiB data chunks plus serialization
-    /// envelope overhead).
+    /// Default: the larger of
+    /// [`MAX_WIRE_MESSAGE_SIZE`](crate::ant_protocol::MAX_WIRE_MESSAGE_SIZE) (5 MiB)
+    /// and [`MAX_REPLICATION_MESSAGE_SIZE`](crate::replication::config::MAX_REPLICATION_MESSAGE_SIZE)
+    /// (10 MiB), so both chunk and replication traffic fit within the transport
+    /// ceiling.
     #[serde(default = "default_max_message_size")]
     pub max_message_size: usize,
 
@@ -350,7 +352,11 @@ pub fn default_nodes_dir() -> PathBuf {
 }
 
 fn default_max_message_size() -> usize {
-    crate::ant_protocol::MAX_WIRE_MESSAGE_SIZE
+    // Use the larger of the chunk protocol and replication protocol ceilings
+    // so that replication hint batches (up to 10 MiB) are not silently dropped
+    // by the transport layer.
+    crate::replication::config::MAX_REPLICATION_MESSAGE_SIZE
+        .max(crate::ant_protocol::MAX_WIRE_MESSAGE_SIZE)
 }
 
 fn default_log_level() -> String {

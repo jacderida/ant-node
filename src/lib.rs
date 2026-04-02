@@ -47,6 +47,7 @@ pub mod error;
 pub mod event;
 pub mod node;
 pub mod payment;
+pub mod replication;
 pub mod storage;
 pub mod upgrade;
 
@@ -65,6 +66,7 @@ pub use error::{Error, Result};
 pub use event::{NodeEvent, NodeEventsChannel};
 pub use node::{NodeBuilder, RunningNode};
 pub use payment::{PaymentStatus, PaymentVerifier, PaymentVerifierConfig};
+pub use replication::{config::ReplicationConfig, ReplicationEngine};
 pub use storage::{AntProtocol, LmdbStorage, LmdbStorageConfig};
 
 /// Re-exports from `saorsa-core` so downstream crates (e.g. `ant-client`)

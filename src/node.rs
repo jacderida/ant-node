@@ -10,6 +10,8 @@ use crate::event::{create_event_channel, NodeEvent, NodeEventsChannel, NodeEvent
 use crate::payment::metrics::QuotingMetricsTracker;
 use crate::payment::wallet::parse_rewards_address;
 use crate::payment::{EvmVerifierConfig, PaymentVerifier, PaymentVerifierConfig, QuoteGenerator};
+use crate::replication::config::ReplicationConfig;
+use crate::replication::ReplicationEngine;
 use crate::storage::{AntProtocol, LmdbStorage, LmdbStorageConfig};
 use crate::upgrade::{
     upgrade_cache_dir, AutoApplyUpgrader, BinaryCache, ReleaseCache, UpgradeMonitor, UpgradeResult,
@@ -123,25 +125,57 @@ impl NodeBuilder {
             None
         };
 
-        // Initialize ANT protocol handler for chunk storage
-        let ant_protocol = if self.config.storage.enabled {
-            Some(Arc::new(
-                Self::build_ant_protocol(&self.config, &identity).await?,
-            ))
+        // Initialize ANT protocol handler for chunk storage and
+        // wire the fresh-write channel so PUTs trigger replication.
+        let (ant_protocol, fresh_write_rx) = if self.config.storage.enabled {
+            let (fresh_write_tx, fresh_write_rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut protocol = Self::build_ant_protocol(&self.config, &identity).await?;
+            protocol.set_fresh_write_sender(fresh_write_tx);
+            (Some(Arc::new(protocol)), Some(fresh_write_rx))
         } else {
             info!("Chunk storage disabled");
-            None
+            (None, None)
         };
+
+        let p2p_arc = Arc::new(p2p_node);
+
+        // Initialize replication engine (if storage is enabled)
+        let replication_engine =
+            if let (Some(ref protocol), Some(fresh_rx)) = (&ant_protocol, fresh_write_rx) {
+                let repl_config = ReplicationConfig::default();
+                let storage_arc = protocol.storage();
+                let payment_verifier_arc = protocol.payment_verifier_arc();
+                match ReplicationEngine::new(
+                    repl_config,
+                    Arc::clone(&p2p_arc),
+                    storage_arc,
+                    payment_verifier_arc,
+                    &self.config.root_dir,
+                    fresh_rx,
+                    shutdown.clone(),
+                )
+                .await
+                {
+                    Ok(engine) => Some(engine),
+                    Err(e) => {
+                        warn!("Failed to initialize replication engine: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
 
         let node = RunningNode {
             config: self.config,
-            p2p_node: Arc::new(p2p_node),
+            p2p_node: p2p_arc,
             shutdown,
             events_tx,
             events_rx: Some(events_rx),
             upgrade_monitor,
             bootstrap_manager,
             ant_protocol,
+            replication_engine,
             protocol_task: None,
             upgrade_exit_code: Arc::new(AtomicI32::new(-1)),
         };
@@ -431,6 +465,8 @@ pub struct RunningNode {
     bootstrap_manager: Option<BootstrapManager>,
     /// ANT protocol handler for chunk storage.
     ant_protocol: Option<Arc<AntProtocol>>,
+    /// Replication engine (manages neighbor sync, verification, audits).
+    replication_engine: Option<ReplicationEngine>,
     /// Protocol message routing background task.
     protocol_task: Option<JoinHandle<()>>,
     /// Exit code requested by a successful upgrade (-1 = no upgrade exit pending).
@@ -466,6 +502,14 @@ impl RunningNode {
     pub async fn run(&mut self) -> Result<()> {
         info!("Node runtime loop starting");
 
+        // Subscribe to DHT events BEFORE starting the P2P node so the
+        // bootstrap-sync task does not miss the BootstrapComplete event
+        // emitted during P2PNode::start().
+        let dht_events_for_bootstrap = self
+            .replication_engine
+            .as_ref()
+            .map(|_| self.p2p_node.dht_manager().subscribe_events());
+
         // Start the P2P node
         self.p2p_node
             .start()
@@ -492,6 +536,16 @@ impl RunningNode {
 
         // Start protocol message routing (P2P → AntProtocol → P2P response)
         self.start_protocol_routing();
+
+        // Start replication engine background tasks
+        if let Some(ref mut engine) = self.replication_engine {
+            // Safety: dht_events_for_bootstrap is Some when replication_engine
+            // is Some (both arms use the same condition).
+            if let Some(dht_events) = dht_events_for_bootstrap {
+                engine.start(dht_events);
+            }
+            info!("Replication engine started");
+        }
 
         // Start upgrade monitor if enabled
         if let Some(monitor) = self.upgrade_monitor.take() {
@@ -650,6 +704,12 @@ impl RunningNode {
                 "Bootstrap cache shutdown: {} peers, avg quality {:.2}",
                 stats.total_peers, stats.average_quality
             );
+        }
+
+        // Shutdown replication engine before P2P so background tasks don't
+        // use a dead P2P layer, and Arc<LmdbStorage> references are released.
+        if let Some(ref mut engine) = self.replication_engine {
+            engine.shutdown().await;
         }
 
         // Stop protocol routing task

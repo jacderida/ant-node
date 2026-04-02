@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Protocol identifier for chunk operations.
-pub const CHUNK_PROTOCOL_ID: &str = "autonomi/ant/chunk/v1";
+pub const CHUNK_PROTOCOL_ID: &str = "autonomi.ant.chunk.v1";
 
 /// Current protocol version.
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -29,6 +29,9 @@ pub const DATA_TYPE_CHUNK: u32 = 0;
 
 /// Content-addressed identifier (32 bytes).
 pub type XorName = [u8; 32];
+
+/// Byte length of an [`XorName`].
+pub const XORNAME_LEN: usize = std::mem::size_of::<XorName>();
 
 /// Enum of all chunk protocol message types.
 ///
@@ -519,7 +522,7 @@ mod tests {
 
     #[test]
     fn test_constants() {
-        assert_eq!(CHUNK_PROTOCOL_ID, "autonomi/ant/chunk/v1");
+        assert_eq!(CHUNK_PROTOCOL_ID, "autonomi.ant.chunk.v1");
         assert_eq!(PROTOCOL_VERSION, 1);
         assert_eq!(MAX_CHUNK_SIZE, 4 * 1024 * 1024);
         assert_eq!(DATA_TYPE_CHUNK, 0);

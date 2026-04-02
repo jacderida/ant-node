@@ -485,6 +485,18 @@ impl TestHarness {
         Ok(())
     }
 
+    /// Add a new node to the running network.
+    ///
+    /// The node is fully bootstrapped (DHT warmed, replication bootstrap
+    /// complete) before this method returns. Returns the new node's index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the node fails to start or bootstrap.
+    pub async fn add_node(&mut self) -> Result<usize> {
+        Ok(self.network.add_node().await?)
+    }
+
     /// Teardown the test harness.
     ///
     /// This shuts down all nodes and the Anvil testnet if running.

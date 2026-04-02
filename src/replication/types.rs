@@ -318,10 +318,15 @@ impl BootstrapState {
         }
     }
 
-    /// Check if bootstrap is drained (all requests done AND all queues empty).
+    /// Check if bootstrap is drained.
+    ///
+    /// Only returns `true` after [`check_bootstrap_drained`] or
+    /// [`mark_bootstrap_drained`] has explicitly set the flag. A fresh
+    /// `BootstrapState` is NOT drained — the audit loop must wait until
+    /// bootstrap work has actually completed (Invariant 19).
     #[must_use]
     pub fn is_drained(&self) -> bool {
-        self.drained || (self.pending_peer_requests == 0 && self.pending_keys.is_empty())
+        self.drained
     }
 
     /// Remove a key from the bootstrap pending set.
@@ -564,13 +569,13 @@ mod tests {
     // -- BootstrapState ----------------------------------------------------
 
     #[test]
-    fn bootstrap_state_initial_is_drained() {
-        // A freshly created state has zero pending requests and no keys,
-        // so `is_drained()` returns true even though `drained` is false.
+    fn bootstrap_state_initial_not_drained() {
+        // A freshly created state must NOT report drained — the bootstrap
+        // sync task has not started yet (Invariant 19 race prevention).
         let state = BootstrapState::new();
         assert!(
-            state.is_drained(),
-            "initial state with no pending work should be drained"
+            !state.is_drained(),
+            "initial state must not be drained before bootstrap begins"
         );
     }
 
@@ -604,19 +609,23 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_state_drains_when_all_work_complete() {
+    fn bootstrap_state_requires_explicit_drain() {
         let mut state = BootstrapState::new();
         state.pending_peer_requests = 2;
         state.pending_keys.insert([1u8; 32]);
 
-        // Simulate completing work.
+        // Simulate completing work — but without explicit drain flag.
         state.pending_peer_requests = 0;
         state.pending_keys.clear();
 
         assert!(
-            state.is_drained(),
-            "should be drained when all work completes"
+            !state.is_drained(),
+            "clearing counters alone must not drain — requires check_bootstrap_drained"
         );
+
+        // Explicit drain (set by check_bootstrap_drained or mark_bootstrap_drained).
+        state.drained = true;
+        assert!(state.is_drained(), "explicit flag should drain");
     }
 
     #[test]
@@ -663,9 +672,13 @@ mod tests {
 
         state.pending_keys.remove(&key_c);
         assert!(
-            state.is_drained(),
-            "should be drained once all pending_keys are removed"
+            !state.is_drained(),
+            "removing all keys is necessary but not sufficient — needs explicit drain"
         );
+
+        // Simulate check_bootstrap_drained setting the flag.
+        state.drained = true;
+        assert!(state.is_drained(), "explicit drain flag should finalize");
     }
 
     /// Verify that the FSM terminal states are distinguishable and document

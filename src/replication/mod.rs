@@ -104,6 +104,10 @@ pub struct ReplicationEngine {
     /// Neighbor sync cycle state.
     sync_state: Arc<RwLock<NeighborSyncState>>,
     /// Per-peer sync history (for `RepairOpportunity`).
+    ///
+    /// This map grows with peer churn and is intentionally unbounded: entries
+    /// are lightweight (`PeerSyncRecord` is two fields) and peer IDs are
+    /// naturally bounded by the routing table's k-bucket capacity.
     sync_history: Arc<RwLock<HashMap<PeerId, PeerSyncRecord>>>,
     /// Bootstrap state tracking.
     bootstrap_state: Arc<RwLock<BootstrapState>>,
@@ -172,6 +176,10 @@ impl ReplicationEngine {
     /// the `BootstrapComplete` event emitted during DHT bootstrap is not
     /// missed by the bootstrap-sync gate.
     pub fn start(&mut self, dht_events: tokio::sync::broadcast::Receiver<DhtNetworkEvent>) {
+        if !self.task_handles.is_empty() {
+            error!("ReplicationEngine::start() called while already running — ignoring");
+            return;
+        }
         info!("Starting replication engine");
 
         self.start_message_handler();
@@ -493,7 +501,19 @@ impl ReplicationEngine {
                                     q.complete_fetch(&outcome.key);
                                 }
                                 FetchResult::SourceFailed => {
-                                    if q.retry_fetch(&outcome.key).is_none() {
+                                    if let Some(next_peer) = q.retry_fetch(&outcome.key) {
+                                        // Spawn a new fetch task for the next source.
+                                        let p2p = Arc::clone(&p2p);
+                                        let storage = Arc::clone(&storage);
+                                        let config = Arc::clone(&config);
+                                        in_flight.push(tokio::spawn(execute_single_fetch(
+                                            p2p,
+                                            storage,
+                                            config,
+                                            outcome.key,
+                                            next_peer,
+                                        )));
+                                    } else {
                                         q.complete_fetch(&outcome.key);
                                     }
                                 }
@@ -754,6 +774,7 @@ async fn handle_replication_message(
                 challenge,
                 storage,
                 p2p_node,
+                config,
                 bootstrapping,
                 msg.request_id,
                 rr_message_id,
@@ -1148,18 +1169,25 @@ async fn handle_fetch_request(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_audit_challenge_msg(
     source: &PeerId,
     challenge: &protocol::AuditChallenge,
     storage: &Arc<LmdbStorage>,
     p2p_node: &Arc<P2PNode>,
+    config: &ReplicationConfig,
     is_bootstrapping: bool,
     request_id: u64,
     rr_message_id: Option<&str>,
 ) -> Result<()> {
-    let response =
-        audit::handle_audit_challenge(challenge, storage, p2p_node.peer_id(), is_bootstrapping)
-            .await;
+    let response = audit::handle_audit_challenge(
+        challenge,
+        storage,
+        p2p_node.peer_id(),
+        is_bootstrapping,
+        config.max_audit_challenge_keys,
+    )
+    .await;
 
     send_replication_response(
         source,
@@ -1713,6 +1741,10 @@ async fn execute_single_fetch(
                             "Failed to store fetched record {}: {e}",
                             hex::encode(resp_key)
                         );
+                        return FetchOutcome {
+                            key,
+                            result: FetchResult::SourceFailed,
+                        };
                     }
 
                     return FetchOutcome {

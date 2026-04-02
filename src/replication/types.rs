@@ -264,6 +264,11 @@ pub struct NeighborSyncState {
     /// Per-peer last successful sync time (for cooldown).
     pub last_sync_times: HashMap<PeerId, Instant>,
     /// Bootstrap claim first-seen timestamps per peer.
+    ///
+    /// Entries are removed when a peer passes or fails audit (i.e. stops
+    /// claiming bootstrap). Under Sybil attack with many distinct peer IDs
+    /// perpetually claiming bootstrap, this map grows unboundedly. In practice
+    /// the trust engine limits Sybil impact before this becomes a memory issue.
     pub bootstrap_claims: HashMap<PeerId, Instant>,
 }
 

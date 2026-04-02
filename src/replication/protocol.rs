@@ -306,6 +306,16 @@ pub enum AuditResponse {
         /// The challenge this response answers.
         challenge_id: u64,
     },
+    /// Challenge rejected (wrong target peer or too many keys).
+    ///
+    /// Distinct from empty `Digests` so the challenger can distinguish a
+    /// legitimate rejection from misbehavior.
+    Rejected {
+        /// The challenge this response answers.
+        challenge_id: u64,
+        /// Human-readable rejection reason.
+        reason: String,
+    },
 }
 
 // ---------------------------------------------------------------------------

@@ -11,9 +11,7 @@ use rand::Rng;
 use tracing::{debug, info, warn};
 
 use crate::ant_protocol::XorName;
-use crate::replication::config::{
-    ReplicationConfig, MAX_AUDIT_CHALLENGE_KEYS, REPLICATION_PROTOCOL_ID,
-};
+use crate::replication::config::{ReplicationConfig, REPLICATION_PROTOCOL_ID};
 use crate::replication::protocol::{
     compute_audit_digest, AuditChallenge, AuditResponse, ReplicationMessage,
     ReplicationMessageBody, ABSENT_KEY_DIGEST,
@@ -66,14 +64,23 @@ pub async fn audit_tick(
     storage: &Arc<LmdbStorage>,
     config: &ReplicationConfig,
     sync_history: &HashMap<PeerId, PeerSyncRecord>,
-    _bootstrap_claims: &HashMap<PeerId, Instant>,
+    bootstrap_claims: &HashMap<PeerId, Instant>,
 ) -> AuditTickResult {
     let dht = p2p_node.dht_manager();
+    let now = Instant::now();
 
     // Step 2: Select one eligible peer (has RepairOpportunity) at random.
+    // Exclude peers whose bootstrap claim has exceeded the grace period —
+    // they are already penalized in handle_audit_result and should not
+    // consume an audit slot.
     let eligible_peers: Vec<PeerId> = sync_history
         .iter()
         .filter(|(_, record)| record.has_repair_opportunity())
+        .filter(|(peer, _)| {
+            bootstrap_claims.get(peer).map_or(true, |first_seen| {
+                now.duration_since(*first_seen) <= config.bootstrap_claim_grace_period
+            })
+        })
         .map(|(peer, _)| *peer)
         .collect();
 
@@ -129,6 +136,10 @@ pub async fn audit_tick(
     if peer_keys.is_empty() {
         return AuditTickResult::Idle;
     }
+
+    // Cap peer_keys to max_audit_challenge_keys so the responder does not
+    // reject our challenge for exceeding its limit.
+    peer_keys.truncate(config.max_audit_challenge_keys);
 
     // Step 6: Send challenge.
 
@@ -218,6 +229,10 @@ pub async fn audit_tick(
                 config,
             )
             .await
+        }
+        ReplicationMessageBody::AuditResponse(AuditResponse::Rejected { reason, .. }) => {
+            debug!("Audit: challenge rejected by {challenged_peer}: {reason}");
+            AuditTickResult::Idle
         }
         _ => {
             warn!("Audit: unexpected response type from {challenged_peer}");
@@ -403,6 +418,7 @@ pub async fn handle_audit_challenge(
     storage: &LmdbStorage,
     self_peer_id: &PeerId,
     is_bootstrapping: bool,
+    max_challenge_keys: usize,
 ) -> AuditResponse {
     if is_bootstrapping {
         return AuditResponse::Bootstrapping {
@@ -416,20 +432,23 @@ pub async fn handle_audit_challenge(
             hex::encode(self_peer_id.as_bytes()),
             hex::encode(challenge.challenged_peer_id),
         );
-        return AuditResponse::Digests {
+        return AuditResponse::Rejected {
             challenge_id: challenge.challenge_id,
-            digests: vec![],
+            reason: "challenged_peer_id does not match this node".to_string(),
         };
     }
 
-    if challenge.keys.len() > MAX_AUDIT_CHALLENGE_KEYS {
+    if challenge.keys.len() > max_challenge_keys {
         warn!(
-            "Audit challenge rejected: {} keys exceeds limit of {MAX_AUDIT_CHALLENGE_KEYS}",
+            "Audit challenge rejected: {} keys exceeds limit of {max_challenge_keys}",
             challenge.keys.len(),
         );
-        return AuditResponse::Digests {
+        return AuditResponse::Rejected {
             challenge_id: challenge.challenge_id,
-            digests: vec![],
+            reason: format!(
+                "challenge contains {} keys, limit is {max_challenge_keys}",
+                challenge.keys.len()
+            ),
         };
     }
 
@@ -473,10 +492,14 @@ pub async fn handle_audit_challenge(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::replication::config::DEFAULT_MAX_AUDIT_CHALLENGE_KEYS;
     use crate::replication::protocol::compute_audit_digest;
     use crate::replication::types::NeighborSyncState;
     use crate::storage::LmdbStorageConfig;
     use tempfile::TempDir;
+
+    /// Test-friendly max challenge keys (uses the default).
+    const TEST_MAX_KEYS: usize = DEFAULT_MAX_AUDIT_CHALLENGE_KEYS;
 
     /// Create a test `LmdbStorage` backed by a temp directory.
     async fn create_test_storage() -> (LmdbStorage, TempDir) {
@@ -531,7 +554,8 @@ mod tests {
         let challenge = make_challenge(42, nonce, peer_id, vec![addr_a, addr_b]);
         let self_id = peer_id_from_bytes(peer_id);
 
-        let response = handle_audit_challenge(&challenge, &storage, &self_id, false).await;
+        let response =
+            handle_audit_challenge(&challenge, &storage, &self_id, false, TEST_MAX_KEYS).await;
 
         match response {
             AuditResponse::Digests {
@@ -549,6 +573,9 @@ mod tests {
             AuditResponse::Bootstrapping { .. } => {
                 panic!("expected Digests, got Bootstrapping");
             }
+            AuditResponse::Rejected { .. } => {
+                panic!("Unexpected Rejected response");
+            }
         }
     }
 
@@ -564,7 +591,8 @@ mod tests {
         let challenge = make_challenge(99, nonce, peer_id, vec![absent_key]);
         let self_id = peer_id_from_bytes(peer_id);
 
-        let response = handle_audit_challenge(&challenge, &storage, &self_id, false).await;
+        let response =
+            handle_audit_challenge(&challenge, &storage, &self_id, false, TEST_MAX_KEYS).await;
 
         match response {
             AuditResponse::Digests {
@@ -580,6 +608,9 @@ mod tests {
             }
             AuditResponse::Bootstrapping { .. } => {
                 panic!("expected Digests, got Bootstrapping");
+            }
+            AuditResponse::Rejected { .. } => {
+                panic!("Unexpected Rejected response");
             }
         }
     }
@@ -600,7 +631,8 @@ mod tests {
         let challenge = make_challenge(7, nonce, peer_id, vec![addr_present, addr_absent]);
         let self_id = peer_id_from_bytes(peer_id);
 
-        let response = handle_audit_challenge(&challenge, &storage, &self_id, false).await;
+        let response =
+            handle_audit_challenge(&challenge, &storage, &self_id, false, TEST_MAX_KEYS).await;
 
         match response {
             AuditResponse::Digests { digests, .. } => {
@@ -617,6 +649,9 @@ mod tests {
             AuditResponse::Bootstrapping { .. } => {
                 panic!("expected Digests, got Bootstrapping");
             }
+            AuditResponse::Rejected { .. } => {
+                panic!("Unexpected Rejected response");
+            }
         }
     }
 
@@ -629,7 +664,8 @@ mod tests {
         let challenge = make_challenge(55, [0x00; 32], [0x01; 32], vec![[0x02; 32]]);
         let self_id = peer_id_from_bytes([0x01; 32]);
 
-        let response = handle_audit_challenge(&challenge, &storage, &self_id, true).await;
+        let response =
+            handle_audit_challenge(&challenge, &storage, &self_id, true, TEST_MAX_KEYS).await;
 
         match response {
             AuditResponse::Bootstrapping { challenge_id } => {
@@ -637,6 +673,9 @@ mod tests {
             }
             AuditResponse::Digests { .. } => {
                 panic!("expected Bootstrapping, got Digests");
+            }
+            AuditResponse::Rejected { .. } => {
+                panic!("Unexpected Rejected response");
             }
         }
     }
@@ -650,7 +689,8 @@ mod tests {
         let challenge = make_challenge(100, [0x10; 32], [0x20; 32], vec![]);
         let self_id = peer_id_from_bytes([0x20; 32]);
 
-        let response = handle_audit_challenge(&challenge, &storage, &self_id, false).await;
+        let response =
+            handle_audit_challenge(&challenge, &storage, &self_id, false, TEST_MAX_KEYS).await;
 
         match response {
             AuditResponse::Digests {
@@ -665,6 +705,9 @@ mod tests {
             }
             AuditResponse::Bootstrapping { .. } => {
                 panic!("expected Digests, got Bootstrapping");
+            }
+            AuditResponse::Rejected { .. } => {
+                panic!("Unexpected Rejected response");
             }
         }
     }
@@ -773,7 +816,8 @@ mod tests {
         let challenge = make_challenge(200, [0xCC; 32], [0xDD; 32], vec![addr]);
         let self_id = peer_id_from_bytes([0xDD; 32]);
 
-        let response = handle_audit_challenge(&challenge, &storage, &self_id, true).await;
+        let response =
+            handle_audit_challenge(&challenge, &storage, &self_id, true, TEST_MAX_KEYS).await;
 
         assert!(
             matches!(response, AuditResponse::Bootstrapping { challenge_id: 200 }),
@@ -814,7 +858,8 @@ mod tests {
         };
         let self_id = peer_id_from_bytes(peer_id);
 
-        let response = handle_audit_challenge(&challenge, &storage, &self_id, false).await;
+        let response =
+            handle_audit_challenge(&challenge, &storage, &self_id, false, TEST_MAX_KEYS).await;
 
         match response {
             AuditResponse::Digests { digests, .. } => {
@@ -832,6 +877,7 @@ mod tests {
                 assert_eq!(digests[2], ABSENT_KEY_DIGEST);
             }
             AuditResponse::Bootstrapping { .. } => panic!("Expected Digests response"),
+            AuditResponse::Rejected { .. } => panic!("Unexpected Rejected response"),
         }
     }
 
@@ -863,7 +909,8 @@ mod tests {
         };
         let self_id = peer_id_from_bytes(peer_id);
 
-        let response = handle_audit_challenge(&challenge, &storage, &self_id, false).await;
+        let response =
+            handle_audit_challenge(&challenge, &storage, &self_id, false, TEST_MAX_KEYS).await;
         match response {
             AuditResponse::Digests { digests, .. } => {
                 assert_eq!(digests.len(), 3);
@@ -876,6 +923,7 @@ mod tests {
                 }
             }
             AuditResponse::Bootstrapping { .. } => panic!("Expected Digests"),
+            AuditResponse::Rejected { .. } => panic!("Unexpected Rejected response"),
         }
     }
 
@@ -1021,7 +1069,8 @@ mod tests {
         let challenge = make_challenge(300, nonce, peer_id, keys);
         let self_id = peer_id_from_bytes(peer_id);
 
-        let response = handle_audit_challenge(&challenge, &storage, &self_id, false).await;
+        let response =
+            handle_audit_challenge(&challenge, &storage, &self_id, false, TEST_MAX_KEYS).await;
         match response {
             AuditResponse::Digests { digests, .. } => {
                 assert_eq!(
@@ -1031,6 +1080,7 @@ mod tests {
                 );
             }
             AuditResponse::Bootstrapping { .. } => panic!("Expected Digests"),
+            AuditResponse::Rejected { .. } => panic!("Unexpected Rejected response"),
         }
     }
 
@@ -1073,7 +1123,8 @@ mod tests {
         let self_id = peer_id_from_bytes([0x29; 32]);
 
         // Responder is bootstrapping → Bootstrapping response, NOT Digests.
-        let response = handle_audit_challenge(&challenge, &storage, &self_id, true).await;
+        let response =
+            handle_audit_challenge(&challenge, &storage, &self_id, true, TEST_MAX_KEYS).await;
         assert!(
             matches!(
                 response,
@@ -1083,7 +1134,8 @@ mod tests {
         );
 
         // Responder is NOT bootstrapping → normal Digests.
-        let response = handle_audit_challenge(&challenge, &storage, &self_id, false).await;
+        let response =
+            handle_audit_challenge(&challenge, &storage, &self_id, false, TEST_MAX_KEYS).await;
         assert!(
             matches!(response, AuditResponse::Digests { .. }),
             "drained node should compute digests normally"
@@ -1166,28 +1218,32 @@ mod tests {
 
         // Challenge with 1 key.
         let challenge1 = make_challenge(3201, nonce, peer_id, vec![addrs[0]]);
-        let resp1 = handle_audit_challenge(&challenge1, &storage, &self_id, false).await;
+        let resp1 =
+            handle_audit_challenge(&challenge1, &storage, &self_id, false, TEST_MAX_KEYS).await;
         if let AuditResponse::Digests { digests, .. } = resp1 {
             assert_eq!(digests.len(), 1, "|PeerKeySet| = 1 → 1 digest");
         }
 
         // Challenge with 3 keys.
         let challenge3 = make_challenge(3203, nonce, peer_id, addrs[0..3].to_vec());
-        let resp3 = handle_audit_challenge(&challenge3, &storage, &self_id, false).await;
+        let resp3 =
+            handle_audit_challenge(&challenge3, &storage, &self_id, false, TEST_MAX_KEYS).await;
         if let AuditResponse::Digests { digests, .. } = resp3 {
             assert_eq!(digests.len(), 3, "|PeerKeySet| = 3 → 3 digests");
         }
 
         // Challenge with all 5 keys.
         let challenge5 = make_challenge(3205, nonce, peer_id, addrs.clone());
-        let resp5 = handle_audit_challenge(&challenge5, &storage, &self_id, false).await;
+        let resp5 =
+            handle_audit_challenge(&challenge5, &storage, &self_id, false, TEST_MAX_KEYS).await;
         if let AuditResponse::Digests { digests, .. } = resp5 {
             assert_eq!(digests.len(), 5, "|PeerKeySet| = 5 → 5 digests");
         }
 
         // Challenge with 0 keys (idle equivalent — no work).
         let challenge0 = make_challenge(3200, nonce, peer_id, vec![]);
-        let resp0 = handle_audit_challenge(&challenge0, &storage, &self_id, false).await;
+        let resp0 =
+            handle_audit_challenge(&challenge0, &storage, &self_id, false, TEST_MAX_KEYS).await;
         if let AuditResponse::Digests { digests, .. } = resp0 {
             assert!(digests.is_empty(), "|PeerKeySet| = 0 → 0 digests (idle)");
         }
@@ -1211,11 +1267,15 @@ mod tests {
         let self_id = peer_id_from_bytes([0x47; 32]);
 
         // Bootstrapping peer → Bootstrapping response (grace period start).
-        let response = handle_audit_challenge(&challenge, &storage, &self_id, true).await;
+        let response =
+            handle_audit_challenge(&challenge, &storage, &self_id, true, TEST_MAX_KEYS).await;
         let challenge_id = match response {
             AuditResponse::Bootstrapping { challenge_id } => challenge_id,
             AuditResponse::Digests { .. } => {
                 panic!("Expected Bootstrapping response during grace period")
+            }
+            AuditResponse::Rejected { .. } => {
+                panic!("Unexpected Rejected response")
             }
         };
         assert_eq!(challenge_id, 4700);

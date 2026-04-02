@@ -112,17 +112,17 @@ const PRUNE_HYSTERESIS_DURATION_SECS: u64 = 6 * 60 * 60; // 6 h
 /// Minimum continuous out-of-range duration before pruning a key.
 pub const PRUNE_HYSTERESIS_DURATION: Duration = Duration::from_secs(PRUNE_HYSTERESIS_DURATION_SECS);
 
-/// Maximum number of keys accepted in an incoming audit challenge.
-///
-/// Set to `2 * max_expected_audit_sample` to give margin for legitimate
-/// challengers with larger stores.  Challenges exceeding this are rejected
-/// as a `DoS` mitigation.
-pub const MAX_AUDIT_CHALLENGE_KEYS: usize = 2 * MAX_AUDIT_SAMPLE_ESTIMATE;
-
 /// Conservative upper-bound estimate for `audit_sample_count`.
 ///
 /// `sqrt(5_000_000)` ≈ 2236 — covers a node with ~5 M small chunks.
 const MAX_AUDIT_SAMPLE_ESTIMATE: usize = 2_500;
+
+/// Default maximum number of keys accepted in an incoming audit challenge.
+///
+/// Set to `2 * max_expected_audit_sample` to give margin for legitimate
+/// challengers with larger stores. Challenges exceeding this are rejected
+/// as a `DoS` mitigation.
+pub const DEFAULT_MAX_AUDIT_CHALLENGE_KEYS: usize = 2 * MAX_AUDIT_SAMPLE_ESTIMATE;
 
 /// Protocol identifier for replication operations.
 pub const REPLICATION_PROTOCOL_ID: &str = "autonomi.ant.replication.v1";
@@ -195,6 +195,9 @@ pub struct ReplicationConfig {
     pub verification_request_timeout: Duration,
     /// Fetch request timeout.
     pub fetch_request_timeout: Duration,
+    /// Maximum number of keys in an audit challenge. Challenges exceeding
+    /// this are rejected as `DoS` mitigation.
+    pub max_audit_challenge_keys: usize,
     /// Seconds to wait for `DhtNetworkEvent::BootstrapComplete` before
     /// proceeding with bootstrap sync (covers bootstrap nodes with no peers).
     pub bootstrap_complete_timeout_secs: u64,
@@ -221,6 +224,7 @@ impl Default for ReplicationConfig {
             prune_hysteresis_duration: PRUNE_HYSTERESIS_DURATION,
             verification_request_timeout: VERIFICATION_REQUEST_TIMEOUT,
             fetch_request_timeout: FETCH_REQUEST_TIMEOUT,
+            max_audit_challenge_keys: DEFAULT_MAX_AUDIT_CHALLENGE_KEYS,
             bootstrap_complete_timeout_secs: BOOTSTRAP_COMPLETE_TIMEOUT_SECS,
         }
     }
@@ -267,6 +271,12 @@ impl ReplicationConfig {
         }
         if self.neighbor_sync_peer_count == 0 {
             return Err("neighbor_sync_peer_count must be >= 1".to_string());
+        }
+        if self.neighbor_sync_scope == 0 {
+            return Err("neighbor_sync_scope must be >= 1".to_string());
+        }
+        if self.max_audit_challenge_keys == 0 {
+            return Err("max_audit_challenge_keys must be >= 1".to_string());
         }
         Ok(())
     }
@@ -320,7 +330,7 @@ impl ReplicationConfig {
     #[must_use]
     pub fn audit_response_timeout(&self, chunk_count: usize) -> Duration {
         #[allow(clippy::cast_possible_truncation)]
-        // chunk_count is bounded by MAX_AUDIT_CHALLENGE_KEYS (5_000).
+        // chunk_count is bounded by max_audit_challenge_keys (default 5_000).
         let chunks = chunk_count as u32;
         self.audit_response_base + self.audit_response_per_chunk * chunks
     }

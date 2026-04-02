@@ -44,8 +44,12 @@ pub struct InFlightEntry {
 /// 3. **`InFlightFetch`** -- keys actively being downloaded.
 pub struct ReplicationQueues {
     /// Keys awaiting quorum result (dedup by key).
+    // TODO: Add capacity bound to prevent unbounded growth under network flood.
+    // Consider evicting farthest-distance entries when at capacity.
     pending_verify: HashMap<XorName, VerificationEntry>,
     /// Presence-quorum-passed or paid-list-authorized keys waiting for fetch.
+    // TODO: Add capacity bound (e.g. MAX_FETCH_QUEUE_SIZE) to prevent
+    // unbounded growth. Reject or evict farthest-distance candidates when full.
     fetch_queue: BinaryHeap<FetchCandidate>,
     /// Keys present in `fetch_queue` for O(1) dedup.
     fetch_queue_keys: HashSet<XorName>,

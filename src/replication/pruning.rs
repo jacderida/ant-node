@@ -105,6 +105,7 @@ pub async fn run_prune_pass(
             warn!("Failed to prune record {}: {e}", hex::encode(key));
         } else {
             result.records_pruned += 1;
+            paid_list.clear_record_out_of_range(key);
             debug!("Pruned out-of-range record {}", hex::encode(key));
         }
     }

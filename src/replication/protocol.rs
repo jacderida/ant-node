@@ -7,14 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ant_protocol::XorName;
 
-/// Maximum replication wire message size (10 MB).
-///
-/// Accommodates hint batches and record payloads with envelope overhead.
-/// Matches `config::MAX_REPLICATION_MESSAGE_SIZE`.
-const MAX_MESSAGE_SIZE_MIB: usize = 10;
-
-/// Maximum replication wire message size in bytes.
-pub const MAX_REPLICATION_MESSAGE_SIZE: usize = MAX_MESSAGE_SIZE_MIB * 1024 * 1024;
+pub use super::config::MAX_REPLICATION_MESSAGE_SIZE;
 
 /// Sentinel digest value indicating the challenged key is absent from storage.
 ///

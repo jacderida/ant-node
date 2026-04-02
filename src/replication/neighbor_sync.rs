@@ -205,8 +205,14 @@ pub async fn sync_with_peer(
 /// the vacated slot.
 ///
 /// Rule 3: Remove unreachable peer from `NeighborSyncOrder`, attempt to fill
-/// by resuming scan from where rule 2 left off.
-pub fn handle_sync_failure(state: &mut NeighborSyncState, failed_peer: &PeerId) -> Option<PeerId> {
+/// by resuming scan from where rule 2 left off. Applies the same cooldown
+/// filtering as [`select_sync_batch`] to avoid selecting a peer that was
+/// recently synced.
+pub fn handle_sync_failure(
+    state: &mut NeighborSyncState,
+    failed_peer: &PeerId,
+    cooldown: Duration,
+) -> Option<PeerId> {
     // Find and remove the failed peer from the ordering.
     if let Some(pos) = state.order.iter().position(|p| p == failed_peer) {
         state.order.remove(pos);
@@ -216,14 +222,24 @@ pub fn handle_sync_failure(state: &mut NeighborSyncState, failed_peer: &PeerId) 
         }
     }
 
-    // Try to fill the vacated slot from the remaining peers in the snapshot.
-    if state.cursor < state.order.len() {
-        let next_peer = state.order[state.cursor];
+    // Try to fill the vacated slot, applying cooldown filtering (same as
+    // select_sync_batch Rule 2a).
+    let now = Instant::now();
+    while state.cursor < state.order.len() {
+        let candidate = state.order[state.cursor];
+
+        if let Some(last_sync) = state.last_sync_times.get(&candidate) {
+            if now.duration_since(*last_sync) < cooldown {
+                state.order.remove(state.cursor);
+                continue;
+            }
+        }
+
         state.cursor += 1;
-        Some(next_peer)
-    } else {
-        None
+        return Some(candidate);
     }
+
+    None
 }
 
 /// Record a successful sync with a peer.
@@ -412,7 +428,8 @@ mod tests {
         state.cursor = 2;
 
         // Peer 2 (index 1, before cursor) fails.
-        let replacement = handle_sync_failure(&mut state, &peer_id_from_byte(2));
+        let replacement =
+            handle_sync_failure(&mut state, &peer_id_from_byte(2), Duration::from_secs(0));
 
         // Cursor should be adjusted down by 1 (was 2, now 1).
         assert_eq!(state.cursor, 2); // was 2, removed at pos 1, adjusted to 1, then replacement advances to 2
@@ -436,7 +453,8 @@ mod tests {
         state.cursor = 1;
 
         // Peer 3 (index 2, after cursor) fails.
-        let replacement = handle_sync_failure(&mut state, &peer_id_from_byte(3));
+        let replacement =
+            handle_sync_failure(&mut state, &peer_id_from_byte(3), Duration::from_secs(0));
 
         // Cursor should stay at 1 (removal was after cursor).
         assert_eq!(state.cursor, 2); // cursor was 1, replacement advances to 2
@@ -452,7 +470,8 @@ mod tests {
         let mut state = NeighborSyncState::new_cycle(peers);
         state.cursor = 1; // Already past the only peer.
 
-        let replacement = handle_sync_failure(&mut state, &peer_id_from_byte(1));
+        let replacement =
+            handle_sync_failure(&mut state, &peer_id_from_byte(1), Duration::from_secs(0));
 
         assert!(state.order.is_empty());
         assert!(replacement.is_none());
@@ -464,7 +483,8 @@ mod tests {
         let mut state = NeighborSyncState::new_cycle(peers);
         state.cursor = 1;
 
-        let replacement = handle_sync_failure(&mut state, &peer_id_from_byte(99));
+        let replacement =
+            handle_sync_failure(&mut state, &peer_id_from_byte(99), Duration::from_secs(0));
 
         // Order should be unchanged.
         assert_eq!(state.order.len(), 2);
@@ -721,7 +741,8 @@ mod tests {
         assert_eq!(batch, vec![peer_id_from_byte(1), peer_id_from_byte(2)]);
 
         // Peer 2 becomes unreachable. Remove it and fill the slot.
-        let replacement = handle_sync_failure(&mut state, &peer_id_from_byte(2));
+        let replacement =
+            handle_sync_failure(&mut state, &peer_id_from_byte(2), Duration::from_secs(0));
         assert!(!state.order.contains(&peer_id_from_byte(2)));
 
         // Slot should be filled by the next available peer (peer 3).

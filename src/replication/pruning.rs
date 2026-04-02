@@ -82,11 +82,15 @@ pub async fn run_prune_pass(
         let is_responsible = closest.iter().any(|n| n.peer_id == *self_id);
 
         if is_responsible {
-            paid_list.clear_record_out_of_range(key);
-            result.records_cleared += 1;
+            if paid_list.record_out_of_range_since(key).is_some() {
+                paid_list.clear_record_out_of_range(key);
+                result.records_cleared += 1;
+            }
         } else {
+            if paid_list.record_out_of_range_since(key).is_none() {
+                result.records_marked_out_of_range += 1;
+            }
             paid_list.set_record_out_of_range(key);
-            result.records_marked_out_of_range += 1;
 
             if let Some(first_seen) = paid_list.record_out_of_range_since(key) {
                 if now.duration_since(first_seen) >= config.prune_hysteresis_duration {
@@ -124,11 +128,15 @@ pub async fn run_prune_pass(
         let in_paid_group = closest.iter().any(|n| n.peer_id == *self_id);
 
         if in_paid_group {
-            paid_list.clear_paid_out_of_range(key);
-            result.paid_entries_cleared += 1;
+            if paid_list.paid_out_of_range_since(key).is_some() {
+                paid_list.clear_paid_out_of_range(key);
+                result.paid_entries_cleared += 1;
+            }
         } else {
+            if paid_list.paid_out_of_range_since(key).is_none() {
+                result.paid_entries_marked += 1;
+            }
             paid_list.set_paid_out_of_range(key);
-            result.paid_entries_marked += 1;
 
             if let Some(first_seen) = paid_list.paid_out_of_range_since(key) {
                 if now.duration_since(first_seen) >= config.prune_hysteresis_duration {

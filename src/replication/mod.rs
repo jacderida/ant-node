@@ -47,7 +47,8 @@ use crate::replication::audit::AuditTickResult;
 use crate::replication::config::{max_parallel_fetch, ReplicationConfig, REPLICATION_PROTOCOL_ID};
 use crate::replication::paid_list::PaidList;
 use crate::replication::protocol::{
-    FreshReplicationResponse, ReplicationMessage, ReplicationMessageBody, VerificationResponse,
+    FreshReplicationResponse, NeighborSyncResponse, ReplicationMessage, ReplicationMessageBody,
+    VerificationResponse,
 };
 use crate::replication::quorum::KeyVerificationOutcome;
 use crate::replication::scheduling::ReplicationQueues;
@@ -1294,65 +1295,126 @@ async fn run_neighbor_sync_round(
         .await;
 
         if let Some(resp) = response {
-            // Record successful sync.
-            {
-                let mut state = sync_state.write().await;
-                neighbor_sync::record_successful_sync(&mut state, peer);
-            }
-            {
-                let mut history = sync_history.write().await;
-                let record = history.entry(*peer).or_insert(PeerSyncRecord {
-                    last_sync: None,
-                    cycles_since_sync: 0,
-                });
-                record.last_sync = Some(Instant::now());
-                record.cycles_since_sync = 0;
-            }
-
-            // Process inbound hints from response (skip if peer is bootstrapping).
-            if resp.bootstrapping {
-                // Gap 6: BootstrapClaimAbuse grace period enforcement.
-                let now = Instant::now();
-                let mut state = sync_state.write().await;
-                let first_seen = state.bootstrap_claims.entry(*peer).or_insert(now);
-                let claim_age = now.duration_since(*first_seen);
-                if claim_age > config.bootstrap_claim_grace_period {
-                    warn!(
-                        "Peer {peer} has been claiming bootstrap for {:?}, \
-                         exceeding grace period of {:?} — reporting abuse",
-                        claim_age, config.bootstrap_claim_grace_period,
-                    );
-                    p2p_node
-                        .report_trust_event(
-                            peer,
-                            TrustEvent::ApplicationFailure(REPLICATION_TRUST_WEIGHT),
-                        )
-                        .await;
-                }
-            } else {
-                // Peer is not claiming bootstrap; clear any prior claim.
-                {
-                    let mut state = sync_state.write().await;
-                    state.bootstrap_claims.remove(peer);
-                }
-                admit_response_hints(
-                    &self_id,
-                    peer,
-                    &resp.replica_hints,
-                    &resp.paid_hints,
-                    p2p_node,
-                    config,
-                    storage,
-                    paid_list,
-                    queues,
-                )
-                .await;
-            }
+            handle_sync_response(
+                &self_id,
+                peer,
+                &resp,
+                p2p_node,
+                config,
+                storage,
+                paid_list,
+                queues,
+                sync_state,
+                sync_history,
+            )
+            .await;
         } else {
             // Sync failed -- remove peer and try to fill slot.
-            let mut state = sync_state.write().await;
-            let _replacement = neighbor_sync::handle_sync_failure(&mut state, peer);
+            let replacement = {
+                let mut state = sync_state.write().await;
+                neighbor_sync::handle_sync_failure(&mut state, peer, config.neighbor_sync_cooldown)
+            };
+
+            // Attempt sync with the replacement peer (if one was found).
+            if let Some(replacement_peer) = replacement {
+                let replacement_resp = neighbor_sync::sync_with_peer(
+                    &replacement_peer,
+                    p2p_node,
+                    storage,
+                    paid_list,
+                    config,
+                    bootstrapping,
+                )
+                .await;
+
+                if let Some(resp) = replacement_resp {
+                    handle_sync_response(
+                        &self_id,
+                        &replacement_peer,
+                        &resp,
+                        p2p_node,
+                        config,
+                        storage,
+                        paid_list,
+                        queues,
+                        sync_state,
+                        sync_history,
+                    )
+                    .await;
+                }
+            }
         }
+    }
+}
+
+/// Process a successful neighbor sync response: record the sync, check for
+/// bootstrap claim abuse, and admit inbound hints.
+#[allow(clippy::too_many_arguments)]
+async fn handle_sync_response(
+    self_id: &PeerId,
+    peer: &PeerId,
+    resp: &NeighborSyncResponse,
+    p2p_node: &Arc<P2PNode>,
+    config: &ReplicationConfig,
+    storage: &Arc<LmdbStorage>,
+    paid_list: &Arc<PaidList>,
+    queues: &Arc<RwLock<ReplicationQueues>>,
+    sync_state: &Arc<RwLock<NeighborSyncState>>,
+    sync_history: &Arc<RwLock<HashMap<PeerId, PeerSyncRecord>>>,
+) {
+    // Record successful sync.
+    {
+        let mut state = sync_state.write().await;
+        neighbor_sync::record_successful_sync(&mut state, peer);
+    }
+    {
+        let mut history = sync_history.write().await;
+        let record = history.entry(*peer).or_insert(PeerSyncRecord {
+            last_sync: None,
+            cycles_since_sync: 0,
+        });
+        record.last_sync = Some(Instant::now());
+        record.cycles_since_sync = 0;
+    }
+
+    // Process inbound hints from response (skip if peer is bootstrapping).
+    if resp.bootstrapping {
+        // Gap 6: BootstrapClaimAbuse grace period enforcement.
+        let now = Instant::now();
+        let mut state = sync_state.write().await;
+        let first_seen = state.bootstrap_claims.entry(*peer).or_insert(now);
+        let claim_age = now.duration_since(*first_seen);
+        if claim_age > config.bootstrap_claim_grace_period {
+            warn!(
+                "Peer {peer} has been claiming bootstrap for {:?}, \
+                 exceeding grace period of {:?} — reporting abuse",
+                claim_age, config.bootstrap_claim_grace_period,
+            );
+            p2p_node
+                .report_trust_event(
+                    peer,
+                    TrustEvent::ApplicationFailure(REPLICATION_TRUST_WEIGHT),
+                )
+                .await;
+        }
+    } else {
+        // Peer is not claiming bootstrap; clear any prior claim.
+        {
+            let mut state = sync_state.write().await;
+            state.bootstrap_claims.remove(peer);
+        }
+        admit_response_hints(
+            self_id,
+            peer,
+            &resp.replica_hints,
+            &resp.paid_hints,
+            p2p_node,
+            config,
+            storage,
+            paid_list,
+            queues,
+        )
+        .await;
     }
 }
 

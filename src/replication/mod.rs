@@ -1673,12 +1673,8 @@ async fn execute_single_fetch(
         }
         Err(e) => {
             debug!("Fetch request to {source} failed: {e}");
-            p2p_node
-                .report_trust_event(
-                    &source,
-                    TrustEvent::ApplicationFailure(REPLICATION_TRUST_WEIGHT),
-                )
-                .await;
+            // No ApplicationFailure here — P2PNode::send_request() already
+            // reports ConnectionTimeout / ConnectionFailed to the TrustEngine.
             FetchOutcome {
                 key,
                 result: FetchResult::SourceFailed,

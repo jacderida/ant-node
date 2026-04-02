@@ -323,6 +323,15 @@ impl BootstrapState {
     pub fn is_drained(&self) -> bool {
         self.drained || (self.pending_peer_requests == 0 && self.pending_keys.is_empty())
     }
+
+    /// Remove a key from the bootstrap pending set.
+    ///
+    /// Called when a key terminally leaves the verification/fetch pipeline
+    /// (stored, abandoned, quorum failed, etc.) so the drain check set
+    /// shrinks incrementally rather than being re-scanned in full.
+    pub fn remove_key(&mut self, key: &XorName) {
+        self.pending_keys.remove(key);
+    }
 }
 
 impl Default for BootstrapState {

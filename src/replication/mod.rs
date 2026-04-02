@@ -442,6 +442,8 @@ impl ReplicationEngine {
         let queues = Arc::clone(&self.queues);
         let config = Arc::clone(&self.config);
         let shutdown = self.shutdown.clone();
+        let bootstrap_state = Arc::clone(&self.bootstrap_state);
+        let is_bootstrapping = Arc::clone(&self.is_bootstrapping);
         let concurrency = max_parallel_fetch();
 
         info!("Fetch worker concurrency set to {concurrency} (hardware threads)");
@@ -496,9 +498,10 @@ impl ReplicationEngine {
                     Some(join_result) = in_flight.next() => {
                         if let Ok(outcome) = join_result {
                             let mut q = queues.write().await;
-                            match outcome.result {
+                            let terminal = match outcome.result {
                                 FetchResult::Stored | FetchResult::IntegrityFailed => {
                                     q.complete_fetch(&outcome.key);
+                                    true
                                 }
                                 FetchResult::SourceFailed => {
                                     if let Some(next_peer) = q.retry_fetch(&outcome.key) {
@@ -513,9 +516,25 @@ impl ReplicationEngine {
                                             outcome.key,
                                             next_peer,
                                         )));
+                                        false
                                     } else {
                                         q.complete_fetch(&outcome.key);
+                                        true
                                     }
+                                }
+                            };
+
+                            // Option B: shrink bootstrap pending set on terminal exit.
+                            // Option A: re-check drain condition after removal.
+                            if terminal && !bootstrap_state.read().await.is_drained() {
+                                bootstrap_state.write().await.remove_key(&outcome.key);
+                                if bootstrap::check_bootstrap_drained(
+                                    &bootstrap_state,
+                                    &q,
+                                )
+                                .await
+                                {
+                                    *is_bootstrapping.write().await = false;
                                 }
                             }
                         }
@@ -536,6 +555,8 @@ impl ReplicationEngine {
         let paid_list = Arc::clone(&self.paid_list);
         let config = Arc::clone(&self.config);
         let shutdown = self.shutdown.clone();
+        let bootstrap_state = Arc::clone(&self.bootstrap_state);
+        let is_bootstrapping = Arc::clone(&self.is_bootstrapping);
 
         let handle = tokio::spawn(async move {
             loop {
@@ -544,7 +565,10 @@ impl ReplicationEngine {
                     () = tokio::time::sleep(
                         std::time::Duration::from_millis(VERIFICATION_WORKER_POLL_MS)
                     ) => {
-                        run_verification_cycle(&p2p, &paid_list, &queues, &config).await;
+                        run_verification_cycle(
+                            &p2p, &paid_list, &queues, &config,
+                            &bootstrap_state, &is_bootstrapping,
+                        ).await;
                     }
                 }
             }
@@ -1519,6 +1543,8 @@ async fn run_verification_cycle(
     paid_list: &Arc<PaidList>,
     queues: &Arc<RwLock<ReplicationQueues>>,
     config: &ReplicationConfig,
+    bootstrap_state: &Arc<RwLock<BootstrapState>>,
+    is_bootstrapping: &Arc<RwLock<bool>>,
 ) {
     let pending_keys = {
         let q = queues.read().await;
@@ -1534,6 +1560,7 @@ async fn run_verification_cycle(
     // Step 1: Check local PaidForList for fast-path authorization (Section 9,
     // step 4).
     let mut keys_needing_network = Vec::new();
+    let mut terminal_keys: Vec<XorName> = Vec::new();
     {
         let mut q = queues.write().await;
         for key in &pending_keys {
@@ -1543,6 +1570,7 @@ async fn run_verification_cycle(
                     if entry.pipeline == HintPipeline::PaidOnly {
                         // Paid-only pipeline: PaidForList already updated, done.
                         q.remove_pending(key);
+                        terminal_keys.push(*key);
                         continue;
                     }
                 }
@@ -1552,75 +1580,95 @@ async fn run_verification_cycle(
         }
     }
 
-    if keys_needing_network.is_empty() {
-        return;
-    }
+    // Steps 2-5: Network verification (skipped if all keys resolved locally).
+    if !keys_needing_network.is_empty() {
+        // Step 2: Compute targets and run network verification round.
+        let targets =
+            quorum::compute_verification_targets(&keys_needing_network, p2p_node, config, &self_id)
+                .await;
 
-    // Step 2: Compute targets and run network verification round.
-    let targets =
-        quorum::compute_verification_targets(&keys_needing_network, p2p_node, config, &self_id)
-            .await;
+        let evidence =
+            quorum::run_verification_round(&keys_needing_network, &targets, p2p_node, config).await;
 
-    let evidence =
-        quorum::run_verification_round(&keys_needing_network, &targets, p2p_node, config).await;
+        // Step 3: Evaluate results — collect outcomes without holding the write
+        // lock across paid-list I/O.
+        let mut evaluated: Vec<(XorName, KeyVerificationOutcome, HintPipeline)> = Vec::new();
+        {
+            let q = queues.read().await;
+            for key in &keys_needing_network {
+                let Some(ev) = evidence.get(key) else {
+                    continue;
+                };
+                let Some(entry) = q.get_pending(key) else {
+                    continue;
+                };
+                let outcome = quorum::evaluate_key_evidence(key, ev, &targets, config);
+                evaluated.push((*key, outcome, entry.pipeline));
+            }
+        } // read lock released
 
-    // Step 3: Evaluate results — collect outcomes without holding the write
-    // lock across paid-list I/O.
-    let mut evaluated: Vec<(XorName, KeyVerificationOutcome, HintPipeline)> = Vec::new();
-    {
-        let q = queues.read().await;
-        for key in &keys_needing_network {
-            let Some(ev) = evidence.get(key) else {
-                continue;
-            };
-            let Some(entry) = q.get_pending(key) else {
-                continue;
-            };
-            let outcome = quorum::evaluate_key_evidence(key, ev, &targets, config);
-            evaluated.push((*key, outcome, entry.pipeline));
+        // Step 4: Insert verified keys into PaidForList (no lock held).
+        let mut paid_insert_keys: Vec<XorName> = Vec::new();
+        for (key, outcome, _) in &evaluated {
+            if matches!(
+                outcome,
+                KeyVerificationOutcome::QuorumVerified { .. }
+                    | KeyVerificationOutcome::PaidListVerified { .. }
+            ) {
+                paid_insert_keys.push(*key);
+            }
         }
-    } // read lock released
-
-    // Step 4: Insert verified keys into PaidForList (no lock held).
-    let mut paid_insert_keys: Vec<XorName> = Vec::new();
-    for (key, outcome, _) in &evaluated {
-        if matches!(
-            outcome,
-            KeyVerificationOutcome::QuorumVerified { .. }
-                | KeyVerificationOutcome::PaidListVerified { .. }
-        ) {
-            paid_insert_keys.push(*key);
+        for key in &paid_insert_keys {
+            if let Err(e) = paid_list.insert(key).await {
+                warn!("Failed to add verified key to PaidForList: {e}");
+            }
         }
-    }
-    for key in &paid_insert_keys {
-        if let Err(e) = paid_list.insert(key).await {
-            warn!("Failed to add verified key to PaidForList: {e}");
-        }
-    }
 
-    // Step 5: Update queues with the evaluated outcomes.
-    let mut q = queues.write().await;
-    for (key, outcome, pipeline) in evaluated {
-        match outcome {
-            KeyVerificationOutcome::QuorumVerified { sources }
-            | KeyVerificationOutcome::PaidListVerified { sources } => {
-                if pipeline == HintPipeline::Replica && !sources.is_empty() {
-                    let distance = crate::client::xor_distance(&key, p2p_node.peer_id().as_bytes());
+        // Step 5: Update queues with the evaluated outcomes.
+        let mut q = queues.write().await;
+        for (key, outcome, pipeline) in evaluated {
+            match outcome {
+                KeyVerificationOutcome::QuorumVerified { sources }
+                | KeyVerificationOutcome::PaidListVerified { sources } => {
+                    if pipeline == HintPipeline::Replica && !sources.is_empty() {
+                        let distance =
+                            crate::client::xor_distance(&key, p2p_node.peer_id().as_bytes());
+                        q.remove_pending(&key);
+                        q.enqueue_fetch(key, distance, sources);
+                        // Not terminal — key moved to fetch queue.
+                    } else if pipeline == HintPipeline::Replica && sources.is_empty() {
+                        warn!(
+                            "Verified key {} has no holders (possible data loss)",
+                            hex::encode(key)
+                        );
+                        q.remove_pending(&key);
+                        terminal_keys.push(key);
+                    } else {
+                        q.remove_pending(&key);
+                        terminal_keys.push(key);
+                    }
+                }
+                KeyVerificationOutcome::QuorumFailed
+                | KeyVerificationOutcome::QuorumInconclusive => {
                     q.remove_pending(&key);
-                    q.enqueue_fetch(key, distance, sources);
-                } else if pipeline == HintPipeline::Replica && sources.is_empty() {
-                    warn!(
-                        "Verified key {} has no holders (possible data loss)",
-                        hex::encode(key)
-                    );
-                    q.remove_pending(&key);
-                } else {
-                    q.remove_pending(&key);
+                    terminal_keys.push(key);
                 }
             }
-            KeyVerificationOutcome::QuorumFailed | KeyVerificationOutcome::QuorumInconclusive => {
-                q.remove_pending(&key);
+        }
+    }
+
+    // Step 6: Option B — remove terminal keys from bootstrap pending set.
+    //         Option A — re-check drain condition after removals.
+    if !terminal_keys.is_empty() && !bootstrap_state.read().await.is_drained() {
+        {
+            let mut bs = bootstrap_state.write().await;
+            for key in &terminal_keys {
+                bs.remove_key(key);
             }
+        }
+        let q = queues.read().await;
+        if bootstrap::check_bootstrap_drained(bootstrap_state, &q).await {
+            *is_bootstrapping.write().await = false;
         }
     }
 }

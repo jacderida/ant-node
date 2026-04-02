@@ -45,7 +45,7 @@
 //! ```
 
 mod handler;
-mod lmdb;
+pub(crate) mod lmdb;
 
 pub use crate::ant_protocol::XorName;
 pub use handler::AntProtocol;

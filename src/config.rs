@@ -458,12 +458,12 @@ pub struct StorageConfig {
     #[serde(default)]
     pub db_size_gb: usize,
 
-    /// Minimum free disk space (in GiB) to preserve on the storage partition.
+    /// Minimum free disk space (in MiB) to preserve on the storage partition.
     ///
     /// Writes are refused when available space drops below this threshold,
-    /// preventing the node from filling the disk completely.  Default: 1 GiB.
-    #[serde(default = "default_disk_reserve_gb")]
-    pub disk_reserve_gb: u64,
+    /// preventing the node from filling the disk completely.  Default: 500 MiB.
+    #[serde(default = "default_disk_reserve_mb")]
+    pub disk_reserve_mb: u64,
 }
 
 impl Default for StorageConfig {
@@ -472,13 +472,14 @@ impl Default for StorageConfig {
             enabled: default_storage_enabled(),
             verify_on_read: default_storage_verify_on_read(),
             db_size_gb: 0,
-            disk_reserve_gb: default_disk_reserve_gb(),
+            disk_reserve_mb: default_disk_reserve_mb(),
         }
     }
 }
 
-const fn default_disk_reserve_gb() -> u64 {
-    1
+/// Default: 500 MiB — matches `DEFAULT_DISK_RESERVE` in `storage::lmdb`.
+const fn default_disk_reserve_mb() -> u64 {
+    500
 }
 
 const fn default_storage_enabled() -> bool {

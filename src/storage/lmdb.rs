@@ -19,8 +19,14 @@ use tracing::{debug, info, trace, warn};
 
 use crate::ant_protocol::XORNAME_LEN;
 
+/// Bytes in one MiB.
+pub const MIB: u64 = 1024 * 1024;
+
 /// Bytes in one GiB.
-const GIB: u64 = 1024 * 1024 * 1024;
+pub const GIB: u64 = 1024 * MIB;
+
+/// Default minimum free disk space to preserve on the storage partition.
+const DEFAULT_DISK_RESERVE: u64 = 500 * MIB;
 
 /// Convert a byte count to GiB for human-readable log messages.
 #[allow(clippy::cast_precision_loss)] // display only — sub-byte precision is irrelevant
@@ -64,7 +70,7 @@ impl Default for LmdbStorageConfig {
             root_dir: PathBuf::from(".ant/chunks"),
             verify_on_read: true,
             max_map_size: 0,
-            disk_reserve: GIB,
+            disk_reserve: DEFAULT_DISK_RESERVE,
         }
     }
 }

@@ -12,6 +12,7 @@ use crate::payment::wallet::parse_rewards_address;
 use crate::payment::{EvmVerifierConfig, PaymentVerifier, PaymentVerifierConfig, QuoteGenerator};
 use crate::replication::config::ReplicationConfig;
 use crate::replication::ReplicationEngine;
+use crate::storage::lmdb::MIB;
 use crate::storage::{AntProtocol, LmdbStorage, LmdbStorageConfig};
 use crate::upgrade::{
     upgrade_cache_dir, AutoApplyUpgrader, BinaryCache, ReleaseCache, UpgradeMonitor, UpgradeResult,
@@ -357,10 +358,7 @@ impl NodeBuilder {
             root_dir: config.root_dir.clone(),
             verify_on_read: config.storage.verify_on_read,
             max_map_size: config.storage.db_size_gb.saturating_mul(1024 * 1024 * 1024),
-            disk_reserve: config
-                .storage
-                .disk_reserve_gb
-                .saturating_mul(1024 * 1024 * 1024),
+            disk_reserve: config.storage.disk_reserve_mb.saturating_mul(MIB),
         };
         let storage = LmdbStorage::new(storage_config)
             .await

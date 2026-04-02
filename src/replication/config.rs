@@ -321,9 +321,7 @@ impl ReplicationConfig {
     /// keys: `base + per_chunk * chunk_count`.
     #[must_use]
     pub fn audit_response_timeout(&self, chunk_count: usize) -> Duration {
-        #[allow(clippy::cast_possible_truncation)]
-        // chunk_count is bounded by max_incoming_audit_keys (dynamic, sqrt-scaled).
-        let chunks = chunk_count as u32;
+        let chunks = u32::try_from(chunk_count).unwrap_or(u32::MAX);
         self.audit_response_base + self.audit_response_per_chunk * chunks
     }
 

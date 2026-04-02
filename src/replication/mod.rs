@@ -510,11 +510,11 @@ impl ReplicationEngine {
                         if let Ok(outcome) = join_result {
                             let mut q = queues.write().await;
                             let terminal = match outcome.result {
-                                FetchResult::Stored | FetchResult::IntegrityFailed => {
+                                FetchResult::Stored => {
                                     q.complete_fetch(&outcome.key);
                                     true
                                 }
-                                FetchResult::SourceFailed => {
+                                FetchResult::IntegrityFailed | FetchResult::SourceFailed => {
                                     if let Some(next_peer) = q.retry_fetch(&outcome.key) {
                                         // Spawn a new fetch task for the next source.
                                         let p2p = Arc::clone(&p2p);
@@ -1747,12 +1747,24 @@ async fn execute_single_fetch(
 
     match result {
         Ok(response) => {
-            if let Ok(resp_msg) = ReplicationMessage::decode(&response.data) {
-                if let ReplicationMessageBody::FetchResponse(protocol::FetchResponse::Success {
+            let Ok(resp_msg) = ReplicationMessage::decode(&response.data) else {
+                p2p_node
+                    .report_trust_event(
+                        &source,
+                        TrustEvent::ApplicationFailure(REPLICATION_TRUST_WEIGHT),
+                    )
+                    .await;
+                return FetchOutcome {
+                    key,
+                    result: FetchResult::SourceFailed,
+                };
+            };
+
+            match resp_msg.body {
+                ReplicationMessageBody::FetchResponse(protocol::FetchResponse::Success {
                     key: resp_key,
                     data,
-                }) = resp_msg.body
-                {
+                }) => {
                     // Validate the response key matches the requested key.
                     // A malicious peer could serve valid data for a different
                     // key, passing integrity checks while the requested key
@@ -1806,22 +1818,54 @@ async fn execute_single_fetch(
                         };
                     }
 
-                    return FetchOutcome {
+                    FetchOutcome {
                         key,
                         result: FetchResult::Stored,
-                    };
+                    }
                 }
-            }
-            // Non-success response: emit trust failure.
-            p2p_node
-                .report_trust_event(
-                    &source,
-                    TrustEvent::ApplicationFailure(REPLICATION_TRUST_WEIGHT),
-                )
-                .await;
-            FetchOutcome {
-                key,
-                result: FetchResult::SourceFailed,
+                ReplicationMessageBody::FetchResponse(protocol::FetchResponse::NotFound {
+                    ..
+                }) => {
+                    // NotFound is a legitimate response (peer may have pruned
+                    // the data). No trust penalty — just retry another source.
+                    debug!("Fetch: peer {source} does not have {}", hex::encode(key));
+                    FetchOutcome {
+                        key,
+                        result: FetchResult::SourceFailed,
+                    }
+                }
+                ReplicationMessageBody::FetchResponse(protocol::FetchResponse::Error {
+                    reason,
+                    ..
+                }) => {
+                    warn!(
+                        "Fetch: peer {source} returned error for {}: {reason}",
+                        hex::encode(key)
+                    );
+                    p2p_node
+                        .report_trust_event(
+                            &source,
+                            TrustEvent::ApplicationFailure(REPLICATION_TRUST_WEIGHT),
+                        )
+                        .await;
+                    FetchOutcome {
+                        key,
+                        result: FetchResult::SourceFailed,
+                    }
+                }
+                _ => {
+                    // Unexpected message type — treat as malformed.
+                    p2p_node
+                        .report_trust_event(
+                            &source,
+                            TrustEvent::ApplicationFailure(REPLICATION_TRUST_WEIGHT),
+                        )
+                        .await;
+                    FetchOutcome {
+                        key,
+                        result: FetchResult::SourceFailed,
+                    }
+                }
             }
         }
         Err(e) => {

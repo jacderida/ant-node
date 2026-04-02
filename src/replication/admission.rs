@@ -87,9 +87,6 @@ pub async fn admit_hints(
     paid_list: &Arc<PaidList>,
     pending_keys: &HashSet<XorName>,
 ) -> AdmissionResult {
-    // Build set of replica hint keys for cross-set precedence check.
-    let replica_set: HashSet<XorName> = replica_hints.iter().copied().collect();
-
     let mut result = AdmissionResult {
         replica_keys: Vec::new(),
         paid_only_keys: Vec::new(),
@@ -121,14 +118,10 @@ pub async fn admit_hints(
         }
     }
 
-    // Process paid hints (with cross-set precedence).
+    // Process paid hints. Cross-set dedup is handled by `seen` — any key
+    // already processed in the replica-hints loop above is skipped here.
     for &key in paid_hints {
         if !seen.insert(key) {
-            continue;
-        }
-
-        // Cross-set precedence: if already processed as a replica hint, skip.
-        if replica_set.contains(&key) {
             continue;
         }
 

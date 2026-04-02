@@ -5,7 +5,7 @@
 //! `PRUNE_HYSTERESIS_DURATION`.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn};
 
@@ -93,7 +93,10 @@ pub async fn run_prune_pass(
             paid_list.set_record_out_of_range(key);
 
             if let Some(first_seen) = paid_list.record_out_of_range_since(key) {
-                if now.duration_since(first_seen) >= config.prune_hysteresis_duration {
+                let elapsed = now
+                    .checked_duration_since(first_seen)
+                    .unwrap_or(Duration::ZERO);
+                if elapsed >= config.prune_hysteresis_duration {
                     keys_to_delete.push(*key);
                 }
             }
@@ -106,6 +109,10 @@ pub async fn run_prune_pass(
         } else {
             result.records_pruned += 1;
             paid_list.clear_record_out_of_range(key);
+            // Seed the PaidForList out-of-range timer so the second pass can
+            // prune the entry sooner, closing the re-admission window between
+            // the storage delete and the PaidForList prune pass.
+            paid_list.set_paid_out_of_range(key);
             debug!("Pruned out-of-range record {}", hex::encode(key));
         }
     }
@@ -140,7 +147,10 @@ pub async fn run_prune_pass(
             paid_list.set_paid_out_of_range(key);
 
             if let Some(first_seen) = paid_list.paid_out_of_range_since(key) {
-                if now.duration_since(first_seen) >= config.prune_hysteresis_duration {
+                let elapsed = now
+                    .checked_duration_since(first_seen)
+                    .unwrap_or(Duration::ZERO);
+                if elapsed >= config.prune_hysteresis_duration {
                     paid_keys_to_delete.push(*key);
                 }
             }

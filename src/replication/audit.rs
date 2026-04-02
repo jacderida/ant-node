@@ -240,8 +240,16 @@ pub async fn audit_tick(
             .await
         }
         ReplicationMessageBody::AuditResponse(AuditResponse::Rejected { reason, .. }) => {
-            debug!("Audit: challenge rejected by {challenged_peer}: {reason}");
-            AuditTickResult::Idle
+            warn!("Audit: challenge rejected by {challenged_peer}: {reason}");
+            handle_audit_failure(
+                &challenged_peer,
+                challenge_id,
+                &peer_keys,
+                AuditFailureReason::Rejected,
+                p2p_node,
+                config,
+            )
+            .await
         }
         _ => {
             warn!("Audit: unexpected response type from {challenged_peer}");

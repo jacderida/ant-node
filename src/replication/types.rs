@@ -222,6 +222,8 @@ pub enum AuditFailureReason {
     DigestMismatch,
     /// Key was absent (signalled by sentinel digest).
     KeyAbsent,
+    /// Peer explicitly rejected the audit challenge.
+    Rejected,
 }
 
 // ---------------------------------------------------------------------------

@@ -1762,6 +1762,7 @@ async fn admit_and_queue_hints(
 // ---------------------------------------------------------------------------
 
 /// Run one verification cycle: process pending keys through quorum checks.
+#[allow(clippy::too_many_lines)]
 async fn run_verification_cycle(
     p2p_node: &Arc<P2PNode>,
     paid_list: &Arc<PaidList>,

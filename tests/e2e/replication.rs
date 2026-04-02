@@ -569,13 +569,21 @@ async fn test_audit_challenge_multi_key() {
     let p2p_a = node_a.p2p_node.as_ref().expect("p2p_a");
     let protocol_a = node_a.ant_protocol.as_ref().expect("protocol_a");
 
-    // Store two chunks on A
+    // Store four chunks on A so the dynamic audit key limit (2 * sqrt(4) = 4)
+    // accommodates our 3-key challenge.  Only c1 and c2 are challenged; c3
+    // and c4 just raise the stored-chunk count.
     let c1 = b"audit multi key 1";
     let c2 = b"audit multi key 2";
+    let c3 = b"audit multi key 3 (padding)";
+    let c4 = b"audit multi key 4 (padding)";
     let a1 = ant_node::client::compute_address(c1);
     let a2 = ant_node::client::compute_address(c2);
+    let a3 = ant_node::client::compute_address(c3);
+    let a4 = ant_node::client::compute_address(c4);
     protocol_a.storage().put(&a1, c1).await.expect("put 1");
     protocol_a.storage().put(&a2, c2).await.expect("put 2");
+    protocol_a.storage().put(&a3, c3).await.expect("put 3");
+    protocol_a.storage().put(&a4, c4).await.expect("put 4");
 
     let absent_key = [0xCC; 32];
     let peer_a = *p2p_a.peer_id();
@@ -1450,6 +1458,9 @@ async fn scenario_45_unrecoverable_when_paid_list_lost() {
 #[tokio::test]
 #[serial]
 async fn test_late_joiner_replicates_responsible_chunks() {
+    const REPLICATION_SETTLE_TIMEOUT: Duration = Duration::from_secs(90);
+    const SETTLE_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
     let mut harness = TestHarness::setup_minimal().await.expect("setup");
     harness.warmup_dht().await.expect("warmup");
 
@@ -1519,9 +1530,6 @@ async fn test_late_joiner_replicates_responsible_chunks() {
     // ------------------------------------------------------------------
     // The replication subsystem discovers missing chunks via neighbor-sync
     // and fetches them. Give it time to complete.
-    const REPLICATION_SETTLE_TIMEOUT: Duration = Duration::from_secs(90);
-    const SETTLE_POLL_INTERVAL: Duration = Duration::from_millis(500);
-
     let new_node = harness.test_node(new_idx).expect("new node");
     let new_p2p = new_node.p2p_node.as_ref().expect("p2p");
     let new_peer_id = *new_p2p.peer_id();

@@ -1605,6 +1605,9 @@ impl TestNetwork {
     ///
     /// Returns an error if node creation, startup, or bootstrap fails.
     pub async fn add_node(&mut self) -> Result<usize> {
+        const DHT_WARMUP_QUERIES: usize = 10;
+        const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(120);
+
         let index = self.nodes.len();
 
         let bootstrap_addrs: Vec<MultiAddr> = self
@@ -1619,7 +1622,6 @@ impl TestNetwork {
         self.start_node(node).await?;
 
         // Warm the new node's DHT so it discovers existing peers.
-        const DHT_WARMUP_QUERIES: usize = 10;
         if let Some(ref p2p) = self.nodes[index].p2p_node {
             for _ in 0..DHT_WARMUP_QUERIES {
                 let mut addr = [0u8; 32];
@@ -1656,7 +1658,6 @@ impl TestNetwork {
 
         // Wait for replication bootstrap to complete so the node is fully
         // operational (accepting audits, neighbor sync, etc.).
-        const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(120);
         if let Some(ref engine) = self.nodes[index].replication_engine {
             if !engine.wait_for_bootstrap_complete(BOOTSTRAP_TIMEOUT).await {
                 return Err(TestnetError::Stabilization(format!(

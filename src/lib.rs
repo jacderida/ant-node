@@ -42,11 +42,10 @@
 pub mod ant_protocol;
 pub mod client;
 pub mod config;
-#[macro_use]
-pub mod logging;
 pub mod devnet;
 pub mod error;
 pub mod event;
+pub mod logging;
 pub mod node;
 pub mod payment;
 pub mod replication;

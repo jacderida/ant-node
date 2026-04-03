@@ -599,7 +599,9 @@ impl PaymentVerifier {
                 .collect();
             candidate_prices.sort_unstable(); // ascending
                                               // Upper median (index 8 of 16) — matches Solidity's median16 (k = 8)
-            let median_price = candidate_prices[candidate_prices.len() / 2];
+            let median_price = *candidate_prices
+                .get(candidate_prices.len() / 2)
+                .ok_or_else(|| Error::Payment("empty candidate pool in merkle proof".into()))?;
             let total_amount = median_price * Amount::from(1u64 << payment_info.depth);
             total_amount / Amount::from(u64::from(payment_info.depth))
         } else {

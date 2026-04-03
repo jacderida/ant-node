@@ -8,8 +8,72 @@ use ant_node::NodeBuilder;
 use clap::Parser;
 use cli::Cli;
 
+/// Initialize the tracing subscriber when the `logging` feature is active.
+///
+/// Returns a guard that must be held for the lifetime of the process to ensure
+/// buffered logs are flushed on shutdown.
 #[cfg(feature = "logging")]
-use cli::CliLogFormat;
+fn init_logging(
+    cli: &Cli,
+) -> color_eyre::Result<Option<tracing_appender::non_blocking::WorkerGuard>> {
+    use cli::CliLogFormat;
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::{fmt, EnvFilter, Layer};
+
+    let log_format = cli.log_format;
+    let log_dir = cli.log_dir.clone();
+    let log_max_files = cli.log_max_files;
+    let log_level: String = cli.log_level.into();
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&log_level));
+
+    let guard: Option<tracing_appender::non_blocking::WorkerGuard>;
+
+    let layer: Box<dyn Layer<_> + Send + Sync> = match (log_format, log_dir) {
+        (CliLogFormat::Text, None) => {
+            guard = None;
+            Box::new(fmt::layer())
+        }
+        (CliLogFormat::Json, None) => {
+            guard = None;
+            Box::new(fmt::layer().json().flatten_event(true))
+        }
+        (CliLogFormat::Text, Some(dir)) => {
+            let file_appender = tracing_appender::rolling::Builder::new()
+                .rotation(tracing_appender::rolling::Rotation::DAILY)
+                .max_log_files(log_max_files)
+                .filename_prefix("ant-node")
+                .filename_suffix("log")
+                .build(dir)?;
+            let (non_blocking, g) = tracing_appender::non_blocking(file_appender);
+            guard = Some(g);
+            Box::new(fmt::layer().with_writer(non_blocking).with_ansi(false))
+        }
+        (CliLogFormat::Json, Some(dir)) => {
+            let file_appender = tracing_appender::rolling::Builder::new()
+                .rotation(tracing_appender::rolling::Rotation::DAILY)
+                .max_log_files(log_max_files)
+                .filename_prefix("ant-node")
+                .filename_suffix("log")
+                .build(dir)?;
+            let (non_blocking, g) = tracing_appender::non_blocking(file_appender);
+            guard = Some(g);
+            Box::new(
+                fmt::layer()
+                    .json()
+                    .flatten_event(true)
+                    .with_writer(non_blocking)
+                    .with_ansi(false),
+            )
+        }
+    };
+
+    tracing_subscriber::registry()
+        .with(layer)
+        .with(filter)
+        .init();
+
+    Ok(guard)
+}
 
 /// Force at least 4 worker threads regardless of CPU count.
 ///
@@ -20,74 +84,13 @@ use cli::CliLogFormat;
 /// keepalives can't fire, and connections die silently.
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> color_eyre::Result<()> {
-    // Initialize error handling
     color_eyre::install()?;
 
-    // Parse CLI arguments
     let cli = Cli::parse();
 
-    // Initialize tracing (only when logging feature is enabled)
+    // _guard must live for the duration of main() to ensure log flushing.
     #[cfg(feature = "logging")]
-    let _logging_guard = {
-        use tracing_subscriber::prelude::*;
-        use tracing_subscriber::{fmt, EnvFilter, Layer};
-
-        let log_format = cli.log_format;
-        let log_dir = cli.log_dir.clone();
-        let log_max_files = cli.log_max_files;
-        let log_level: String = cli.log_level.into();
-        let filter =
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&log_level));
-
-        // _guard must live for the duration of main() to ensure log flushing.
-        let guard: Option<tracing_appender::non_blocking::WorkerGuard>;
-
-        let layer: Box<dyn Layer<_> + Send + Sync> = match (log_format, log_dir) {
-            (CliLogFormat::Text, None) => {
-                guard = None;
-                Box::new(fmt::layer())
-            }
-            (CliLogFormat::Json, None) => {
-                guard = None;
-                Box::new(fmt::layer().json().flatten_event(true))
-            }
-            (CliLogFormat::Text, Some(dir)) => {
-                let file_appender = tracing_appender::rolling::Builder::new()
-                    .rotation(tracing_appender::rolling::Rotation::DAILY)
-                    .max_log_files(log_max_files)
-                    .filename_prefix("ant-node")
-                    .filename_suffix("log")
-                    .build(dir)?;
-                let (non_blocking, g) = tracing_appender::non_blocking(file_appender);
-                guard = Some(g);
-                Box::new(fmt::layer().with_writer(non_blocking).with_ansi(false))
-            }
-            (CliLogFormat::Json, Some(dir)) => {
-                let file_appender = tracing_appender::rolling::Builder::new()
-                    .rotation(tracing_appender::rolling::Rotation::DAILY)
-                    .max_log_files(log_max_files)
-                    .filename_prefix("ant-node")
-                    .filename_suffix("log")
-                    .build(dir)?;
-                let (non_blocking, g) = tracing_appender::non_blocking(file_appender);
-                guard = Some(g);
-                Box::new(
-                    fmt::layer()
-                        .json()
-                        .flatten_event(true)
-                        .with_writer(non_blocking)
-                        .with_ansi(false),
-                )
-            }
-        };
-
-        tracing_subscriber::registry()
-            .with(layer)
-            .with(filter)
-            .init();
-
-        guard
-    };
+    let _logging_guard = init_logging(&cli)?;
 
     ant_node::logging::info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -139,10 +142,7 @@ async fn main() -> color_eyre::Result<()> {
         }
     }
 
-    // Build and run the node
     let mut node = NodeBuilder::new(config).build().await?;
-
-    // Run until shutdown
     node.run().await?;
 
     ant_node::logging::info!("Goodbye!");

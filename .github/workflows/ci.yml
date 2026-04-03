@@ -77,6 +77,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build release (no logging)
         run: cargo build --release --no-default-features
+        env:
+          # When logging is compiled out, variables used only in log macros
+          # become unused. These warnings are expected and harmless.
+          RUSTFLAGS: "-A unused_variables -A unused_assignments -A dead_code"
 
   security:
     name: Security Audit

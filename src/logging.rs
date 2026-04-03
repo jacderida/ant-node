@@ -20,35 +20,45 @@ pub use tracing::{debug, enabled, error, info, trace, warn, Level};
 #[macro_export]
 #[doc(hidden)]
 macro_rules! __log_noop_info {
-    ($($arg:tt)*) => {};
+    ($($arg:tt)*) => {
+        ()
+    };
 }
 
 #[cfg(not(feature = "logging"))]
 #[macro_export]
 #[doc(hidden)]
 macro_rules! __log_noop_warn {
-    ($($arg:tt)*) => {};
+    ($($arg:tt)*) => {
+        ()
+    };
 }
 
 #[cfg(not(feature = "logging"))]
 #[macro_export]
 #[doc(hidden)]
 macro_rules! __log_noop_debug {
-    ($($arg:tt)*) => {};
+    ($($arg:tt)*) => {
+        ()
+    };
 }
 
 #[cfg(not(feature = "logging"))]
 #[macro_export]
 #[doc(hidden)]
 macro_rules! __log_noop_error {
-    ($($arg:tt)*) => {};
+    ($($arg:tt)*) => {
+        ()
+    };
 }
 
 #[cfg(not(feature = "logging"))]
 #[macro_export]
 #[doc(hidden)]
 macro_rules! __log_noop_trace {
-    ($($arg:tt)*) => {};
+    ($($arg:tt)*) => {
+        ()
+    };
 }
 
 #[cfg(not(feature = "logging"))]
@@ -76,16 +86,20 @@ pub use __log_noop_warn as warn;
 
 /// Stub for `tracing::Level` when logging is disabled.
 #[cfg(not(feature = "logging"))]
-#[allow(non_upper_case_globals, dead_code)]
-pub mod Level {
+#[allow(dead_code)]
+pub struct Level;
+
+#[cfg(not(feature = "logging"))]
+#[allow(dead_code)]
+impl Level {
     /// Debug level stub.
-    pub const DEBUG: () = ();
+    pub const DEBUG: Self = Self;
     /// Info level stub.
-    pub const INFO: () = ();
+    pub const INFO: Self = Self;
     /// Warn level stub.
-    pub const WARN: () = ();
+    pub const WARN: Self = Self;
     /// Error level stub.
-    pub const ERROR: () = ();
+    pub const ERROR: Self = Self;
     /// Trace level stub.
-    pub const TRACE: () = ();
+    pub const TRACE: Self = Self;
 }

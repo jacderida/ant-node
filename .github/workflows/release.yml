@@ -160,10 +160,14 @@ jobs:
       - name: Build (cross, no logging)
         if: matrix.cross
         run: cross build --release --no-default-features --target ${{ matrix.target }}
+        env:
+          RUSTFLAGS: "-A unused_variables -A unused_assignments -A dead_code"
 
       - name: Build (native, no logging)
         if: ${{ !matrix.cross }}
         run: cargo build --release --no-default-features --target ${{ matrix.target }}
+        env:
+          RUSTFLAGS: "-A unused_variables -A unused_assignments -A dead_code"
 
       - name: Create archive (Unix)
         if: matrix.archive == 'tar.gz'

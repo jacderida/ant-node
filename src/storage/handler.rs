@@ -280,6 +280,10 @@ impl AntProtocol {
 
         // Check if the chunk is already stored so we can tell the client
         // to skip payment (already_stored = true).
+        // The match intentionally logs the error when the `logging` feature is
+        // active. Clippy suggests `unwrap_or_default()` when logging is compiled
+        // out, but keeping the explicit match preserves the diagnostic intent.
+        #[allow(clippy::manual_unwrap_or_default)]
         let already_stored = match self.storage.exists(&request.address) {
             Ok(exists) => exists,
             Err(e) => {

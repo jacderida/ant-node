@@ -30,7 +30,7 @@ echo "Log file: ${LOG_FILE}" | tee -a "$LOG_FILE"
 echo "Start time: $(date)" | tee -a "$LOG_FILE"
 echo "" | tee -a "$LOG_FILE"
 
-# Build the binary (no logging for deployed nodes)
+# Build the binary (no logging)
 echo "Building binary..." | tee -a "$LOG_FILE"
 cargo build --release --no-default-features 2>&1 | tee -a "$LOG_FILE"
 

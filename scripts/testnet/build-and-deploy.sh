@@ -54,7 +54,7 @@ ssh -o StrictHostKeyChecking=no "root@${BUILD_HOST}" "
         cd /root/ant-node
     fi
 
-    # Build release binary (no logging for production deployment)
+    # Build release binary (no logging)
     cargo build --release --no-default-features
 
     # Verify binary

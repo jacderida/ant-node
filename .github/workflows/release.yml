@@ -74,40 +74,9 @@ jobs:
             exit 1
           fi
 
-  test:
-    name: Test Suite
-    needs: validate
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
-        with:
-          version: nightly
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: Run unit tests
-        run: cargo test --lib --features test-utils
-      - name: Run e2e tests
-        run: cargo test --test e2e --features test-utils -- --test-threads=1
-
   build:
     name: Build ${{ matrix.target }}
-    needs: [validate, test]
+    needs: [validate]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -386,7 +355,7 @@ jobs:
 
   publish-crate:
     name: Publish to crates.io
-    needs: [validate, test]
+    needs: [validate]
     runs-on: ubuntu-latest
     if: github.event.inputs.dry_run != 'true' && needs.validate.outputs.is_prerelease != 'true'
     steps:

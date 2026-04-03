@@ -1,5 +1,7 @@
 //! ant-node CLI entry point.
 
+#![cfg_attr(not(feature = "logging"), allow(unused_variables))]
+
 mod cli;
 mod platform;
 

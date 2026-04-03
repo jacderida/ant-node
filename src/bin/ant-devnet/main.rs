@@ -1,5 +1,7 @@
 //! ant-devnet CLI entry point.
 
+#![cfg_attr(not(feature = "logging"), allow(unused_variables))]
+
 mod cli;
 
 use ant_node::devnet::{Devnet, DevnetConfig, DevnetEvmInfo, DevnetManifest};

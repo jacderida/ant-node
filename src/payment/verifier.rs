@@ -602,7 +602,11 @@ impl PaymentVerifier {
             let median_price = *candidate_prices
                 .get(candidate_prices.len() / 2)
                 .ok_or_else(|| Error::Payment("empty candidate pool in merkle proof".into()))?;
-            let total_amount = median_price * Amount::from(1u64 << payment_info.depth);
+            let shift = u32::from(payment_info.depth);
+            let multiplier = 1u64
+                .checked_shl(shift)
+                .ok_or_else(|| Error::Payment("merkle proof depth too large".into()))?;
+            let total_amount = median_price * Amount::from(multiplier);
             total_amount / Amount::from(u64::from(payment_info.depth))
         } else {
             Amount::ZERO

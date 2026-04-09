@@ -182,14 +182,30 @@ pub struct UpgradeConfig {
 }
 
 /// EVM network for payment processing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+///
+/// `Custom` is used by the local-Anvil testnet flow in
+/// `deploy/testnet-v2/`: when an operator stands up a private Anvil
+/// instance with the ANT token + payment vault contracts deployed,
+/// every node points at the Anvil RPC and the deployed addresses
+/// instead of one of the public Arbitrum networks.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "type")]
 pub enum EvmNetworkConfig {
     /// Arbitrum One mainnet.
     #[default]
     ArbitrumOne,
     /// Arbitrum Sepolia testnet.
     ArbitrumSepolia,
+    /// Local / private EVM (e.g. Anvil) with operator-supplied
+    /// contract addresses.
+    Custom {
+        /// HTTP RPC URL of the EVM node (e.g. `http://1.2.3.4:8545`).
+        rpc_url: String,
+        /// Deployed ANT token (ERC-20) contract address.
+        payment_token_address: String,
+        /// Deployed payment vault contract address.
+        payment_vault_address: String,
+    },
 }
 
 /// Payment verification configuration.

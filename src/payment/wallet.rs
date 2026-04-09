@@ -28,12 +28,17 @@ impl WalletConfig {
     /// # Errors
     ///
     /// Returns an error if the address string is invalid.
-    pub fn new(rewards_address: Option<&str>, evm_network: EvmNetworkConfig) -> Result<Self> {
+    pub fn new(rewards_address: Option<&str>, evm_network: &EvmNetworkConfig) -> Result<Self> {
         let rewards_address = rewards_address.map(parse_rewards_address).transpose()?;
 
         let network = match evm_network {
             EvmNetworkConfig::ArbitrumOne => EvmNetwork::ArbitrumOne,
             EvmNetworkConfig::ArbitrumSepolia => EvmNetwork::ArbitrumSepoliaTest,
+            EvmNetworkConfig::Custom {
+                rpc_url,
+                payment_token_address,
+                payment_vault_address,
+            } => EvmNetwork::new_custom(rpc_url, payment_token_address, payment_vault_address),
         };
 
         Ok(Self {
@@ -170,7 +175,7 @@ mod tests {
     fn test_wallet_config_new() {
         let config = WalletConfig::new(
             Some("0x742d35Cc6634C0532925a3b844Bc9e7595916Da2"),
-            EvmNetworkConfig::ArbitrumSepolia,
+            &EvmNetworkConfig::ArbitrumSepolia,
         );
         assert!(config.is_ok());
         let config = config.expect("valid config");
@@ -180,7 +185,7 @@ mod tests {
 
     #[test]
     fn test_wallet_config_no_address() {
-        let config = WalletConfig::new(None, EvmNetworkConfig::ArbitrumOne);
+        let config = WalletConfig::new(None, &EvmNetworkConfig::ArbitrumOne);
         assert!(config.is_ok());
         let config = config.expect("valid config");
         assert!(!config.has_rewards_address());
@@ -216,7 +221,7 @@ mod tests {
 
     #[test]
     fn test_get_rewards_address_none() {
-        let config = WalletConfig::new(None, EvmNetworkConfig::ArbitrumOne).expect("valid config");
+        let config = WalletConfig::new(None, &EvmNetworkConfig::ArbitrumOne).expect("valid config");
         assert!(config.get_rewards_address().is_none());
     }
 
@@ -224,7 +229,7 @@ mod tests {
     fn test_get_rewards_address_some() {
         let config = WalletConfig::new(
             Some("0x742d35Cc6634C0532925a3b844Bc9e7595916Da2"),
-            EvmNetworkConfig::ArbitrumOne,
+            &EvmNetworkConfig::ArbitrumOne,
         )
         .expect("valid config");
         assert!(config.get_rewards_address().is_some());
@@ -255,7 +260,7 @@ mod tests {
 
     #[test]
     fn test_wallet_config_invalid_address() {
-        let result = WalletConfig::new(Some("invalid"), EvmNetworkConfig::ArbitrumOne);
+        let result = WalletConfig::new(Some("invalid"), &EvmNetworkConfig::ArbitrumOne);
         assert!(result.is_err());
     }
 }

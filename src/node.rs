@@ -375,9 +375,14 @@ impl NodeBuilder {
         };
 
         // Create payment verifier
-        let evm_network = match config.payment.evm_network {
+        let evm_network = match &config.payment.evm_network {
             EvmNetworkConfig::ArbitrumOne => EvmNetwork::ArbitrumOne,
             EvmNetworkConfig::ArbitrumSepolia => EvmNetwork::ArbitrumSepoliaTest,
+            EvmNetworkConfig::Custom {
+                rpc_url,
+                payment_token_address,
+                payment_vault_address,
+            } => EvmNetwork::new_custom(rpc_url, payment_token_address, payment_vault_address),
         };
         let payment_config = PaymentVerifierConfig {
             evm: EvmVerifierConfig {

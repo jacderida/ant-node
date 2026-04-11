@@ -4761,7 +4761,7 @@ dependencies = [
 [[package]]
 name = "saorsa-core"
 version = "0.22.0"
-source = "git+https://github.com/saorsa-labs/saorsa-core.git?branch=rc-2026.4.1#4a776272121c0c21aa2a740263afbfaa949c7fdf"
+source = "git+https://github.com/saorsa-labs/saorsa-core.git?branch=rc-2026.4.1#eb859475f3947e47f7defdc87fea2e6aa83989a8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4874,7 +4874,7 @@ dependencies = [
 [[package]]
 name = "saorsa-transport"
 version = "0.31.0"
-source = "git+https://github.com/jacderida/saorsa-transport.git?branch=round4-combined#9a8ffa256ce0f07b4d5b22d97b0010ac1be8ad1d"
+source = "git+https://github.com/saorsa-labs/saorsa-transport.git?branch=rc-2026.4.1#4587a333e697d432163a8a4aa09a79abd738594c"
 dependencies = [
  "anyhow",
  "async-trait",

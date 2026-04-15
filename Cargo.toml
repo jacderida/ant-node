@@ -24,7 +24,7 @@ path = "src/bin/ant-devnet/main.rs"
 
 [dependencies]
 # Core (provides EVERYTHING: networking, DHT, security, trust, storage)
-saorsa-core = "0.23.0"
+saorsa-core = { git = "https://github.com/jacderida/saorsa-core.git", branch = "feat/shard-consumer-instrumentation" }
 saorsa-pqc = "0.5"
 
 # Payment verification - autonomi network lookup + EVM payment

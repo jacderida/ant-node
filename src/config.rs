@@ -1,5 +1,6 @@
 //! Configuration for ant-node.
 
+use evmlib::Network as EvmNetwork;
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
@@ -206,6 +207,23 @@ pub enum EvmNetworkConfig {
         /// Deployed payment vault contract address.
         payment_vault_address: String,
     },
+}
+
+impl EvmNetworkConfig {
+    /// Resolve this config into the concrete `evmlib` network used by
+    /// the payment verifier and the rewards wallet.
+    #[must_use]
+    pub fn into_evm_network(self) -> EvmNetwork {
+        match self {
+            Self::ArbitrumOne => EvmNetwork::ArbitrumOne,
+            Self::ArbitrumSepolia => EvmNetwork::ArbitrumSepoliaTest,
+            Self::Custom {
+                rpc_url,
+                payment_token_address,
+                payment_vault_address,
+            } => EvmNetwork::new_custom(&rpc_url, &payment_token_address, &payment_vault_address),
+        }
+    }
 }
 
 /// Payment verification configuration.

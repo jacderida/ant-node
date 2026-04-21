@@ -90,7 +90,17 @@ const MINIMAL_STABILIZATION_TIMEOUT_SECS: u64 = 30;
 const SMALL_STABILIZATION_TIMEOUT_SECS: u64 = 60;
 
 /// Default timeout for chunk operations (seconds).
-const DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS: u64 = 30;
+///
+/// Covers the full round-trip: QUIC handshake, up to a 4 MiB payload
+/// transfer, and storage confirmation. 30 s was enough on Linux CI but
+/// flaked on `macos-latest` runners (nested-virt, roughly half the CPU
+/// throughput of the Linux pool) when the 5-node testnet's concurrent
+/// QUIC+PQC handshake burst collided with the 4 MiB
+/// `test_chunk_store_on_remote_node` fixture. 90 s is deliberately
+/// conservative; the happy path completes in well under a second on
+/// loopback, so the larger budget only shows up on flakes. Test-only —
+/// no production code path reads this constant.
+const DEFAULT_CHUNK_OPERATION_TIMEOUT_SECS: u64 = 90;
 
 /// Short node-level network timeout for E2E test harness.
 ///

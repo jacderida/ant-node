@@ -19,9 +19,12 @@ use evmlib::Network as EvmNetwork;
 use evmlib::ProofOfPayment;
 use evmlib::RewardsAddress;
 use lru::LruCache;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use saorsa_core::identity::node_identity::peer_id_from_public_key_bytes;
+use saorsa_core::identity::PeerId;
+use saorsa_core::P2PNode;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 /// Minimum allowed size for a payment proof in bytes.
@@ -118,6 +121,11 @@ pub struct PaymentVerifier {
     cache: VerifiedCache,
     /// LRU cache of verified merkle pool hashes → on-chain payment info.
     pool_cache: Mutex<LruCache<PoolHash, OnChainPaymentInfo>>,
+    /// P2P node handle, attached post-construction so merkle verification can
+    /// check that candidate `pub_keys` map to peers actually close to the pool
+    /// midpoint in the live DHT. `None` in unit tests that don't exercise
+    /// merkle verification; production startup MUST call [`attach_p2p_node`].
+    p2p_node: RwLock<Option<Arc<P2PNode>>>,
     /// Configuration.
     config: PaymentVerifierConfig,
 }
@@ -141,8 +149,20 @@ impl PaymentVerifier {
         Self {
             cache,
             pool_cache,
+            p2p_node: RwLock::new(None),
             config,
         }
+    }
+
+    /// Attach the node's [`P2PNode`] handle so merkle-payment verification can
+    /// check candidate `pub_keys` against the DHT's actual closest peers to the
+    /// pool midpoint.
+    ///
+    /// Production startup MUST call this once the `P2PNode` exists. Without
+    /// it, the closeness check fails open (logs a warning and skips) so that
+    /// unit tests which never exercise merkle verification still work.
+    pub fn attach_p2p_node(&self, node: Arc<P2PNode>) {
+        *self.p2p_node.write() = Some(node);
     }
 
     /// Check if payment is required for the given `XorName`.
@@ -287,6 +307,16 @@ impl PaymentVerifier {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn cache_insert(&self, xorname: XorName) {
         self.cache.insert(xorname);
+    }
+
+    /// Pre-populate the merkle pool cache. Testing helper that lets e2e tests
+    /// bypass the on-chain `completedMerklePayments` lookup when the point of
+    /// the test is to exercise merkle-verification logic BEFORE the on-chain
+    /// call (e.g. the pay-yourself closeness check).
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn pool_cache_insert(&self, pool_hash: PoolHash, info: OnChainPaymentInfo) {
+        let mut cache = self.pool_cache.lock();
+        cache.put(pool_hash, info);
     }
 
     /// Verify a single-node EVM payment proof.
@@ -455,6 +485,150 @@ impl PaymentVerifier {
         Ok(())
     }
 
+    /// Minimum number of candidate `pub_keys` (out of 16) whose derived `PeerId`
+    /// must match the DHT's actual closest peers to the pool midpoint address.
+    ///
+    /// Set to a majority rather than 16/16 so routing-table skew between the
+    /// payer's view and this node's view is tolerated. 9/16 absorbs small
+    /// divergence while still biting on fabricated pools: BLAKE3 of a random
+    /// ML-DSA key lands uniformly in the 2^256 ID space, so an attacker
+    /// without real peer identities cannot plant 9 `pub_keys` into the exact
+    /// close group of an arbitrary target address.
+    const CANDIDATE_CLOSENESS_REQUIRED: usize = 9;
+
+    /// Timeout for the authoritative network lookup used by the closeness
+    /// check. A forged pool can trigger exactly one bounded Kademlia lookup;
+    /// subsequent chunks from the same batch hit the pool cache and pay no
+    /// extra cost.
+    const CLOSENESS_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// Verify that the candidate pool's `pub_keys` correspond to peers that
+    /// are actually XOR-closest to the pool midpoint address, by querying
+    /// the DHT for its closest peers to that address and requiring that a
+    /// majority of the candidates match.
+    ///
+    /// **What this blocks**: the "pay yourself" attack. Candidate signatures
+    /// only cover `(price, reward_address, timestamp)` and the `pub_key` bytes —
+    /// nothing ties a candidate to a network-registered identity or to the
+    /// pool neighbourhood. Without this check an attacker can generate 16
+    /// ML-DSA keypairs locally, point all 16 `reward_address` fields at a
+    /// single attacker-controlled wallet, submit the merkle payment, and drain
+    /// their own payment back out.
+    ///
+    /// **How it blocks**: each candidate's `PeerId = BLAKE3(pub_key)`; the DHT
+    /// is the authoritative source of "which peers exist at this XOR
+    /// coordinate". If the attacker's 16 fabricated `PeerId`s are not among
+    /// the peers the network actually lists as closest to the pool address,
+    /// the pool is forged.
+    ///
+    /// **Scope**: a `MerklePaymentProof` carries exactly one `winner_pool`
+    /// (the pool the smart contract selected for the batch). Every storing
+    /// node that receives the proof independently re-runs this check against
+    /// that same pool, so a forged pool is rejected at every node it
+    /// reaches.
+    async fn verify_merkle_candidate_closeness(
+        &self,
+        pool: &evmlib::merkle_payments::MerklePaymentCandidatePool,
+    ) -> Result<()> {
+        // Release the RwLock guard before any await to avoid holding it
+        // across an iterative Kademlia lookup.
+        let attached = self.p2p_node.read().as_ref().map(Arc::clone);
+        let Some(p2p_node) = attached else {
+            // Production startup must call attach_p2p_node. The fail-open
+            // path is only reachable in unit-test setups that construct a
+            // PaymentVerifier directly without exercising merkle checks.
+            crate::logging::warn!(
+                "PaymentVerifier: no P2PNode attached; merkle pay-yourself \
+                 defence DISABLED. Call PaymentVerifier::attach_p2p_node \
+                 during node startup."
+            );
+            return Ok(());
+        };
+
+        let pool_address = pool.midpoint_proof.address();
+
+        // Derive each candidate's would-be PeerId from its pub_key. Fail
+        // closed on malformed keys — the candidate signature check ran
+        // upstream so a valid-looking pool ought to parse cleanly here.
+        let mut candidate_peer_ids = Vec::with_capacity(pool.candidate_nodes.len());
+        for candidate in &pool.candidate_nodes {
+            let pid = peer_id_from_public_key_bytes(&candidate.pub_key).map_err(|e| {
+                Error::Payment(format!(
+                    "Invalid ML-DSA public key in merkle candidate: {e}"
+                ))
+            })?;
+            candidate_peer_ids.push(pid);
+        }
+
+        let lookup_count = pool.candidate_nodes.len();
+        let network_lookup = p2p_node
+            .dht_manager()
+            .find_closest_nodes_network(&pool_address.0, lookup_count);
+        let network_peers =
+            match tokio::time::timeout(Self::CLOSENESS_LOOKUP_TIMEOUT, network_lookup).await {
+                Ok(Ok(peers)) => peers,
+                Ok(Err(e)) => {
+                    debug!(
+                        "Merkle closeness network-lookup failed for pool midpoint {}: {e}",
+                        hex::encode(pool_address.0),
+                    );
+                    return Err(Error::Payment(
+                        "Merkle candidate pool rejected: could not verify candidate \
+                     closeness against the authoritative network view."
+                            .into(),
+                    ));
+                }
+                Err(_) => {
+                    debug!(
+                        "Merkle closeness network-lookup timeout ({:?}) for pool midpoint {}",
+                        Self::CLOSENESS_LOOKUP_TIMEOUT,
+                        hex::encode(pool_address.0),
+                    );
+                    return Err(Error::Payment(
+                        "Merkle candidate pool rejected: authoritative network lookup \
+                     timed out. Retry once the network lookup completes."
+                            .into(),
+                    ));
+                }
+            };
+
+        // Set-membership check against the returned closest-peers list. The
+        // lookup may return fewer than `lookup_count` on a sparse network,
+        // which only tightens the bar — any candidate not in the returned
+        // list counts as unmatched.
+        let network_set: std::collections::HashSet<PeerId> =
+            network_peers.iter().map(|n| n.peer_id).collect();
+        let matched = candidate_peer_ids
+            .iter()
+            .filter(|pid| network_set.contains(pid))
+            .count();
+
+        if matched < Self::CANDIDATE_CLOSENESS_REQUIRED {
+            debug!(
+                "Merkle closeness rejected: {matched}/{} candidates match the DHT's closest peers \
+                 for pool midpoint {} (required: {}, network returned {} peers)",
+                pool.candidate_nodes.len(),
+                hex::encode(pool_address.0),
+                Self::CANDIDATE_CLOSENESS_REQUIRED,
+                network_peers.len(),
+            );
+            return Err(Error::Payment(
+                "Merkle candidate pool rejected: candidate pub_keys do not match the \
+                 network's closest peers to the pool midpoint address. Pools must be \
+                 collected from the pool-address close group, not fabricated off-network."
+                    .into(),
+            ));
+        }
+
+        debug!(
+            "Merkle closeness passed: {matched}/{} candidates matched the DHT's closest peers \
+             for pool midpoint {}",
+            pool.candidate_nodes.len(),
+            hex::encode(pool_address.0),
+        );
+        Ok(())
+    }
+
     /// Verify a merkle batch payment proof.
     ///
     /// This verification flow:
@@ -494,6 +668,15 @@ impl PaymentVerifier {
                 )));
             }
         }
+
+        // Pay-yourself defence: the candidate pub_keys must map to peers the
+        // live DHT actually considers closest to the pool midpoint. Without
+        // this, an attacker can point all 16 reward_address fields at a
+        // self-owned wallet and drain their own payment. Every storing node
+        // runs this check against the single `winner_pool` in the proof, so a
+        // forged pool is rejected everywhere it lands.
+        self.verify_merkle_candidate_closeness(&merkle_proof.winner_pool)
+            .await?;
 
         // Check pool cache first
         let cached_info = {

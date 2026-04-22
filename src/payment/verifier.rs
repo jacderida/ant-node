@@ -618,6 +618,12 @@ impl PaymentVerifier {
     /// per forged `pool_hash`.
     const CLOSENESS_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+    /// Maximum waiter → leader retries when the leader's future was cancelled
+    /// or panicked before publishing a result. Beyond this the waiter returns
+    /// a visible error rather than spinning indefinitely through a
+    /// cancellation cascade.
+    const MAX_LEADER_RETRIES: usize = 4;
+
     /// Verify that the candidate pool's `pub_keys` correspond to peers that
     /// are actually XOR-closest to the pool midpoint address, by querying
     /// the DHT for its closest peers to that address and requiring that a
@@ -678,7 +684,12 @@ impl PaymentVerifier {
         // calls `notify_waiters` between our construction and our poll, the
         // counter has advanced and the future resolves immediately on first
         // poll.
-        loop {
+        //
+        // Bounded retry: if we're a waiter and the leader gets cancelled or
+        // panics (slot.result.get() == None after wake-up), we loop back to
+        // claim leadership. `MAX_LEADER_RETRIES` bounds the attempts so
+        // adversarial cancellation cascades cannot spin this indefinitely.
+        for attempt in 0..=Self::MAX_LEADER_RETRIES {
             // Release the mutex guard explicitly before any await below.
             // Clippy wants `if let ... else` written as `map_or_else`, but
             // any such rewrite re-borrows the locked `inflight` inside the
@@ -713,7 +724,16 @@ impl PaymentVerifier {
                 }
                 // Leader disappeared without publishing (panic or
                 // cancellation). Slot was cleared by the leader's drop
-                // guard; loop to become the new leader.
+                // guard; loop to become the new leader — unless we've
+                // hit the retry bound (see MAX_LEADER_RETRIES).
+                if attempt == Self::MAX_LEADER_RETRIES {
+                    return Err(Error::Payment(
+                        "Merkle candidate pool rejected: closeness leader \
+                         repeatedly failed to publish a result (likely \
+                         repeated cancellation or panic)."
+                            .into(),
+                    ));
+                }
                 continue;
             }
 
@@ -738,6 +758,13 @@ impl PaymentVerifier {
             }
             return result;
         }
+        // Unreachable: the for-loop body always either `return`s or `continue`s,
+        // and the waiter branch's `continue` only runs when `attempt <
+        // Self::MAX_LEADER_RETRIES`. The last iteration's waiter branch returns
+        // via the retry-bound check; the leader branch always returns.
+        Err(Error::Payment(
+            "internal error: closeness retry loop exited without returning".into(),
+        ))
     }
 
     /// Inner closeness check: the actual DHT lookup + set-membership test.
@@ -1917,6 +1944,57 @@ mod tests {
         assert!(
             verifier.inflight_closeness.lock().get(&pool_hash).is_none(),
             "inflight slot must be cleared after the leader finishes"
+        );
+    }
+
+    #[tokio::test]
+    async fn closeness_waiter_reads_leaders_published_failure() {
+        // Prove the waiter path actually surfaces a failure published by a
+        // concurrent leader, without running its own inner check. Insert a
+        // slot, spawn a waiter (which will park on notified_owned), then
+        // publish failure + notify from the outside — simulating what the
+        // leader's `publish` + drop-guard pair does.
+        let verifier = Arc::new(create_test_verifier());
+        let pool_hash = [0x55u8; 32];
+        let slot = Arc::new(ClosenessSlot::new());
+        verifier
+            .inflight_closeness
+            .lock()
+            .put(pool_hash, Arc::clone(&slot));
+
+        let pool = MerklePaymentCandidatePool {
+            midpoint_proof: fake_midpoint_proof(),
+            candidate_nodes: make_candidate_nodes(1_700_000_000),
+        };
+
+        let verifier_c = Arc::clone(&verifier);
+        let pool_c = pool.clone();
+        let waiter = tokio::spawn(async move {
+            verifier_c
+                .verify_merkle_candidate_closeness(&pool_c, pool_hash)
+                .await
+        });
+
+        // Yield so the waiter can run up to its `notified_owned().await`.
+        // A few yields cover both single-threaded and multi-threaded tokio
+        // runtimes regardless of scheduling.
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+
+        // Simulate the leader's `publish` + drop-guard: publish the result,
+        // clear the slot, wake waiters.
+        slot.result
+            .set(Err("forged pool: not close enough".to_string()))
+            .expect("set once");
+        verifier.inflight_closeness.lock().pop(&pool_hash);
+        slot.notify.notify_waiters();
+
+        let result = waiter.await.expect("task panicked");
+        let err = result.expect_err("waiter must return the leader's published failure");
+        assert!(
+            err.to_string().contains("forged pool"),
+            "waiter must surface the leader's error message, got: {err}"
         );
     }
 

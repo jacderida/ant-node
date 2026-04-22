@@ -4558,9 +4558,9 @@ dependencies = [
 
 [[package]]
 name = "ruint"
-version = "1.17.2"
+version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c141e807189ad38a07276942c6623032d3753c8859c146104ac2e4d68865945a"
+checksum = "0298da754d1395046b0afdc2f20ee76d29a8ae310cd30ffa84ed42acba9cb12a"
 dependencies = [
  "alloy-rlp",
  "ark-ff 0.3.0",
@@ -4789,7 +4789,7 @@ dependencies = [
 [[package]]
 name = "saorsa-core"
 version = "0.22.0"
-source = "git+https://github.com/saorsa-labs/saorsa-core.git?branch=mick/always-masque-relay-rebased#7e2fb8433ba1a4328a90a7ba853ed1137a41aef0"
+source = "git+https://github.com/saorsa-labs/saorsa-core.git?branch=mick/always-masque-relay-rebased#65583ed9cbdf79b185f315b13d8c1463ca60e309"
 dependencies = [
  "anyhow",
  "async-trait",

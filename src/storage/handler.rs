@@ -265,9 +265,14 @@ impl AntProtocol {
                 //    PUTs have no proof to forward, and the chunk would have
                 //    already replicated on the original write that carried one.
                 if let (Some(ref tx), Some(proof)) = (&self.fresh_write_tx, request.payment_proof) {
+                    // `request.content` is now `bytes::Bytes`; FreshWriteEvent
+                    // still carries the chunk as `Vec<u8>` for compatibility
+                    // with the replication wire format, so materialise once
+                    // here. Done only on the success path, where storage has
+                    // already accepted the chunk.
                     let event = FreshWriteEvent {
                         key: address,
-                        data: request.content,
+                        data: request.content.to_vec(),
                         payment_proof: proof,
                     };
                     if tx.send(event).is_err() {
@@ -551,7 +556,7 @@ mod tests {
         // Pre-populate payment cache so EVM verification is bypassed
         protocol.payment_verifier().cache_insert(address);
 
-        let put_request = ChunkPutRequest::new(address, content.to_vec());
+        let put_request = ChunkPutRequest::new(address, Bytes::copy_from_slice(content));
         let put_msg = ChunkMessage {
             request_id: 1,
             body: ChunkMessageBody::PutRequest(put_request),
@@ -643,7 +648,7 @@ mod tests {
         // Pre-populate cache for the wrong address so we test address mismatch, not payment
         protocol.payment_verifier().cache_insert(wrong_address);
 
-        let put_request = ChunkPutRequest::new(wrong_address, content.to_vec());
+        let put_request = ChunkPutRequest::new(wrong_address, Bytes::copy_from_slice(content));
         let put_msg = ChunkMessage {
             request_id: 20,
             body: ChunkMessageBody::PutRequest(put_request),
@@ -676,7 +681,7 @@ mod tests {
         let content = vec![0u8; MAX_CHUNK_SIZE + 1];
         let address = LmdbStorage::compute_address(&content);
 
-        let put_request = ChunkPutRequest::new(address, content);
+        let put_request = ChunkPutRequest::new(address, Bytes::from(content));
         let put_msg = ChunkMessage {
             request_id: 30,
             body: ChunkMessageBody::PutRequest(put_request),
@@ -711,7 +716,7 @@ mod tests {
         // Pre-populate cache so EVM verification is bypassed
         protocol.payment_verifier().cache_insert(address);
 
-        let put_request = ChunkPutRequest::new(address, content.to_vec());
+        let put_request = ChunkPutRequest::new(address, Bytes::copy_from_slice(content));
         let put_msg = ChunkMessage {
             request_id: 40,
             body: ChunkMessageBody::PutRequest(put_request),
@@ -786,7 +791,7 @@ mod tests {
         assert_eq!(stats_after.additions, 1);
 
         // PUT should succeed (cache hit)
-        let put_request = ChunkPutRequest::new(address, content.to_vec());
+        let put_request = ChunkPutRequest::new(address, Bytes::copy_from_slice(content));
         let put_msg = ChunkMessage {
             request_id: 100,
             body: ChunkMessageBody::PutRequest(put_request),
@@ -817,7 +822,7 @@ mod tests {
         protocol.payment_verifier().cache_insert(address);
 
         // First PUT
-        let put_request = ChunkPutRequest::new(address, content.to_vec());
+        let put_request = ChunkPutRequest::new(address, Bytes::copy_from_slice(content));
         let put_msg = ChunkMessage {
             request_id: 110,
             body: ChunkMessageBody::PutRequest(put_request),
@@ -858,7 +863,7 @@ mod tests {
         let address = LmdbStorage::compute_address(content);
         protocol.payment_verifier().cache_insert(address);
 
-        let put_request = ChunkPutRequest::new(address, content.to_vec());
+        let put_request = ChunkPutRequest::new(address, Bytes::copy_from_slice(content));
         let put_msg = ChunkMessage {
             request_id: 120,
             body: ChunkMessageBody::PutRequest(put_request),
@@ -968,7 +973,7 @@ mod tests {
 
         // Store the chunk first
         protocol.payment_verifier().cache_insert(address);
-        let put_request = ChunkPutRequest::new(address, content.to_vec());
+        let put_request = ChunkPutRequest::new(address, Bytes::copy_from_slice(content));
         let put_msg = ChunkMessage {
             request_id: 300,
             body: ChunkMessageBody::PutRequest(put_request),

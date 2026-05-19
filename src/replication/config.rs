@@ -94,9 +94,9 @@ pub fn max_parallel_fetch() -> usize {
 }
 
 /// Minimum audit-scheduler cadence.
-const AUDIT_TICK_INTERVAL_MIN_SECS: u64 = 30 * 60;
+const AUDIT_TICK_INTERVAL_MIN_SECS: u64 = 10 * 60;
 /// Maximum audit-scheduler cadence.
-const AUDIT_TICK_INTERVAL_MAX_SECS: u64 = 60 * 60;
+const AUDIT_TICK_INTERVAL_MAX_SECS: u64 = 20 * 60;
 
 /// Audit scheduler cadence range (min).
 pub const AUDIT_TICK_INTERVAL_MIN: Duration = Duration::from_secs(AUDIT_TICK_INTERVAL_MIN_SECS);
@@ -145,7 +145,7 @@ const PENDING_VERIFY_MAX_AGE_SECS: u64 = 30 * 60;
 pub const PENDING_VERIFY_MAX_AGE: Duration = Duration::from_secs(PENDING_VERIFY_MAX_AGE_SECS);
 
 /// Trust event weight for confirmed audit failures.
-pub const AUDIT_FAILURE_TRUST_WEIGHT: f64 = 2.0;
+pub const AUDIT_FAILURE_TRUST_WEIGHT: f64 = 5.0;
 
 /// Maximum number of prune-confirmation audit challenges sent per prune pass.
 pub const MAX_PRUNE_AUDIT_CHALLENGES_PER_PASS: usize = 64;
@@ -402,6 +402,11 @@ mod tests {
             config.prune_hysteresis_duration,
             Duration::from_secs(3 * 24 * 60 * 60)
         );
+    }
+
+    #[test]
+    fn audit_failure_weight_matches_max_consumer_trust_event_weight() {
+        assert_eq!(AUDIT_FAILURE_TRUST_WEIGHT.to_bits(), 5.0_f64.to_bits());
     }
 
     #[test]
@@ -694,8 +699,8 @@ mod tests {
     #[test]
     fn scenario_31_audit_cadence_within_jitter_bounds() {
         let config = ReplicationConfig {
-            audit_tick_interval_min: Duration::from_secs(1800),
-            audit_tick_interval_max: Duration::from_secs(3600),
+            audit_tick_interval_min: Duration::from_secs(600),
+            audit_tick_interval_max: Duration::from_secs(1200),
             ..ReplicationConfig::default()
         };
 
@@ -722,7 +727,7 @@ mod tests {
             prev = interval;
         }
 
-        // With 100 samples from a 30-minute range, at least two should differ
+        // With 100 samples from a 10-minute range, at least two should differ
         // (probabilistically near-certain).
         assert!(
             saw_different,

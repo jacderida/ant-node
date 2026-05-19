@@ -75,6 +75,18 @@ const RR_PREFIX: &str = "/rr/";
 /// Boxed future type for in-flight fetch tasks.
 type FetchFuture = Pin<Box<dyn Future<Output = (XorName, Option<FetchOutcome>)> + Send>>;
 
+/// Shared dependencies for one verification worker cycle.
+struct VerificationCycleContext<'a> {
+    p2p_node: &'a Arc<P2PNode>,
+    paid_list: &'a Arc<PaidList>,
+    storage: &'a Arc<LmdbStorage>,
+    queues: &'a Arc<RwLock<ReplicationQueues>>,
+    config: &'a ReplicationConfig,
+    bootstrap_state: &'a Arc<RwLock<BootstrapState>>,
+    is_bootstrapping: &'a Arc<RwLock<bool>>,
+    bootstrap_complete_notify: &'a Arc<Notify>,
+}
+
 /// Fetch worker polling interval in milliseconds.
 const FETCH_WORKER_POLL_MS: u64 = 100;
 
@@ -735,11 +747,17 @@ impl ReplicationEngine {
                     () = tokio::time::sleep(
                         std::time::Duration::from_millis(VERIFICATION_WORKER_POLL_MS)
                     ) => {
-                        run_verification_cycle(
-                            &p2p, &paid_list, &storage, &queues, &config,
-                            &bootstrap_state, &is_bootstrapping,
-                            &bootstrap_complete_notify,
-                        ).await;
+                        let ctx = VerificationCycleContext {
+                            p2p_node: &p2p,
+                            paid_list: &paid_list,
+                            storage: &storage,
+                            queues: &queues,
+                            config: &config,
+                            bootstrap_state: &bootstrap_state,
+                            is_bootstrapping: &is_bootstrapping,
+                            bootstrap_complete_notify: &bootstrap_complete_notify,
+                        };
+                        run_verification_cycle(ctx).await;
                     }
                 }
             }
@@ -1802,16 +1820,18 @@ async fn admit_and_queue_hints(
 
 /// Run one verification cycle: process pending keys through quorum checks.
 #[allow(clippy::too_many_lines)]
-async fn run_verification_cycle(
-    p2p_node: &Arc<P2PNode>,
-    paid_list: &Arc<PaidList>,
-    storage: &Arc<LmdbStorage>,
-    queues: &Arc<RwLock<ReplicationQueues>>,
-    config: &ReplicationConfig,
-    bootstrap_state: &Arc<RwLock<BootstrapState>>,
-    is_bootstrapping: &Arc<RwLock<bool>>,
-    bootstrap_complete_notify: &Arc<Notify>,
-) {
+async fn run_verification_cycle(ctx: VerificationCycleContext<'_>) {
+    let VerificationCycleContext {
+        p2p_node,
+        paid_list,
+        storage,
+        queues,
+        config,
+        bootstrap_state,
+        is_bootstrapping,
+        bootstrap_complete_notify,
+    } = ctx;
+
     // Evict stale entries that have been pending too long (e.g. unreachable
     // verification targets during a network partition).
     {

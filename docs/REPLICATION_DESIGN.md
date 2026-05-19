@@ -251,9 +251,9 @@ PendingVerify
 QuorumVerified
   -> QueuedForFetch
 PaidListVerified
-  -> QueuedForFetch     (admitted replica-hint pipeline only; at least one source responded Present)
-  -> FetchAbandoned     (admitted replica-hint pipeline; no peer responded Present — indicates possible data loss, see note below)
-  -> Idle               (paid-hint-only pipeline; `PaidForList` updated)
+  -> QueuedForFetch     (fetch-eligible key; at least one source responded Present)
+  -> FetchAbandoned     (fetch-eligible key; no peer responded Present — indicates possible data loss, see note below)
+  -> Idle               (not fetch-eligible; `PaidForList` updated)
 QueuedForFetch
   -> Fetching
 Fetching

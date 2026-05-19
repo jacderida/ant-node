@@ -719,6 +719,7 @@ impl ReplicationEngine {
 
     fn start_verification_worker(&mut self) {
         let p2p = Arc::clone(&self.p2p_node);
+        let storage = Arc::clone(&self.storage);
         let queues = Arc::clone(&self.queues);
         let paid_list = Arc::clone(&self.paid_list);
         let config = Arc::clone(&self.config);
@@ -735,7 +736,7 @@ impl ReplicationEngine {
                         std::time::Duration::from_millis(VERIFICATION_WORKER_POLL_MS)
                     ) => {
                         run_verification_cycle(
-                            &p2p, &paid_list, &queues, &config,
+                            &p2p, &paid_list, &storage, &queues, &config,
                             &bootstrap_state, &is_bootstrapping,
                             &bootstrap_complete_notify,
                         ).await;
@@ -1804,6 +1805,7 @@ async fn admit_and_queue_hints(
 async fn run_verification_cycle(
     p2p_node: &Arc<P2PNode>,
     paid_list: &Arc<PaidList>,
+    storage: &Arc<LmdbStorage>,
     queues: &Arc<RwLock<ReplicationQueues>>,
     config: &ReplicationConfig,
     bootstrap_state: &Arc<RwLock<BootstrapState>>,
@@ -1864,27 +1866,31 @@ async fn run_verification_cycle(
     }
 
     if !local_paid_paid_only_keys.is_empty() {
-        let mut non_responsible_paid_only = Vec::new();
+        let mut terminal_paid_only = Vec::new();
         for key in local_paid_paid_only_keys {
-            if admission::is_responsible(&self_id, &key, p2p_node, config.close_group_size).await {
+            if storage.exists(&key).unwrap_or(false) {
+                terminal_paid_only.push(key);
+            } else if admission::is_responsible(&self_id, &key, p2p_node, config.close_group_size)
+                .await
+            {
                 local_paid_presence_probe_keys.push(key);
             } else {
-                non_responsible_paid_only.push(key);
+                terminal_paid_only.push(key);
             }
         }
 
-        if !non_responsible_paid_only.is_empty() {
+        if !terminal_paid_only.is_empty() {
             let mut q = queues.write().await;
-            for key in non_responsible_paid_only {
+            for key in terminal_paid_only {
                 q.remove_pending(&key);
                 terminal_keys.push(key);
             }
         }
     }
 
-    // Step 1b: Local paid-list hit for replica hints. Per Section 9 step 4,
-    // authorization succeeds immediately; run a presence-only probe to find
-    // any holder we can fetch from.
+    // Step 1b: Local paid-list hit for fetch-eligible keys. Per Section 9
+    // step 4, authorization succeeds immediately; run a presence-only probe
+    // to find any holder we can fetch from.
     if !local_paid_presence_probe_keys.is_empty() {
         let targets = quorum::compute_presence_targets(
             &local_paid_presence_probe_keys,
@@ -1903,6 +1909,11 @@ async fn run_verification_cycle(
 
         let mut q = queues.write().await;
         for key in local_paid_presence_probe_keys {
+            if storage.exists(&key).unwrap_or(false) {
+                q.remove_pending(&key);
+                terminal_keys.push(key);
+                continue;
+            }
             let sources = evidence.get(&key).map_or_else(Vec::new, |ev| {
                 quorum::present_sources_for_key(&key, ev, &targets)
             });
@@ -1976,6 +1987,7 @@ async fn run_verification_cycle(
                     KeyVerificationOutcome::QuorumVerified { .. }
                         | KeyVerificationOutcome::PaidListVerified { .. }
                 )
+                && !storage.exists(key).unwrap_or(false)
                 && admission::is_responsible(&self_id, key, p2p_node, config.close_group_size).await
             {
                 paid_only_fetch_keys.insert(*key);

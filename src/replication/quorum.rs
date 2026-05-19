@@ -29,6 +29,9 @@ pub struct VerificationTargets {
     pub quorum_targets: HashMap<XorName, Vec<PeerId>>,
     /// Per-key: `PaidCloseGroup` peers for paid-list majority.
     pub paid_targets: HashMap<XorName, Vec<PeerId>>,
+    /// Per-key: self-inclusive paid close-group size used to compute
+    /// `ConfirmNeeded(K)`.
+    pub paid_group_sizes: HashMap<XorName, usize>,
     /// Union of all target peers across all keys.
     pub all_peers: HashSet<PeerId>,
     /// Which keys each peer should be queried about.
@@ -52,6 +55,7 @@ pub async fn compute_verification_targets(
     let mut targets = VerificationTargets {
         quorum_targets: HashMap::new(),
         paid_targets: HashMap::new(),
+        paid_group_sizes: HashMap::new(),
         all_peers: HashSet::new(),
         peer_to_keys: HashMap::new(),
         peer_to_paid_keys: HashMap::new(),
@@ -73,6 +77,7 @@ pub async fn compute_verification_targets(
         let paid_closest = dht
             .find_closest_nodes_local_with_self(&key, config.paid_list_close_group_size)
             .await;
+        let paid_group_size = paid_closest.len();
         let paid_peers: Vec<PeerId> = paid_closest
             .iter()
             .filter(|n| n.peer_id != *self_id)
@@ -96,10 +101,57 @@ pub async fn compute_verification_targets(
 
         targets.quorum_targets.insert(key, quorum_peers);
         targets.paid_targets.insert(key, paid_peers);
+        targets.paid_group_sizes.insert(key, paid_group_size);
     }
 
     // Deduplicate keys per peer (a peer in both quorum and paid targets for
     // the same key would have it listed twice).
+    for keys_list in targets.peer_to_keys.values_mut() {
+        keys_list.sort_unstable();
+        keys_list.dedup();
+    }
+
+    targets
+}
+
+/// Compute presence-only verification targets for locally paid keys.
+///
+/// Local `PaidForList` membership authorizes the key already; this target set
+/// is only used to discover peers that can serve the record bytes.
+pub async fn compute_presence_targets(
+    keys: &[XorName],
+    p2p_node: &Arc<P2PNode>,
+    config: &ReplicationConfig,
+    self_id: &PeerId,
+) -> VerificationTargets {
+    let dht = p2p_node.dht_manager();
+    let mut targets = VerificationTargets {
+        quorum_targets: HashMap::new(),
+        paid_targets: HashMap::new(),
+        paid_group_sizes: HashMap::new(),
+        all_peers: HashSet::new(),
+        peer_to_keys: HashMap::new(),
+        peer_to_paid_keys: HashMap::new(),
+    };
+
+    for &key in keys {
+        let closest = dht
+            .find_closest_nodes_local(&key, config.close_group_size)
+            .await;
+        let quorum_peers: Vec<PeerId> = closest
+            .iter()
+            .filter(|n| n.peer_id != *self_id)
+            .map(|n| n.peer_id)
+            .collect();
+
+        for &peer in &quorum_peers {
+            targets.all_peers.insert(peer);
+            targets.peer_to_keys.entry(peer).or_default().push(key);
+        }
+
+        targets.quorum_targets.insert(key, quorum_peers);
+    }
+
     for keys_list in targets.peer_to_keys.values_mut() {
         keys_list.sort_unstable();
         keys_list.dedup();
@@ -198,7 +250,11 @@ pub fn evaluate_key_evidence(
     }
 
     let quorum_needed = config.quorum_needed(quorum_peers.len());
-    let paid_group_size = paid_peers.len();
+    let paid_group_size = targets
+        .paid_group_sizes
+        .get(key)
+        .copied()
+        .unwrap_or(paid_peers.len());
     let confirm_needed = ReplicationConfig::confirm_needed(paid_group_size);
 
     // Step 10: Presence quorum reached.
@@ -230,6 +286,38 @@ pub fn evaluate_key_evidence(
 
     // Step 15: Neither success nor fail-fast.
     KeyVerificationOutcome::QuorumInconclusive
+}
+
+/// Return peers that gave positive presence evidence for a key.
+///
+/// Only peers in the computed verification target sets are considered.
+#[must_use]
+pub fn present_sources_for_key(
+    key: &XorName,
+    evidence: &KeyVerificationEvidence,
+    targets: &VerificationTargets,
+) -> Vec<PeerId> {
+    let mut present_peers = Vec::new();
+
+    if let Some(quorum_peers) = targets.quorum_targets.get(key) {
+        for peer in quorum_peers {
+            if matches!(evidence.presence.get(peer), Some(PresenceEvidence::Present)) {
+                present_peers.push(*peer);
+            }
+        }
+    }
+
+    if let Some(paid_peers) = targets.paid_targets.get(key) {
+        for peer in paid_peers {
+            if matches!(evidence.presence.get(peer), Some(PresenceEvidence::Present))
+                && !present_peers.contains(peer)
+            {
+                present_peers.push(*peer);
+            }
+        }
+    }
+
+    present_peers
 }
 
 // ---------------------------------------------------------------------------
@@ -485,8 +573,10 @@ mod tests {
             keys_list.dedup();
         }
 
+        let paid_group_size = paid_peers.len();
         VerificationTargets {
             quorum_targets: std::iter::once((key.to_owned(), quorum_peers)).collect(),
+            paid_group_sizes: std::iter::once((key.to_owned(), paid_group_size)).collect(),
             paid_targets: std::iter::once((key.to_owned(), paid_peers)).collect(),
             all_peers,
             peer_to_keys,
@@ -710,6 +800,66 @@ mod tests {
     }
 
     #[test]
+    fn paid_list_majority_uses_self_inclusive_paid_group_size() {
+        let key = xor_name_from_byte(0x61);
+        let config = ReplicationConfig::default();
+
+        // Real target computation uses PaidCloseGroup(K), which is
+        // self-inclusive. If self is in a 20-node paid group and does not
+        // already have local paid-list state, 10 remote confirmations are not
+        // enough: ConfirmNeeded(20) is 11.
+        let paid_peers: Vec<PeerId> = (1..=19).map(peer_id_from_byte).collect();
+        let mut targets = single_key_targets(&key, vec![], paid_peers.clone());
+        targets.paid_group_sizes.insert(key, 20);
+
+        let ten_confirmations = build_evidence(
+            vec![],
+            paid_peers
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    (
+                        *p,
+                        if i < 10 {
+                            PaidListEvidence::Confirmed
+                        } else {
+                            PaidListEvidence::NotFound
+                        },
+                    )
+                })
+                .collect(),
+        );
+        let outcome = evaluate_key_evidence(&key, &ten_confirmations, &targets, &config);
+        assert!(
+            matches!(outcome, KeyVerificationOutcome::QuorumFailed),
+            "10/20 paid confirmations must not authorize the key, got {outcome:?}"
+        );
+
+        let eleven_confirmations = build_evidence(
+            vec![],
+            paid_peers
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    (
+                        *p,
+                        if i < 11 {
+                            PaidListEvidence::Confirmed
+                        } else {
+                            PaidListEvidence::NotFound
+                        },
+                    )
+                })
+                .collect(),
+        );
+        let outcome = evaluate_key_evidence(&key, &eleven_confirmations, &targets, &config);
+        assert!(
+            matches!(outcome, KeyVerificationOutcome::PaidListVerified { .. }),
+            "11/20 paid confirmations should authorize the key, got {outcome:?}"
+        );
+    }
+
+    #[test]
     fn quorum_fails_with_zero_targets_no_paid() {
         let key = xor_name_from_byte(0x70);
         let config = ReplicationConfig::default();
@@ -903,6 +1053,7 @@ mod tests {
         let targets = VerificationTargets {
             quorum_targets: std::iter::once((key_a, vec![peer])).collect(),
             paid_targets: std::iter::once((key_b, vec![peer])).collect(),
+            paid_group_sizes: [(key_a, 0), (key_b, 1)].into_iter().collect(),
             all_peers: std::iter::once(peer).collect(),
             peer_to_keys: std::iter::once((peer, vec![key_a, key_b])).collect(),
             peer_to_paid_keys: std::iter::once((peer, std::iter::once(key_b).collect())).collect(),
@@ -1131,12 +1282,17 @@ mod tests {
         quorum_targets.insert(*key_b, quorum_peers_b);
 
         let mut paid_targets = HashMap::new();
+        let paid_group_size_a = paid_peers_a.len();
+        let paid_group_size_b = paid_peers_b.len();
         paid_targets.insert(*key_a, paid_peers_a);
         paid_targets.insert(*key_b, paid_peers_b);
 
         VerificationTargets {
             quorum_targets,
             paid_targets,
+            paid_group_sizes: [(*key_a, paid_group_size_a), (*key_b, paid_group_size_b)]
+                .into_iter()
+                .collect(),
             all_peers,
             peer_to_keys,
             peer_to_paid_keys,

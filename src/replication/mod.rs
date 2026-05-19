@@ -1830,6 +1830,8 @@ async fn run_verification_cycle(
 
     // Step 1: Check local PaidForList for fast-path authorization (Section 9,
     // step 4).
+    let mut local_paid_presence_probe_keys = Vec::new();
+    let mut local_paid_paid_only_keys = Vec::new();
     let mut keys_needing_network = Vec::new();
     let mut terminal_keys: Vec<XorName> = Vec::new();
     {
@@ -1838,16 +1840,83 @@ async fn run_verification_cycle(
             if paid_list.contains(key).unwrap_or(false) {
                 if let Some(entry) = q.get_pending_mut(key) {
                     entry.state = VerificationState::PaidListVerified;
-                    if entry.pipeline == HintPipeline::PaidOnly {
-                        // Paid-only pipeline: PaidForList already updated, done.
-                        q.remove_pending(key);
-                        terminal_keys.push(*key);
-                        continue;
+                    match entry.pipeline {
+                        HintPipeline::PaidOnly => {
+                            // Paid-only + local paid state needs one more
+                            // responsibility check outside this lock: if we
+                            // are also in the storage close group, the hint
+                            // can repair a missing replica.
+                            local_paid_paid_only_keys.push(*key);
+                        }
+                        HintPipeline::Replica => {
+                            // Local paid-list membership authorizes the key.
+                            // We still need a presence probe to discover fetch
+                            // sources, but we must not require remote paid
+                            // majority or presence quorum.
+                            local_paid_presence_probe_keys.push(*key);
+                        }
                     }
                 }
+            } else {
+                keys_needing_network.push(*key);
             }
-            // Both branches (paid locally or not) need network verification.
-            keys_needing_network.push(*key);
+        }
+    }
+
+    if !local_paid_paid_only_keys.is_empty() {
+        let mut non_responsible_paid_only = Vec::new();
+        for key in local_paid_paid_only_keys {
+            if admission::is_responsible(&self_id, &key, p2p_node, config.close_group_size).await {
+                local_paid_presence_probe_keys.push(key);
+            } else {
+                non_responsible_paid_only.push(key);
+            }
+        }
+
+        if !non_responsible_paid_only.is_empty() {
+            let mut q = queues.write().await;
+            for key in non_responsible_paid_only {
+                q.remove_pending(&key);
+                terminal_keys.push(key);
+            }
+        }
+    }
+
+    // Step 1b: Local paid-list hit for replica hints. Per Section 9 step 4,
+    // authorization succeeds immediately; run a presence-only probe to find
+    // any holder we can fetch from.
+    if !local_paid_presence_probe_keys.is_empty() {
+        let targets = quorum::compute_presence_targets(
+            &local_paid_presence_probe_keys,
+            p2p_node,
+            config,
+            &self_id,
+        )
+        .await;
+        let evidence = quorum::run_verification_round(
+            &local_paid_presence_probe_keys,
+            &targets,
+            p2p_node,
+            config,
+        )
+        .await;
+
+        let mut q = queues.write().await;
+        for key in local_paid_presence_probe_keys {
+            let sources = evidence.get(&key).map_or_else(Vec::new, |ev| {
+                quorum::present_sources_for_key(&key, ev, &targets)
+            });
+            q.remove_pending(&key);
+            if sources.is_empty() {
+                warn!(
+                    "Locally paid key {} has no responding holders (possible data loss)",
+                    hex::encode(key)
+                );
+                terminal_keys.push(key);
+            } else {
+                let distance = crate::client::xor_distance(&key, p2p_node.peer_id().as_bytes());
+                q.enqueue_fetch(key, distance, sources);
+            }
         }
     }
 
@@ -1895,21 +1964,41 @@ async fn run_verification_cycle(
             }
         }
 
+        // Paid-only hints normally update PaidForList only. If this node is
+        // also storage-responsible for the key, a verified paid-only hint can
+        // safely repair a missing replica using sources from the same
+        // verification round.
+        let mut paid_only_fetch_keys: HashSet<XorName> = HashSet::new();
+        for (key, outcome, pipeline) in &evaluated {
+            if *pipeline == HintPipeline::PaidOnly
+                && matches!(
+                    outcome,
+                    KeyVerificationOutcome::QuorumVerified { .. }
+                        | KeyVerificationOutcome::PaidListVerified { .. }
+                )
+                && admission::is_responsible(&self_id, key, p2p_node, config.close_group_size).await
+            {
+                paid_only_fetch_keys.insert(*key);
+            }
+        }
+
         // Step 5: Update queues with the evaluated outcomes.
         let mut q = queues.write().await;
         for (key, outcome, pipeline) in evaluated {
             match outcome {
                 KeyVerificationOutcome::QuorumVerified { sources }
                 | KeyVerificationOutcome::PaidListVerified { sources } => {
-                    if pipeline == HintPipeline::Replica && !sources.is_empty() {
+                    let fetch_eligible =
+                        pipeline == HintPipeline::Replica || paid_only_fetch_keys.contains(&key);
+                    if fetch_eligible && !sources.is_empty() {
                         let distance =
                             crate::client::xor_distance(&key, p2p_node.peer_id().as_bytes());
                         q.remove_pending(&key);
                         q.enqueue_fetch(key, distance, sources);
                         // Not terminal — key moved to fetch queue.
-                    } else if pipeline == HintPipeline::Replica && sources.is_empty() {
+                    } else if fetch_eligible && sources.is_empty() {
                         warn!(
-                            "Verified key {} has no holders (possible data loss)",
+                            "Verified responsible key {} has no holders (possible data loss)",
                             hex::encode(key)
                         );
                         q.remove_pending(&key);
@@ -2137,9 +2226,21 @@ async fn execute_single_fetch(
                 ReplicationMessageBody::FetchResponse(protocol::FetchResponse::NotFound {
                     ..
                 }) => {
-                    // NotFound is a legitimate response (peer may have pruned
-                    // the data). No trust penalty — just retry another source.
-                    debug!("Fetch: peer {source} does not have {}", hex::encode(key));
+                    // This peer was selected as a fetch source because it
+                    // recently answered `Present` during verification. A
+                    // subsequent NotFound is evidence of a stale/false claim
+                    // or chunk wiping, so penalize lightly and try another
+                    // verified source.
+                    warn!(
+                        "Fetch: verified source {source} returned NotFound for {}",
+                        hex::encode(key)
+                    );
+                    p2p_node
+                        .report_trust_event(
+                            &source,
+                            TrustEvent::ApplicationFailure(REPLICATION_TRUST_WEIGHT),
+                        )
+                        .await;
                     FetchOutcome {
                         key,
                         result: FetchResult::SourceFailed,

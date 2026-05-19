@@ -4,7 +4,6 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
 
 use crate::logging::{debug, info, warn};
 use rand::seq::SliceRandom;
@@ -68,7 +67,6 @@ pub async fn audit_tick(
     storage: &Arc<LmdbStorage>,
     config: &ReplicationConfig,
     sync_history: &HashMap<PeerId, PeerSyncRecord>,
-    bootstrap_claims: &HashMap<PeerId, Instant>,
     is_bootstrapping: bool,
 ) -> AuditTickResult {
     // Invariant 19: never audit while still bootstrapping.
@@ -77,22 +75,11 @@ pub async fn audit_tick(
     }
 
     let dht = p2p_node.dht_manager();
-    let now = Instant::now();
 
     // Step 2: Select one eligible peer (has RepairOpportunity) at random.
-    // Exclude peers whose bootstrap claim has exceeded the grace period —
-    // they are already penalized in handle_audit_result and should not
-    // consume an audit slot.
-    let eligible_peers: Vec<PeerId> = sync_history
-        .iter()
-        .filter(|(_, record)| record.has_repair_opportunity())
-        .filter(|(peer, _)| {
-            bootstrap_claims.get(peer).map_or(true, |first_seen| {
-                now.duration_since(*first_seen) <= config.bootstrap_claim_grace_period
-            })
-        })
-        .map(|(peer, _)| *peer)
-        .collect();
+    // Peers with active bootstrap claims remain eligible. A follow-up audit is
+    // how we observe a continued claim and apply past-grace abuse handling.
+    let eligible_peers = eligible_audit_peers(sync_history);
 
     if eligible_peers.is_empty() {
         return AuditTickResult::Idle;
@@ -302,6 +289,14 @@ pub async fn audit_tick(
             .await
         }
     }
+}
+
+fn eligible_audit_peers(sync_history: &HashMap<PeerId, PeerSyncRecord>) -> Vec<PeerId> {
+    sync_history
+        .iter()
+        .filter(|(_, record)| record.has_repair_opportunity())
+        .map(|(peer, _)| *peer)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -558,8 +553,9 @@ pub async fn handle_audit_challenge(
 mod tests {
     use super::*;
     use crate::replication::protocol::compute_audit_digest;
-    use crate::replication::types::NeighborSyncState;
+    use crate::replication::types::{BootstrapClaimObservation, NeighborSyncState};
     use crate::storage::LmdbStorageConfig;
+    use std::time::Instant;
     use tempfile::TempDir;
 
     /// Simulated stored chunk count for tests. Large enough that the dynamic
@@ -1107,6 +1103,36 @@ mod tests {
         assert!(synced_with_cycle.has_repair_opportunity());
     }
 
+    #[test]
+    fn expired_bootstrap_claim_does_not_remove_peer_from_audit_eligibility() {
+        let peer = peer_id_from_bytes([0x57; 32]);
+        let mut sync_history = HashMap::new();
+        sync_history.insert(
+            peer,
+            PeerSyncRecord {
+                last_sync: Some(Instant::now()),
+                cycles_since_sync: 1,
+            },
+        );
+
+        let mut bootstrap_claims = HashMap::new();
+        let first_seen = Instant::now()
+            .checked_sub(
+                crate::replication::config::BOOTSTRAP_CLAIM_GRACE_PERIOD
+                    + std::time::Duration::from_secs(1),
+            )
+            .unwrap_or_else(Instant::now);
+        bootstrap_claims.insert(peer, first_seen);
+
+        let eligible = eligible_audit_peers(&sync_history);
+
+        assert!(bootstrap_claims.contains_key(&peer));
+        assert!(
+            eligible.contains(&peer),
+            "continued bootstrap claims must remain auditable so past-grace abuse can be observed"
+        );
+    }
+
     // -- Audit response must match key count --------------------------------------
 
     #[tokio::test]
@@ -1354,11 +1380,23 @@ mod tests {
         let peer = PeerId::from_bytes([0x47; 32]);
         let mut state = NeighborSyncState::new_cycle(vec![peer]);
         let now = Instant::now();
-        state.bootstrap_claims.entry(peer).or_insert(now);
+        let observed = state.observe_bootstrap_claim(
+            peer,
+            now,
+            crate::replication::config::BOOTSTRAP_CLAIM_GRACE_PERIOD,
+        );
 
+        assert_eq!(
+            observed,
+            BootstrapClaimObservation::WithinGrace { first_seen: now }
+        );
         assert!(
             state.bootstrap_claims.contains_key(&peer),
             "BootstrapClaimFirstSeen should be recorded after grace-period claim"
+        );
+        assert!(
+            state.bootstrap_claim_history.contains_key(&peer),
+            "Bootstrap claim history should remember that the grace window was used"
         );
     }
 

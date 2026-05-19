@@ -13,11 +13,16 @@ use ant_node::replication::protocol::{
     FreshReplicationOffer, FreshReplicationResponse, NeighborSyncRequest, ReplicationMessage,
     ReplicationMessageBody, VerificationRequest, ABSENT_KEY_DIGEST,
 };
+use ant_node::replication::pruning;
 use ant_node::replication::scheduling::ReplicationQueues;
+use ant_node::replication::types::NeighborSyncState;
+use ant_node::ReplicationConfig;
 use saorsa_core::identity::PeerId;
 use saorsa_core::{P2PNode, TrustEvent};
 use serial_test::serial;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::RwLock;
 
 /// Maximum time to wait for replication propagation in tests.
 const PROPAGATION_TIMEOUT: Duration = Duration::from_secs(15);
@@ -42,6 +47,88 @@ async fn send_replication_request(
         .await
         .expect("send_request");
     ReplicationMessage::decode(&response.data).expect("decode replication response")
+}
+
+fn prune_test_config(close_group_size: usize) -> ReplicationConfig {
+    ReplicationConfig {
+        close_group_size,
+        quorum_threshold: 1,
+        paid_list_close_group_size: 1,
+        prune_hysteresis_duration: Duration::ZERO,
+        ..ReplicationConfig::default()
+    }
+}
+
+fn node_index_for_peer(harness: &TestHarness, peer: &PeerId) -> Option<usize> {
+    (0..harness.node_count()).find(|idx| {
+        harness
+            .test_node(*idx)
+            .and_then(|node| node.p2p_node.as_ref())
+            .is_some_and(|p2p| p2p.peer_id() == peer)
+    })
+}
+
+async fn find_remote_prune_candidate(
+    harness: &TestHarness,
+    pruner_idx: usize,
+    close_group_size: usize,
+    label: &str,
+) -> (Vec<u8>, [u8; 32], Vec<PeerId>) {
+    let pruner = harness.test_node(pruner_idx).expect("pruner");
+    let pruner_p2p = pruner.p2p_node.as_ref().expect("pruner p2p");
+    let pruner_peer = *pruner_p2p.peer_id();
+
+    for attempt in 0..10_000usize {
+        let content = format!("prune-confirmation-{label}-{attempt}").into_bytes();
+        let address = compute_address(&content);
+        let closest = pruner_p2p
+            .dht_manager()
+            .find_closest_nodes_local_with_self(&address, close_group_size)
+            .await;
+        if closest.len() != close_group_size {
+            continue;
+        }
+
+        let target_peers: Vec<PeerId> = closest.iter().map(|node| node.peer_id).collect();
+        if target_peers.contains(&pruner_peer) {
+            continue;
+        }
+        if target_peers
+            .iter()
+            .all(|peer| node_index_for_peer(harness, peer).is_some())
+        {
+            return (content, address, target_peers);
+        }
+    }
+
+    panic!("failed to find a {close_group_size}-peer prune candidate outside pruner {pruner_idx}");
+}
+
+async fn store_record_on_peer(
+    harness: &TestHarness,
+    peer: &PeerId,
+    address: &[u8; 32],
+    content: &[u8],
+) {
+    let idx = node_index_for_peer(harness, peer).expect("target peer should be in test harness");
+    let protocol = harness
+        .test_node(idx)
+        .expect("target node")
+        .ant_protocol
+        .as_ref()
+        .expect("target protocol");
+    protocol.storage().put(address, content).await.expect("put");
+}
+
+async fn store_record_on_peers(
+    harness: &TestHarness,
+    peers: &[PeerId],
+    address: &[u8; 32],
+    content: &[u8],
+) {
+    for peer in peers {
+        store_record_on_peer(harness, peer, address, content).await;
+    }
 }
 
 /// Fresh write happy path (Section 18 #1).
@@ -350,6 +437,135 @@ async fn test_audit_absent_key_returns_sentinel() {
     } else {
         panic!("Expected AuditResponse::Digests");
     }
+
+    harness.teardown().await.expect("teardown");
+}
+
+/// Prune pass requires remote storage proofs before deleting local records.
+///
+/// This drives `run_prune_pass` against live nodes so prune-confirmation audits
+/// travel over the real replication request/response path.
+#[tokio::test]
+#[serial]
+async fn test_prune_pass_requires_remote_confirmation_before_delete() {
+    let harness = TestHarness::setup_minimal().await.expect("setup");
+    harness.warmup_dht().await.expect("warmup");
+
+    let pruner_idx = 3;
+    let close_group_size = 2;
+    let config = prune_test_config(close_group_size);
+    let sync_state = Arc::new(RwLock::new(NeighborSyncState::new_cycle(vec![])));
+
+    let pruner = harness.test_node(pruner_idx).expect("pruner");
+    let pruner_p2p = Arc::clone(pruner.p2p_node.as_ref().expect("pruner p2p"));
+    let pruner_protocol = pruner.ant_protocol.as_ref().expect("pruner protocol");
+    let pruner_storage = pruner_protocol.storage();
+    let pruner_paid_list = Arc::clone(
+        pruner
+            .replication_engine
+            .as_ref()
+            .expect("pruner replication engine")
+            .paid_list(),
+    );
+    let pruner_peer = *pruner_p2p.peer_id();
+
+    // Even with all target peers storing the record, pruning must be blocked
+    // while remote prune audits are not allowed during bootstrap/drain.
+    let (gate_content, gate_address, gate_targets) =
+        find_remote_prune_candidate(&harness, pruner_idx, close_group_size, "bootstrap-gate").await;
+    pruner_storage
+        .put(&gate_address, &gate_content)
+        .await
+        .expect("put gate record on pruner");
+    store_record_on_peers(&harness, &gate_targets, &gate_address, &gate_content).await;
+
+    let blocked = pruning::run_prune_pass(
+        &pruner_peer,
+        &pruner_storage,
+        &pruner_paid_list,
+        &pruner_p2p,
+        &config,
+        &sync_state,
+        false,
+    )
+    .await;
+    assert_eq!(blocked.records_pruned, 0);
+    assert!(
+        pruner_storage.exists(&gate_address).expect("exists"),
+        "record must not be pruned before remote audits are allowed"
+    );
+
+    let confirmed = pruning::run_prune_pass(
+        &pruner_peer,
+        &pruner_storage,
+        &pruner_paid_list,
+        &pruner_p2p,
+        &config,
+        &sync_state,
+        true,
+    )
+    .await;
+    assert_eq!(confirmed.records_pruned, 1);
+    assert!(
+        !pruner_storage.exists(&gate_address).expect("exists"),
+        "record should be pruned after all target peers prove storage"
+    );
+
+    // If any current close-group peer lacks the record, the prune pass must
+    // retain the local copy until that peer can prove it stores the bytes.
+    let (missing_content, missing_address, missing_targets) =
+        find_remote_prune_candidate(&harness, pruner_idx, close_group_size, "missing-proof").await;
+    pruner_storage
+        .put(&missing_address, &missing_content)
+        .await
+        .expect("put missing-proof record on pruner");
+    store_record_on_peer(
+        &harness,
+        &missing_targets[0],
+        &missing_address,
+        &missing_content,
+    )
+    .await;
+
+    let incomplete = pruning::run_prune_pass(
+        &pruner_peer,
+        &pruner_storage,
+        &pruner_paid_list,
+        &pruner_p2p,
+        &config,
+        &sync_state,
+        true,
+    )
+    .await;
+    assert_eq!(incomplete.records_pruned, 0);
+    assert!(
+        pruner_storage.exists(&missing_address).expect("exists"),
+        "record must remain local while any target peer lacks proof"
+    );
+
+    store_record_on_peers(
+        &harness,
+        &missing_targets,
+        &missing_address,
+        &missing_content,
+    )
+    .await;
+
+    let complete = pruning::run_prune_pass(
+        &pruner_peer,
+        &pruner_storage,
+        &pruner_paid_list,
+        &pruner_p2p,
+        &config,
+        &sync_state,
+        true,
+    )
+    .await;
+    assert_eq!(complete.records_pruned, 1);
+    assert!(
+        !pruner_storage.exists(&missing_address).expect("exists"),
+        "record should prune once every current target peer proves storage"
+    );
 
     harness.teardown().await.expect("teardown");
 }

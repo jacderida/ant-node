@@ -58,8 +58,8 @@ use crate::replication::protocol::{
 use crate::replication::quorum::KeyVerificationOutcome;
 use crate::replication::scheduling::ReplicationQueues;
 use crate::replication::types::{
-    BootstrapState, FailureEvidence, HintPipeline, NeighborSyncState, PeerSyncRecord,
-    VerificationEntry, VerificationState,
+    AuditFailureReason, BootstrapClaimObservation, BootstrapState, FailureEvidence, HintPipeline,
+    NeighborSyncState, PeerSyncRecord, VerificationEntry, VerificationState,
 };
 use crate::storage::LmdbStorage;
 use saorsa_core::identity::PeerId;
@@ -518,20 +518,9 @@ impl ReplicationEngine {
             // Run one audit tick immediately after bootstrap drain.
             {
                 let bootstrapping = *is_bootstrapping.read().await;
-                // Lock ordering: sync_state before sync_history (consistent
-                // with run_neighbor_sync_round and handle_sync_response).
                 let result = {
-                    let claims = sync_state.read().await;
                     let history = sync_history.read().await;
-                    audit::audit_tick(
-                        &p2p,
-                        &storage,
-                        &config,
-                        &history,
-                        &claims.bootstrap_claims,
-                        bootstrapping,
-                    )
-                    .await
+                    audit::audit_tick(&p2p, &storage, &config, &history, bootstrapping).await
                 };
                 handle_audit_result(&result, &p2p, &sync_state, &config).await;
             }
@@ -543,13 +532,13 @@ impl ReplicationEngine {
                     () = shutdown.cancelled() => break,
                     () = tokio::time::sleep(interval) => {
                         let bootstrapping = *is_bootstrapping.read().await;
-                        // Lock ordering: sync_state before sync_history.
                         let result = {
-                            let claims = sync_state.read().await;
                             let history = sync_history.read().await;
                             audit::audit_tick(
-                                &p2p, &storage, &config, &history,
-                                &claims.bootstrap_claims,
+                                &p2p,
+                                &storage,
+                                &config,
+                                &history,
                                 bootstrapping,
                             )
                             .await
@@ -1503,7 +1492,19 @@ async fn run_neighbor_sync_round(
     let cycle_complete = sync_state.read().await.is_cycle_complete();
     if cycle_complete {
         // Post-cycle pruning (Section 11) — runs without holding sync_state.
-        pruning::run_prune_pass(&self_id, storage, paid_list, p2p_node, config).await;
+        // Remote prune-confirmation audits are storage-proof audits and only
+        // run after bootstrap has drained.
+        let allow_remote_prune_audits = !bootstrapping && bootstrap_state.read().await.is_drained();
+        pruning::run_prune_pass(
+            &self_id,
+            storage,
+            paid_list,
+            p2p_node,
+            config,
+            sync_state,
+            allow_remote_prune_audits,
+        )
+        .await;
 
         // Increment `cycles_since_sync` for all peers.
         {
@@ -1521,14 +1522,18 @@ async fn run_neighbor_sync_round(
         // Now re-acquire write lock and re-check before swapping cycle.
         let mut state = sync_state.write().await;
         if state.is_cycle_complete() {
-            // Preserve last_sync_times and bootstrap_claims across cycles.
+            // Preserve cooldown and bootstrap-claim tracking across cycles.
             // Claims have a 24h lifecycle vs 10-20 min cycles — dropping them
             // would reset the abuse detection timer every cycle.
             let old_sync_times = std::mem::take(&mut state.last_sync_times);
             let old_bootstrap_claims = std::mem::take(&mut state.bootstrap_claims);
+            let old_bootstrap_claim_history = std::mem::take(&mut state.bootstrap_claim_history);
+            let old_prune_cursor = state.prune_cursor;
             *state = NeighborSyncState::new_cycle(neighbors);
             state.last_sync_times = old_sync_times;
             state.bootstrap_claims = old_bootstrap_claims;
+            state.bootstrap_claim_history = old_bootstrap_claim_history;
+            state.prune_cursor = old_prune_cursor;
         }
     }
 
@@ -1657,17 +1662,25 @@ async fn handle_sync_response(
         let should_report = {
             let now = Instant::now();
             let mut state = sync_state.write().await;
-            let first_seen = state.bootstrap_claims.entry(*peer).or_insert(now);
-            let claim_age = now.duration_since(*first_seen);
-            if claim_age > config.bootstrap_claim_grace_period {
-                warn!(
-                    "Peer {peer} has been claiming bootstrap for {:?}, \
-                     exceeding grace period of {:?} — reporting abuse",
-                    claim_age, config.bootstrap_claim_grace_period,
-                );
-                true
-            } else {
-                false
+            match state.observe_bootstrap_claim(*peer, now, config.bootstrap_claim_grace_period) {
+                BootstrapClaimObservation::WithinGrace { .. } => false,
+                BootstrapClaimObservation::PastGrace { first_seen } => {
+                    warn!(
+                        "Peer {peer} has been claiming bootstrap for {:?}, \
+                         exceeding grace period of {:?} — reporting abuse",
+                        now.duration_since(first_seen),
+                        config.bootstrap_claim_grace_period,
+                    );
+                    true
+                }
+                BootstrapClaimObservation::Repeated { first_seen } => {
+                    warn!(
+                        "Peer {peer} repeated bootstrap claim after previously stopping; \
+                         first claim was {:?} ago — reporting abuse",
+                        now.duration_since(first_seen),
+                    );
+                    true
+                }
             }
         };
         if should_report {
@@ -1679,10 +1692,11 @@ async fn handle_sync_response(
                 .await;
         }
     } else {
-        // Peer is not claiming bootstrap; clear any prior claim.
+        // Peer is not claiming bootstrap; clear active claim while retaining
+        // history so the peer cannot start a second grace window later.
         {
             let mut state = sync_state.write().await;
-            state.bootstrap_claims.remove(peer);
+            state.clear_active_bootstrap_claim(peer);
         }
         let admitted_keys = admit_and_queue_hints(
             self_id,
@@ -2194,11 +2208,11 @@ async fn handle_audit_result(
             keys_checked,
         } => {
             debug!("Audit passed for {challenged_peer} ({keys_checked} keys)");
-            // Peer responded normally — clear any stale bootstrap claim so
-            // a future legitimate bootstrap claim starts with a fresh timer.
+            // Peer responded normally — clear the active bootstrap claim while
+            // retaining history so a later claim is treated as repeated abuse.
             {
                 let mut state = sync_state.write().await;
-                state.bootstrap_claims.remove(challenged_peer);
+                state.clear_active_bootstrap_claim(challenged_peer);
             }
             p2p_node
                 .report_trust_event(
@@ -2211,6 +2225,7 @@ async fn handle_audit_result(
             if let FailureEvidence::AuditFailure {
                 challenged_peer,
                 confirmed_failed_keys,
+                reason,
                 ..
             } = evidence
             {
@@ -2218,11 +2233,13 @@ async fn handle_audit_result(
                     "Audit failure for {challenged_peer}: {} confirmed failed keys",
                     confirmed_failed_keys.len()
                 );
-                // Peer responded with digests (not a bootstrap claim) — clear
-                // any stale bootstrap claim timestamp.
-                {
+                if audit_failure_clears_bootstrap_claim(reason) {
+                    // Peer returned a non-bootstrap response — clear the active
+                    // claim while retaining claim history.
                     let mut state = sync_state.write().await;
-                    state.bootstrap_claims.remove(challenged_peer);
+                    state.clear_active_bootstrap_claim(challenged_peer);
+                } else {
+                    debug!("Audit timeout for {challenged_peer}; retaining active bootstrap claim");
                 }
                 p2p_node
                     .report_trust_event(
@@ -2239,18 +2256,29 @@ async fn handle_audit_result(
             let should_report = {
                 let now = Instant::now();
                 let mut state = sync_state.write().await;
-                let first_seen = state.bootstrap_claims.entry(*peer).or_insert(now);
-                let claim_age = now.duration_since(*first_seen);
-                if claim_age > config.bootstrap_claim_grace_period {
-                    warn!(
-                        "Audit: peer {peer} claiming bootstrap past grace period \
-                         ({:?} > {:?}), reporting abuse",
-                        claim_age, config.bootstrap_claim_grace_period,
-                    );
-                    true
-                } else {
-                    debug!("Audit: peer {peer} claims bootstrapping (within grace period)");
-                    false
+                match state.observe_bootstrap_claim(*peer, now, config.bootstrap_claim_grace_period)
+                {
+                    BootstrapClaimObservation::WithinGrace { .. } => {
+                        debug!("Audit: peer {peer} claims bootstrapping (within grace period)");
+                        false
+                    }
+                    BootstrapClaimObservation::PastGrace { first_seen } => {
+                        warn!(
+                            "Audit: peer {peer} claiming bootstrap past grace period \
+                             ({:?} > {:?}), reporting abuse",
+                            now.duration_since(first_seen),
+                            config.bootstrap_claim_grace_period,
+                        );
+                        true
+                    }
+                    BootstrapClaimObservation::Repeated { first_seen } => {
+                        warn!(
+                            "Audit: peer {peer} repeated bootstrap claim after previously \
+                             stopping; first claim was {:?} ago, reporting abuse",
+                            now.duration_since(first_seen),
+                        );
+                        true
+                    }
                 }
             };
             if should_report {
@@ -2266,4 +2294,37 @@ async fn handle_audit_result(
     }
 }
 
+fn audit_failure_clears_bootstrap_claim(reason: &AuditFailureReason) -> bool {
+    !matches!(reason, AuditFailureReason::Timeout)
+}
+
 // `admit_bootstrap_hints` was consolidated into `admit_and_queue_hints`.
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::audit_failure_clears_bootstrap_claim;
+    use crate::replication::types::AuditFailureReason;
+
+    #[test]
+    fn audit_timeout_preserves_active_bootstrap_claim() {
+        assert!(!audit_failure_clears_bootstrap_claim(
+            &AuditFailureReason::Timeout
+        ));
+    }
+
+    #[test]
+    fn decoded_audit_failures_clear_active_bootstrap_claim() {
+        for reason in [
+            AuditFailureReason::MalformedResponse,
+            AuditFailureReason::DigestMismatch,
+            AuditFailureReason::KeyAbsent,
+            AuditFailureReason::Rejected,
+        ] {
+            assert!(
+                audit_failure_clears_bootstrap_claim(&reason),
+                "decoded non-bootstrap failure {reason:?} should clear active claim"
+            );
+        }
+    }
+}

@@ -405,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn audit_failure_weight_matches_max_consumer_trust_event_weight() {
+    fn audit_failure_weight_is_five() {
         assert_eq!(AUDIT_FAILURE_TRUST_WEIGHT.to_bits(), 5.0_f64.to_bits());
     }
 

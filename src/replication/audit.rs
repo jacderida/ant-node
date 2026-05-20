@@ -165,20 +165,15 @@ pub async fn audit_tick_with_repair_proofs(
         }
     }
 
-    let mut peer_keys = Vec::new();
-    {
+    let peer_keys = {
         let mut proofs = repair_proofs.write().await;
-        for (key, close_peers) in sampled_key_groups {
-            if proofs.has_mature_replica_hint(
-                &challenged_peer,
-                &key,
-                &close_peers,
-                current_sync_epoch,
-            ) {
-                peer_keys.push(key);
-            }
-        }
-    }
+        mature_audit_keys_for_peer(
+            &challenged_peer,
+            sampled_key_groups,
+            &mut proofs,
+            current_sync_epoch,
+        )
+    };
 
     if peer_keys.is_empty() {
         return AuditTickResult::Idle;
@@ -346,6 +341,22 @@ fn eligible_audit_peers(sync_history: &HashMap<PeerId, PeerSyncRecord>) -> Vec<P
         .iter()
         .filter(|(_, record)| record.has_repair_opportunity())
         .map(|(peer, _)| *peer)
+        .collect()
+}
+
+fn mature_audit_keys_for_peer(
+    challenged_peer: &PeerId,
+    sampled_key_groups: Vec<(XorName, Vec<PeerId>)>,
+    repair_proofs: &mut RepairProofs,
+    current_sync_epoch: u64,
+) -> Vec<XorName> {
+    sampled_key_groups
+        .into_iter()
+        .filter_map(|(key, close_peers)| {
+            repair_proofs
+                .has_mature_replica_hint(challenged_peer, &key, &close_peers, current_sync_epoch)
+                .then_some(key)
+        })
         .collect()
 }
 
@@ -1180,6 +1191,69 @@ mod tests {
         assert!(
             eligible.contains(&peer),
             "continued bootstrap claims must remain auditable so past-grace abuse can be observed"
+        );
+    }
+
+    #[test]
+    fn audit_key_filter_accepts_only_mature_current_snapshot_repair_proofs() {
+        const HINT_EPOCH: u64 = 7;
+        const CURRENT_EPOCH: u64 = HINT_EPOCH + 1;
+        const CHALLENGED_PEER_BYTE: u8 = 0xA1;
+        const OTHER_PEER_BYTE: u8 = 0xA2;
+        const NEW_PEER_BYTE: u8 = 0xA3;
+        const MATURE_KEY_BYTE: u8 = 0xB1;
+        const SAME_EPOCH_KEY_BYTE: u8 = 0xB2;
+        const MISSING_PROOF_KEY_BYTE: u8 = 0xB3;
+        const STALE_SNAPSHOT_KEY_BYTE: u8 = 0xB4;
+        const XOR_NAME_LEN: usize = 32;
+
+        let challenged_peer = peer_id_from_bytes([CHALLENGED_PEER_BYTE; XOR_NAME_LEN]);
+        let other_peer = peer_id_from_bytes([OTHER_PEER_BYTE; XOR_NAME_LEN]);
+        let new_peer = peer_id_from_bytes([NEW_PEER_BYTE; XOR_NAME_LEN]);
+        let mature_key = [MATURE_KEY_BYTE; XOR_NAME_LEN];
+        let same_epoch_key = [SAME_EPOCH_KEY_BYTE; XOR_NAME_LEN];
+        let missing_proof_key = [MISSING_PROOF_KEY_BYTE; XOR_NAME_LEN];
+        let stale_snapshot_key = [STALE_SNAPSHOT_KEY_BYTE; XOR_NAME_LEN];
+        let close_group = vec![challenged_peer, other_peer];
+        let changed_close_group = vec![challenged_peer, new_peer];
+        let mut repair_proofs = RepairProofs::new();
+
+        assert!(repair_proofs.record_replica_hint_sent(
+            challenged_peer,
+            mature_key,
+            &close_group,
+            HINT_EPOCH,
+        ));
+        assert!(repair_proofs.record_replica_hint_sent(
+            challenged_peer,
+            same_epoch_key,
+            &close_group,
+            CURRENT_EPOCH,
+        ));
+        assert!(repair_proofs.record_replica_hint_sent(
+            challenged_peer,
+            stale_snapshot_key,
+            &close_group,
+            HINT_EPOCH,
+        ));
+
+        let sampled_key_groups = vec![
+            (mature_key, close_group.clone()),
+            (same_epoch_key, close_group.clone()),
+            (missing_proof_key, close_group),
+            (stale_snapshot_key, changed_close_group),
+        ];
+        let peer_keys = mature_audit_keys_for_peer(
+            &challenged_peer,
+            sampled_key_groups,
+            &mut repair_proofs,
+            CURRENT_EPOCH,
+        );
+
+        assert_eq!(
+            peer_keys,
+            vec![mature_key],
+            "only mature proofs for the current close-group snapshot should become audit keys"
         );
     }
 

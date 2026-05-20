@@ -63,9 +63,19 @@ const SINGLE_NODE_MEDIAN_INDEX: usize = CLOSE_GROUP_SIZE / 2;
 /// 20-byte rewards address alongside the amount.
 const COMPLETED_PAYMENT_REWARDS_PREFIX_LEN: usize = 16;
 
-/// Single-node close-group fallback checks the client's quoted peers against a
-/// wider network-derived close window to absorb routing-table skew.
-const SINGLE_NODE_NETWORK_LOOKUP_WIDTH: usize = 2 * CLOSE_GROUP_SIZE;
+/// Single-node close-group validation tolerates up to two quoted peers missing
+/// from the local routing-table view to absorb normal DHT view skew.
+const SINGLE_NODE_UNKNOWN_PEER_TOLERANCE: usize = 2;
+
+/// Minimum quoted peers that must appear in this node's local close-group view.
+const SINGLE_NODE_CLOSE_GROUP_MATCH_REQUIRED: usize =
+    CLOSE_GROUP_SIZE - SINGLE_NODE_UNKNOWN_PEER_TOLERANCE;
+
+const _: () = assert!(
+    SINGLE_NODE_CLOSE_GROUP_MATCH_REQUIRED > 0
+        && SINGLE_NODE_CLOSE_GROUP_MATCH_REQUIRED <= CLOSE_GROUP_SIZE,
+    "single-node close-group match threshold must be within 1..=CLOSE_GROUP_SIZE",
+);
 
 /// Configuration for EVM payment verification.
 ///
@@ -464,8 +474,7 @@ impl PaymentVerifier {
     /// 5. This node's peer ID is among the quoted peers
     /// 6. All ML-DSA-65 signatures are valid (offloaded to `spawn_blocking`)
     /// 7. This node's quote is bound to the configured local rewards address
-    /// 8. Every quoted peer is in this node's local close-group view, or in a
-    ///    wider network-derived close window if the local table is stale
+    /// 8. At least 5 of 7 quoted peers are in this node's local close-group view
     /// 9. A median-priced quote from that valid quote set was paid at least
     ///    3x its price on-chain to the same rewards address prefix
     ///    (looked up via `completedPayments(quoteHash)` on the payment vault)
@@ -623,8 +632,8 @@ impl PaymentVerifier {
         Ok(peer_ids)
     }
 
-    /// Verify every single-node quote came from this node's local close-group
-    /// view for the content address.
+    /// Verify enough single-node quotes came from this node's local close-group
+    /// view for the content address to tolerate bounded routing-table skew.
     async fn validate_single_node_close_group(
         &self,
         xorname: &XorName,
@@ -662,64 +671,7 @@ impl PaymentVerifier {
         let close_group_peer_ids: Vec<PeerId> =
             close_group.iter().map(|node| node.peer_id).collect();
 
-        match Self::check_single_node_close_group_match(
-            quoted_peer_ids,
-            &close_group_peer_ids,
-            xorname,
-        ) {
-            Ok(()) => Ok(()),
-            Err(local_err) => {
-                debug!(
-                    "Single-node local close-group check failed for {}; retrying \
-                     against network close window of {} peers: {local_err}",
-                    hex::encode(xorname),
-                    SINGLE_NODE_NETWORK_LOOKUP_WIDTH,
-                );
-
-                let network_lookup = p2p_node
-                    .dht_manager()
-                    .find_closest_nodes_network(xorname, SINGLE_NODE_NETWORK_LOOKUP_WIDTH);
-                let network_peers = match tokio::time::timeout(
-                    Self::CLOSENESS_LOOKUP_TIMEOUT,
-                    network_lookup,
-                )
-                .await
-                {
-                    Ok(Ok(peers)) => peers,
-                    Ok(Err(e)) => {
-                        debug!(
-                            "Single-node close-group network lookup failed for {}: {e}",
-                            hex::encode(xorname),
-                        );
-                        return Err(Error::Payment(
-                            "Single-node payment rejected: could not verify quoted peer \
-                                 close-group membership against the authoritative network view."
-                                .into(),
-                        ));
-                    }
-                    Err(_) => {
-                        debug!(
-                            "Single-node close-group network lookup timeout ({:?}) for {}",
-                            Self::CLOSENESS_LOOKUP_TIMEOUT,
-                            hex::encode(xorname),
-                        );
-                        return Err(Error::Payment(
-                            "Single-node payment rejected: authoritative network lookup \
-                                 timed out while verifying quoted peer close-group membership."
-                                .into(),
-                        ));
-                    }
-                };
-
-                let network_peer_ids: Vec<PeerId> =
-                    network_peers.iter().map(|node| node.peer_id).collect();
-                Self::check_single_node_network_close_group_match(
-                    quoted_peer_ids,
-                    &network_peer_ids,
-                    xorname,
-                )
-            }
-        }
+        Self::check_single_node_close_group_match(quoted_peer_ids, &close_group_peer_ids, xorname)
     }
 
     /// Pure set-membership check for single-node close-group validation.
@@ -746,11 +698,12 @@ impl PaymentVerifier {
         }
 
         let close_group_count = close_group_peer_ids.len();
-        if close_group_count < CLOSE_GROUP_SIZE {
+        if close_group_count < SINGLE_NODE_CLOSE_GROUP_MATCH_REQUIRED {
             return Err(Error::Payment(format!(
                 "Single-node payment rejected: local close-group view for {} has only \
-                 {close_group_count} peer(s), need {CLOSE_GROUP_SIZE} to verify quotes",
-                hex::encode(xorname)
+                 {close_group_count} peer(s), need at least \
+                 {SINGLE_NODE_CLOSE_GROUP_MATCH_REQUIRED} to verify quotes",
+                hex::encode(xorname),
             )));
         }
 
@@ -762,77 +715,20 @@ impl PaymentVerifier {
             ));
         }
 
-        let missing_peer_ids: Vec<String> = quoted_peer_ids
+        let unknown_peer_ids: Vec<String> = quoted_peer_ids
             .iter()
             .filter(|peer_id| !close_group_set.contains(peer_id))
             .map(PeerId::to_hex)
             .collect();
+        let matched_count = quote_count.saturating_sub(unknown_peer_ids.len());
 
-        if !missing_peer_ids.is_empty() {
+        if matched_count < SINGLE_NODE_CLOSE_GROUP_MATCH_REQUIRED {
             return Err(Error::Payment(format!(
-                "Single-node payment rejected: quoted peer(s) are outside this node's \
-                 close-group view for {}: {}",
+                "Single-node payment rejected: only {matched_count}/{CLOSE_GROUP_SIZE} quoted \
+                 peer(s) are present in this node's local close-group view for {}, need at \
+                 least {SINGLE_NODE_CLOSE_GROUP_MATCH_REQUIRED}; unknown peer(s): {}",
                 hex::encode(xorname),
-                missing_peer_ids.join(", ")
-            )));
-        }
-
-        Ok(())
-    }
-
-    /// Fallback set-membership check for single-node proofs against a wider
-    /// network-derived close window.
-    fn check_single_node_network_close_group_match(
-        quoted_peer_ids: &[PeerId],
-        network_peer_ids: &[PeerId],
-        xorname: &XorName,
-    ) -> Result<()> {
-        let quote_count = quoted_peer_ids.len();
-        if quote_count != CLOSE_GROUP_SIZE {
-            return Err(Error::Payment(format!(
-                "Single-node payment must have exactly {CLOSE_GROUP_SIZE} quoted peers, got {quote_count}"
-            )));
-        }
-
-        let network_count = network_peer_ids.len();
-        if network_count < CLOSE_GROUP_SIZE {
-            return Err(Error::Payment(format!(
-                "Single-node payment rejected: authoritative DHT lookup for {} returned only \
-                 {network_count} peer(s), need {CLOSE_GROUP_SIZE} to verify quotes",
-                hex::encode(xorname)
-            )));
-        }
-
-        let mut quoted_set = HashSet::with_capacity(quote_count);
-        for peer_id in quoted_peer_ids {
-            if !quoted_set.insert(*peer_id) {
-                return Err(Error::Payment(format!(
-                    "Single-node payment contains duplicate quoted peer {}",
-                    peer_id.to_hex()
-                )));
-            }
-        }
-
-        let network_set: HashSet<PeerId> = network_peer_ids.iter().copied().collect();
-        if network_set.len() != network_peer_ids.len() {
-            return Err(Error::Payment(
-                "Single-node payment rejected: authoritative DHT lookup returned duplicate peer IDs"
-                    .into(),
-            ));
-        }
-
-        let missing_peer_ids: Vec<String> = quoted_peer_ids
-            .iter()
-            .filter(|peer_id| !network_set.contains(peer_id))
-            .map(PeerId::to_hex)
-            .collect();
-
-        if !missing_peer_ids.is_empty() {
-            return Err(Error::Payment(format!(
-                "Single-node payment rejected: quoted peer(s) are outside this node's \
-                 authoritative network close window for {}: {}",
-                hex::encode(xorname),
-                missing_peer_ids.join(", ")
+                unknown_peer_ids.join(", "),
             )));
         }
 
@@ -2437,15 +2333,11 @@ mod tests {
     }
 
     #[test]
-    fn single_node_close_group_rejects_quote_outside_view() {
+    fn single_node_close_group_accepts_tolerated_unknown_peers() {
         let xorname = [0x22u8; 32];
         let quoted_peer_ids = single_node_peer_ids();
-        let mut close_group_peer_ids = quoted_peer_ids.clone();
-        let last_idx = close_group_peer_ids
-            .len()
-            .checked_sub(1)
-            .expect("non-empty close group");
-        close_group_peer_ids[last_idx] = synthetic_peer_id(0xF0);
+        let close_group_peer_ids =
+            quoted_peer_ids[..SINGLE_NODE_CLOSE_GROUP_MATCH_REQUIRED].to_vec();
 
         let result = PaymentVerifier::check_single_node_close_group_match(
             &quoted_peer_ids,
@@ -2453,11 +2345,9 @@ mod tests {
             &xorname,
         );
 
-        let err = result.expect_err("quoted peer outside close group must be rejected");
         assert!(
-            err.to_string()
-                .contains("outside this node's close-group view"),
-            "expected outside-view rejection, got: {err}"
+            result.is_ok(),
+            "up to {SINGLE_NODE_UNKNOWN_PEER_TOLERANCE} unknown quoted peers must pass: {result:?}"
         );
     }
 
@@ -2465,9 +2355,9 @@ mod tests {
     fn single_node_close_group_rejects_sparse_local_view() {
         let xorname = [0x33u8; 32];
         let quoted_peer_ids = single_node_peer_ids();
-        let sparse_count = CLOSE_GROUP_SIZE
+        let sparse_count = SINGLE_NODE_CLOSE_GROUP_MATCH_REQUIRED
             .checked_sub(1)
-            .expect("CLOSE_GROUP_SIZE is non-zero");
+            .expect("close-group match threshold is non-zero");
         let close_group_peer_ids = quoted_peer_ids[..sparse_count].to_vec();
 
         let result = PaymentVerifier::check_single_node_close_group_match(
@@ -2484,46 +2374,27 @@ mod tests {
     }
 
     #[test]
-    fn single_node_network_close_window_accepts_local_view_skew() {
+    fn single_node_close_group_rejects_unknown_peer_tolerance_exceeded() {
         let xorname = [0x34u8; 32];
         let quoted_peer_ids = single_node_peer_ids();
-        let lookup_width =
-            u8::try_from(SINGLE_NODE_NETWORK_LOOKUP_WIDTH).expect("lookup width fits in u8");
-        let network_peer_ids = synthetic_peer_ids(lookup_width);
+        let matched_count = SINGLE_NODE_CLOSE_GROUP_MATCH_REQUIRED
+            .checked_sub(1)
+            .expect("close-group match threshold is non-zero");
+        let mut close_group_peer_ids = quoted_peer_ids[..matched_count].to_vec();
+        close_group_peer_ids.push(synthetic_peer_id(0xF0));
 
-        let result = PaymentVerifier::check_single_node_network_close_group_match(
+        let result = PaymentVerifier::check_single_node_close_group_match(
             &quoted_peer_ids,
-            &network_peer_ids,
+            &close_group_peer_ids,
             &xorname,
         );
 
+        let err = result.expect_err("excess unknown quoted peers must be rejected");
         assert!(
-            result.is_ok(),
-            "quoted peers inside wider network close window must pass: {result:?}"
-        );
-    }
-
-    #[test]
-    fn single_node_network_close_window_rejects_peer_outside_window() {
-        let xorname = [0x35u8; 32];
-        let quoted_peer_ids = single_node_peer_ids();
-        let lookup_width =
-            u8::try_from(SINGLE_NODE_NETWORK_LOOKUP_WIDTH).expect("lookup width fits in u8");
-        let mut network_peer_ids = synthetic_peer_ids(lookup_width);
-        network_peer_ids.retain(|peer_id| *peer_id != quoted_peer_ids[0]);
-        network_peer_ids.push(synthetic_peer_id(0xF0));
-
-        let result = PaymentVerifier::check_single_node_network_close_group_match(
-            &quoted_peer_ids,
-            &network_peer_ids,
-            &xorname,
-        );
-
-        let err = result.expect_err("quoted peer outside network close window must be rejected");
-        assert!(
-            err.to_string()
-                .contains("outside this node's authoritative network close window"),
-            "expected outside-window rejection, got: {err}"
+            err.to_string().contains(&format!(
+                "need at least {SINGLE_NODE_CLOSE_GROUP_MATCH_REQUIRED}"
+            )),
+            "expected close-group match threshold rejection, got: {err}"
         );
     }
 

@@ -453,7 +453,7 @@ impl PaymentVerifier {
     /// 2. All quotes target the correct content address (xorname binding)
     /// 3. Quote timestamps are fresh (not expired or future-dated)
     /// 4. Peer ID bindings match the ML-DSA-65 public keys
-    /// 5. This node is among the quoted recipients
+    /// 5. This node's peer ID is among the quoted peers
     /// 6. All ML-DSA-65 signatures are valid (offloaded to `spawn_blocking`)
     /// 7. Every quoted peer is in this node's local close-group view
     /// 8. A median-priced quote from that valid quote set was paid at least
@@ -474,7 +474,6 @@ impl PaymentVerifier {
         Self::validate_quote_content(payment, xorname)?;
         Self::validate_quote_timestamps(payment)?;
         let quoted_peer_ids = Self::validate_peer_bindings(payment)?;
-        self.validate_local_recipient(payment)?;
 
         // Verify quote signatures (CPU-bound, run off async runtime)
         let peer_quotes = payment.peer_quotes.clone();
@@ -636,6 +635,9 @@ impl PaymentVerifier {
             ));
         };
 
+        let local_peer_id = *p2p_node.peer_id();
+        Self::validate_local_quoted_peer(local_peer_id, quoted_peer_ids)?;
+
         let close_group = p2p_node
             .dht_manager()
             .find_closest_nodes_local_with_self(xorname, CLOSE_GROUP_SIZE)
@@ -701,6 +703,17 @@ impl PaymentVerifier {
             )));
         }
 
+        Ok(())
+    }
+
+    /// Verify the local node's peer identity signed one of the quotes.
+    fn validate_local_quoted_peer(local_peer_id: PeerId, quoted_peer_ids: &[PeerId]) -> Result<()> {
+        if !quoted_peer_ids.contains(&local_peer_id) {
+            return Err(Error::Payment(format!(
+                "Payment proof does not include this node's peer ID as a quoted peer: {}",
+                local_peer_id.to_hex()
+            )));
+        }
         Ok(())
     }
 
@@ -1503,21 +1516,6 @@ impl PaymentVerifier {
 
         Ok(())
     }
-
-    /// Verify this node is among the paid recipients.
-    fn validate_local_recipient(&self, payment: &ProofOfPayment) -> Result<()> {
-        let local_addr = &self.config.local_rewards_address;
-        let is_recipient = payment
-            .peer_quotes
-            .iter()
-            .any(|(_, quote)| quote.rewards_address == *local_addr);
-        if !is_recipient {
-            return Err(Error::Payment(
-                "Payment proof does not include this node as a recipient".to_string(),
-            ));
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -2055,12 +2053,6 @@ mod tests {
         );
     }
 
-    /// Helper: build an `EncodedPeerId` that matches the BLAKE3 hash of an ML-DSA public key.
-    fn encoded_peer_id_for_pub_key(pub_key: &[u8]) -> evmlib::EncodedPeerId {
-        let ant_peer_id = peer_id_from_public_key_bytes(pub_key).expect("valid ML-DSA pub key");
-        evmlib::EncodedPeerId::new(*ant_peer_id.as_bytes())
-    }
-
     /// Build a deterministic `PeerId` from a single byte tag.
     fn synthetic_peer_id(tag: u8) -> PeerId {
         let mut bytes = [0u8; 32];
@@ -2092,49 +2084,31 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_local_not_in_paid_set_rejected() {
-        use evmlib::RewardsAddress;
-        use saorsa_core::MlDsa65;
-        use saorsa_pqc::pqc::MlDsaOperations;
+    #[test]
+    fn local_quoted_peer_accepts_when_local_peer_id_was_quoted() {
+        let quoted_peer_ids = single_node_peer_ids();
+        let local_peer_id = quoted_peer_ids[0];
 
-        // Verifier with a local rewards address set
-        let local_addr = RewardsAddress::new([0xAAu8; 20]);
-        let config = PaymentVerifierConfig {
-            evm: EvmVerifierConfig {
-                network: EvmNetwork::ArbitrumOne,
-            },
-            cache_capacity: 100,
-            local_rewards_address: local_addr,
-        };
-        let verifier = PaymentVerifier::new(config);
+        let result = PaymentVerifier::validate_local_quoted_peer(local_peer_id, &quoted_peer_ids);
 
-        let xorname = [0xEEu8; 32];
-        // Quotes pay a DIFFERENT rewards address
-        let other_addr = RewardsAddress::new([0xBBu8; 20]);
-
-        // Use real ML-DSA keys so the pub_key→peer_id binding check passes
-        let ml_dsa = MlDsa65::new();
-        let mut peer_quotes = Vec::new();
-        for _ in 0..CLOSE_GROUP_SIZE {
-            let (public_key, _secret_key) = ml_dsa.generate_keypair().expect("keygen");
-            let pub_key_bytes = public_key.as_bytes().to_vec();
-            let encoded = encoded_peer_id_for_pub_key(&pub_key_bytes);
-
-            let mut quote = make_fake_quote(xorname, SystemTime::now(), other_addr);
-            quote.pub_key = pub_key_bytes;
-
-            peer_quotes.push((encoded, quote));
-        }
-
-        let proof_bytes = serialize_proof(peer_quotes);
-        let result = verifier.verify_payment(&xorname, Some(&proof_bytes)).await;
-
-        assert!(result.is_err(), "Should reject payment not addressed to us");
-        let err_msg = format!("{}", result.expect_err("should fail"));
         assert!(
-            err_msg.contains("does not include this node as a recipient"),
-            "Error should mention recipient rejection: {err_msg}"
+            result.is_ok(),
+            "local peer ID in quoted peer set must pass: {result:?}"
+        );
+    }
+
+    #[test]
+    fn local_quoted_peer_rejects_when_local_peer_id_missing() {
+        let quoted_peer_ids = single_node_peer_ids();
+        let local_peer_id = synthetic_peer_id(0xF0);
+
+        let result = PaymentVerifier::validate_local_quoted_peer(local_peer_id, &quoted_peer_ids);
+
+        let err = result.expect_err("local peer ID outside quoted set must be rejected");
+        assert!(
+            err.to_string()
+                .contains("does not include this node's peer ID"),
+            "expected local peer ID rejection, got: {err}"
         );
     }
 

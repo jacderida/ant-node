@@ -555,7 +555,7 @@ impl ReplicationEngine {
                 let result = {
                     let history = sync_history.read().await;
                     let current_sync_epoch = *sync_cycle_epoch.read().await;
-                    audit::audit_tick(
+                    audit::audit_tick_with_repair_proofs(
                         &p2p,
                         &storage,
                         &config,
@@ -579,7 +579,7 @@ impl ReplicationEngine {
                         let result = {
                             let history = sync_history.read().await;
                             let current_sync_epoch = *sync_cycle_epoch.read().await;
-                            audit::audit_tick(
+                            audit::audit_tick_with_repair_proofs(
                                 &p2p,
                                 &storage,
                                 &config,
@@ -875,7 +875,7 @@ impl ReplicationEngine {
 
                     bootstrap::increment_pending_requests(&bootstrap_state, 1).await;
 
-                    let outcome = neighbor_sync::sync_with_peer(
+                    let outcome = neighbor_sync::sync_with_peer_with_outcome(
                         peer,
                         &p2p,
                         &storage,
@@ -894,8 +894,6 @@ impl ReplicationEngine {
                                 &outcome.sent_replica_hints,
                                 &repair_proofs,
                                 &sync_cycle_epoch,
-                                &p2p,
-                                &config,
                             )
                             .await;
                             // Admit hints into verification pipeline.
@@ -1328,23 +1326,24 @@ async fn handle_neighbor_sync_request(
     // bootstrap replication for newly-joined nodes with 0 stored chunks.
 
     // Build response (outbound hints).
-    let (response, sender_in_rt) = neighbor_sync::handle_sync_request(
-        source,
-        request,
-        p2p_node,
-        storage,
-        paid_list,
-        config,
-        is_bootstrapping,
-    )
-    .await;
+    let (response, sent_replica_hints, sender_in_rt) =
+        neighbor_sync::handle_sync_request_with_proofs(
+            source,
+            request,
+            p2p_node,
+            storage,
+            paid_list,
+            config,
+            is_bootstrapping,
+        )
+        .await;
 
     // Send response.
     let response_sent = send_replication_response(
         source,
         p2p_node,
         request_id,
-        ReplicationMessageBody::NeighborSyncResponse(response.clone()),
+        ReplicationMessageBody::NeighborSyncResponse(response),
         rr_message_id,
     )
     .await;
@@ -1367,15 +1366,8 @@ async fn handle_neighbor_sync_request(
     }
 
     if response_sent && !request.bootstrapping {
-        record_sent_replica_hints(
-            source,
-            &response.replica_hints,
-            repair_proofs,
-            sync_cycle_epoch,
-            p2p_node,
-            config,
-        )
-        .await;
+        record_sent_replica_hints(source, &sent_replica_hints, repair_proofs, sync_cycle_epoch)
+            .await;
     }
 
     // Admit inbound hints and queue for verification.
@@ -1577,35 +1569,21 @@ async fn send_replication_response(
 
 async fn record_sent_replica_hints(
     peer: &PeerId,
-    keys: &[XorName],
+    hints: &[neighbor_sync::SentReplicaHint],
     repair_proofs: &Arc<RwLock<RepairProofs>>,
     sync_cycle_epoch: &Arc<RwLock<u64>>,
-    p2p_node: &Arc<P2PNode>,
-    config: &ReplicationConfig,
 ) {
-    if keys.is_empty() {
+    if hints.is_empty() {
         return;
     }
 
     let hinted_at_epoch = *sync_cycle_epoch.read().await;
-    let dht = p2p_node.dht_manager();
-    let mut records = Vec::with_capacity(keys.len());
-    for key in keys {
-        let close_peers: Vec<PeerId> = dht
-            .find_closest_nodes_local_with_self(key, config.close_group_size)
-            .await
-            .iter()
-            .map(|node| node.peer_id)
-            .collect();
-        records.push((*key, close_peers));
-    }
-
     let mut proofs = repair_proofs.write().await;
-    for (key, close_peers) in records {
-        if proofs.record_replica_hint_sent(*peer, key, &close_peers, hinted_at_epoch) {
+    for hint in hints {
+        if proofs.record_replica_hint_sent(*peer, hint.key, &hint.close_peers, hinted_at_epoch) {
             debug!(
                 "Recorded repair hint proof for peer {peer} and key {}",
-                hex::encode(key)
+                hex::encode(hint.key)
             );
         }
     }
@@ -1656,7 +1634,7 @@ async fn run_neighbor_sync_round(
         // Remote prune-confirmation audits are storage-proof audits and only
         // run after bootstrap has drained.
         let allow_remote_prune_audits = !bootstrapping && bootstrap_state.read().await.is_drained();
-        pruning::run_prune_pass(pruning::PrunePassContext {
+        pruning::run_prune_pass_with_context(pruning::PrunePassContext {
             self_id: &self_id,
             storage,
             paid_list,
@@ -1710,7 +1688,7 @@ async fn run_neighbor_sync_round(
 
     // Sync with each peer in the batch.
     for peer in &batch {
-        let outcome = neighbor_sync::sync_with_peer(
+        let outcome = neighbor_sync::sync_with_peer_with_outcome(
             peer,
             p2p_node,
             storage,
@@ -1748,7 +1726,7 @@ async fn run_neighbor_sync_round(
 
             // Attempt sync with the replacement peer (if one was found).
             if let Some(replacement_peer) = replacement {
-                let replacement_outcome = neighbor_sync::sync_with_peer(
+                let replacement_outcome = neighbor_sync::sync_with_peer_with_outcome(
                     &replacement_peer,
                     p2p_node,
                     storage,
@@ -1790,7 +1768,7 @@ async fn handle_sync_response(
     self_id: &PeerId,
     peer: &PeerId,
     resp: &NeighborSyncResponse,
-    sent_replica_hints: &[XorName],
+    sent_replica_hints: &[neighbor_sync::SentReplicaHint],
     p2p_node: &Arc<P2PNode>,
     config: &ReplicationConfig,
     bootstrapping: bool,
@@ -1862,15 +1840,7 @@ async fn handle_sync_response(
             let mut state = sync_state.write().await;
             state.clear_active_bootstrap_claim(peer);
         }
-        record_sent_replica_hints(
-            peer,
-            sent_replica_hints,
-            repair_proofs,
-            sync_cycle_epoch,
-            p2p_node,
-            config,
-        )
-        .await;
+        record_sent_replica_hints(peer, sent_replica_hints, repair_proofs, sync_cycle_epoch).await;
         let outcome = admit_and_queue_hints(
             self_id,
             peer,

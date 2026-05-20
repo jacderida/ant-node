@@ -517,7 +517,7 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
     )
     .await;
 
-    let blocked = pruning::run_prune_pass(pruning::PrunePassContext {
+    let blocked = pruning::run_prune_pass_with_context(pruning::PrunePassContext {
         self_id: &pruner_peer,
         storage: &pruner_storage,
         paid_list: &pruner_paid_list,
@@ -535,7 +535,7 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
         "record must not be pruned before remote audits are allowed"
     );
 
-    let confirmed = pruning::run_prune_pass(pruning::PrunePassContext {
+    let confirmed = pruning::run_prune_pass_with_context(pruning::PrunePassContext {
         self_id: &pruner_peer,
         storage: &pruner_storage,
         paid_list: &pruner_paid_list,
@@ -578,7 +578,7 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
     )
     .await;
 
-    let incomplete = pruning::run_prune_pass(pruning::PrunePassContext {
+    let incomplete = pruning::run_prune_pass_with_context(pruning::PrunePassContext {
         self_id: &pruner_peer,
         storage: &pruner_storage,
         paid_list: &pruner_paid_list,
@@ -604,7 +604,7 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
     )
     .await;
 
-    let complete = pruning::run_prune_pass(pruning::PrunePassContext {
+    let complete = pruning::run_prune_pass_with_context(pruning::PrunePassContext {
         self_id: &pruner_peer,
         storage: &pruner_storage,
         paid_list: &pruner_paid_list,

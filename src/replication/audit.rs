@@ -64,8 +64,35 @@ pub enum AuditTickResult {
 /// **Invariant 19**: Returns [`AuditTickResult::Idle`] immediately if
 /// `is_bootstrapping` is `true` — a node must not audit others while it
 /// is still bootstrapping.
-#[allow(clippy::implicit_hasher, clippy::too_many_lines)]
+#[allow(clippy::implicit_hasher)]
 pub async fn audit_tick(
+    p2p_node: &Arc<P2PNode>,
+    storage: &Arc<LmdbStorage>,
+    config: &ReplicationConfig,
+    sync_history: &HashMap<PeerId, PeerSyncRecord>,
+    is_bootstrapping: bool,
+) -> AuditTickResult {
+    let repair_proofs = Arc::new(RwLock::new(RepairProofs::new()));
+    audit_tick_with_repair_proofs(
+        p2p_node,
+        storage,
+        config,
+        sync_history,
+        &repair_proofs,
+        0,
+        is_bootstrapping,
+    )
+    .await
+}
+
+/// Execute one repair-proof-gated audit tick.
+///
+/// This is the production path used by the replication engine. The
+/// compatibility [`audit_tick`] wrapper passes an empty proof table, so direct
+/// callers that have not adopted repair proofs remain conservative and do not
+/// audit peers for unproven keys.
+#[allow(clippy::implicit_hasher, clippy::too_many_lines)]
+pub async fn audit_tick_with_repair_proofs(
     p2p_node: &Arc<P2PNode>,
     storage: &Arc<LmdbStorage>,
     config: &ReplicationConfig,

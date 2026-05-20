@@ -147,7 +147,32 @@ struct PruneAuditReportState {
 /// - If self is in `PaidCloseGroup(K)`: clear `PaidOutOfRangeFirstSeen`.
 /// - If not in group: set timestamp if not already set; remove entry if the
 ///   timestamp is at least `PRUNE_HYSTERESIS_DURATION` old.
-pub async fn run_prune_pass(ctx: PrunePassContext<'_>) -> PruneResult {
+pub async fn run_prune_pass(
+    self_id: &PeerId,
+    storage: &Arc<LmdbStorage>,
+    paid_list: &Arc<PaidList>,
+    p2p_node: &Arc<P2PNode>,
+    config: &ReplicationConfig,
+    sync_state: &Arc<RwLock<NeighborSyncState>>,
+    allow_remote_prune_audits: bool,
+) -> PruneResult {
+    let repair_proofs = Arc::new(RwLock::new(RepairProofs::new()));
+    run_prune_pass_with_context(PrunePassContext {
+        self_id,
+        storage,
+        paid_list,
+        p2p_node,
+        config,
+        sync_state,
+        repair_proofs: &repair_proofs,
+        current_sync_epoch: 0,
+        allow_remote_prune_audits,
+    })
+    .await
+}
+
+/// Execute one prune pass with repair-proof-gated remote confirmations.
+pub async fn run_prune_pass_with_context(ctx: PrunePassContext<'_>) -> PruneResult {
     let (stored_count, record_stats) = prune_stored_records(&ctx).await;
     let now = Instant::now();
     let (paid_count, paid_stats) =

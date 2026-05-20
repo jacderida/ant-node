@@ -216,11 +216,20 @@ async fn poc_f2_f5_without_binding_pay_yourself_passes_gate() {
         "without a floor the proof must NOT be stopped by the pre-RPC gate \
          (it reaches the on-chain step); got: {err}"
     );
+    // The test is designed to prove "passed the pre-RPC gate, died at the
+    // on-chain step." That is true whether the on-chain step returned 0
+    // (RPC reachable, no payment) — error contains "No quote paying this
+    // node at/above the price floor was paid >=3x" — or whether the RPC
+    // call itself errored (CI without mainnet) — error contains
+    // "completedPayments lookup failed". Either is the post-gate failure
+    // the test predicts; pre-fix on a real self-paid chain this is
+    // instead ACCEPTED = free storage.
+    let reached_on_chain = err
+        .contains("No quote paying this node at/above the price floor was paid >=3x")
+        || err.contains("completedPayments lookup failed");
     assert!(
-        err.contains("No quote paying this node at/above the price floor was paid >=3x"),
-        "expected the proof to reach the on-chain step and fail there \
-         (offline → 0 paid); pre-fix on a real self-paid chain this is \
-         instead ACCEPTED = free storage. got: {err}"
+        reached_on_chain,
+        "expected the proof to reach the on-chain step (and fail there); got: {err}"
     );
 }
 
@@ -257,10 +266,16 @@ async fn poc_f2_f5_fair_payment_passes_gate() {
         "a fair payment to this node must PASS the recipient+floor gate \
          (not be pre-RPC rejected); got: {err}"
     );
+    // Same robust either-or assertion as the without-binding test: a fair
+    // payment passes the pre-RPC gate and dies at the on-chain step, whether
+    // that yields the "paid 0" message (RPC reachable) or the "lookup failed"
+    // message (offline CI without mainnet).
+    let reached_on_chain = err
+        .contains("No quote paying this node at/above the price floor was paid >=3x")
+        || err.contains("completedPayments lookup failed");
     assert!(
-        err.contains("No quote paying this node at/above the price floor was paid >=3x")
-            && err.contains("last on-chain (amount, recipient16) Some((0,"),
+        reached_on_chain,
         "fair payment should pass the gate and reach (then fail at) the \
-         on-chain step offline; got: {err}"
+         on-chain step; got: {err}"
     );
 }

@@ -53,20 +53,21 @@ const QUOTE_FUTURE_SKEW_TOLERANCE_SECS: u64 = 300;
 
 /// Single-node price-floor tolerance divisor (finding F2/F5).
 ///
-/// The median quote's price must be at least
-/// `local_price / PRICE_FLOOR_TOLERANCE_DIVISOR`, where `local_price` is what
-/// this node would itself quote right now (`calculate_price(records_stored)`).
+/// `verify_evm_payment` requires every candidate quote (each quote that pays
+/// this node) to satisfy `Q.price >= local_price / PRICE_FLOOR_TOLERANCE_DIVISOR`,
+/// where `local_price = calculate_price(records_stored)` is what this node
+/// would itself quote right now. There is no median selection — the floor is
+/// enforced per-candidate before the on-chain check.
 ///
-/// Why a divisor rather than exact equality: a single-node proof carries 7
-/// close-group quotes and the *median* is checked. Close-group peers
-/// legitimately differ in `records_stored` (and therefore price), and a
-/// quote can be up to `QUOTE_MAX_AGE_SECS` old (price grows monotonically
-/// with this node's stored count, so our own floor only rises after a quote
-/// was issued). A divisor of 4 tolerates a 4× legitimate spread between this
-/// node's current price and an honest median — far more than real
-/// close-group variance — while still rejecting the F2/F5 attack, where the
-/// attacker's self-signed median is priced at 1 atto / baseline, i.e. many
-/// orders of magnitude below `local_price` on any non-empty node.
+/// Why a divisor rather than exact equality: close-group peers legitimately
+/// differ in `records_stored` (and therefore price), and a quote can be up
+/// to `QUOTE_MAX_AGE_SECS` old (price grows monotonically with this node's
+/// stored count, so our own floor only rises after a quote was issued). A
+/// divisor of 4 tolerates a 4× legitimate spread between this node's current
+/// price and an honest candidate — far more than real close-group variance —
+/// while still rejecting the F2/F5 underpricing attack, where the attacker's
+/// self-signed quotes are priced at 1 atto / baseline, i.e. many orders of
+/// magnitude below `local_price` on any non-empty node.
 const PRICE_FLOOR_TOLERANCE_DIVISOR: u64 = 4;
 
 /// Configuration for EVM payment verification.

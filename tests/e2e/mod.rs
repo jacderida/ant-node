@@ -66,6 +66,9 @@ mod security_attacks;
 #[cfg(test)]
 mod f2_f5_pay_yourself;
 
+#[cfg(test)]
+mod poc_f2_f5_price_floor;
+
 pub use anvil::TestAnvil;
 pub use harness::TestHarness;
 pub use testnet::{NetworkState, NodeState, TestNetwork, TestNetworkConfig, TestNode};

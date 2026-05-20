@@ -69,9 +69,10 @@ All parameters are configurable. Values below are a reference profile used for l
 | `NEIGHBOR_SYNC_COOLDOWN` | Per-peer min spacing between successive syncs with the same peer | `1h`                                |
 | `SELF_LOOKUP_INTERVAL` | Periodic self-lookup cadence to keep close neighborhood current | random in `[5 min, 10 min]`         |
 | `MAX_PARALLEL_FETCH_BOOTSTRAP` | Bootstrap concurrent fetches | `20`                                |
-| `AUDIT_TICK_INTERVAL` | Audit scheduler cadence | random in `[30 min, 1 hour]`        |
+| `AUDIT_TICK_INTERVAL` | Audit scheduler cadence | random in `[10 min, 20 min]`        |
 | *(dynamic)* | Audit sample count per round: `floor(sqrt(local_key_count))` | scales with store size |
-| `AUDIT_RESPONSE_TIMEOUT` | Audit response deadline | `12s`                               |
+| `AUDIT_RESPONSE_TIMEOUT` | Audit response deadline | `10s + 20ms per challenged key`     |
+| `AUDIT_FAILURE_TRUST_WEIGHT` | Trust penalty weight for confirmed audit failures | `5.0`                               |
 | `BOOTSTRAP_CLAIM_GRACE_PERIOD` | Max duration a peer may claim bootstrap status during its one allowed grace window before penalties apply | `24h`                               |
 | `PRUNE_HYSTERESIS_DURATION` | Minimum continuous out-of-range duration before pruning a key | `3 days`                            |
 

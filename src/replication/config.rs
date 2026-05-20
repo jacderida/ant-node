@@ -94,9 +94,9 @@ pub fn max_parallel_fetch() -> usize {
 }
 
 /// Minimum audit-scheduler cadence.
-const AUDIT_TICK_INTERVAL_MIN_SECS: u64 = 30 * 60;
+const AUDIT_TICK_INTERVAL_MIN_SECS: u64 = 10 * 60;
 /// Maximum audit-scheduler cadence.
-const AUDIT_TICK_INTERVAL_MAX_SECS: u64 = 60 * 60;
+const AUDIT_TICK_INTERVAL_MAX_SECS: u64 = 20 * 60;
 
 /// Audit scheduler cadence range (min).
 pub const AUDIT_TICK_INTERVAL_MIN: Duration = Duration::from_secs(AUDIT_TICK_INTERVAL_MIN_SECS);
@@ -105,9 +105,9 @@ pub const AUDIT_TICK_INTERVAL_MIN: Duration = Duration::from_secs(AUDIT_TICK_INT
 pub const AUDIT_TICK_INTERVAL_MAX: Duration = Duration::from_secs(AUDIT_TICK_INTERVAL_MAX_SECS);
 
 /// Base audit response deadline (independent of challenge size).
-const AUDIT_RESPONSE_BASE_SECS: u64 = 6;
-/// Per-chunk allowance added to the base audit response deadline.
-const AUDIT_RESPONSE_PER_CHUNK_MS: u64 = 10;
+const AUDIT_RESPONSE_BASE_SECS: u64 = 10;
+/// Per-key allowance added to the base audit response deadline.
+const AUDIT_RESPONSE_PER_KEY_MS: u64 = 20;
 
 /// Maximum duration a peer may claim bootstrap status before penalties apply.
 const BOOTSTRAP_CLAIM_GRACE_PERIOD_SECS: u64 = 24 * 60 * 60; // 24 h
@@ -145,7 +145,7 @@ const PENDING_VERIFY_MAX_AGE_SECS: u64 = 30 * 60;
 pub const PENDING_VERIFY_MAX_AGE: Duration = Duration::from_secs(PENDING_VERIFY_MAX_AGE_SECS);
 
 /// Trust event weight for confirmed audit failures.
-pub const AUDIT_FAILURE_TRUST_WEIGHT: f64 = 2.0;
+pub const AUDIT_FAILURE_TRUST_WEIGHT: f64 = 5.0;
 
 /// Maximum number of prune-confirmation audit challenges sent per prune pass.
 pub const MAX_PRUNE_AUDIT_CHALLENGES_PER_PASS: usize = 64;
@@ -187,10 +187,10 @@ pub struct ReplicationConfig {
     pub audit_tick_interval_min: Duration,
     /// Audit scheduler cadence range (max).
     pub audit_tick_interval_max: Duration,
-    /// Base audit response deadline (chunk-independent component).
+    /// Base audit response deadline (key-independent component).
     pub audit_response_base: Duration,
-    /// Per-chunk allowance added to the base audit response deadline.
-    pub audit_response_per_chunk: Duration,
+    /// Per-key allowance added to the base audit response deadline.
+    pub audit_response_per_key: Duration,
     /// Maximum duration a peer may claim bootstrap status.
     pub bootstrap_claim_grace_period: Duration,
     /// Minimum continuous out-of-range duration before pruning a key.
@@ -220,7 +220,7 @@ impl Default for ReplicationConfig {
             audit_tick_interval_min: AUDIT_TICK_INTERVAL_MIN,
             audit_tick_interval_max: AUDIT_TICK_INTERVAL_MAX,
             audit_response_base: Duration::from_secs(AUDIT_RESPONSE_BASE_SECS),
-            audit_response_per_chunk: Duration::from_millis(AUDIT_RESPONSE_PER_CHUNK_MS),
+            audit_response_per_key: Duration::from_millis(AUDIT_RESPONSE_PER_KEY_MS),
             bootstrap_claim_grace_period: BOOTSTRAP_CLAIM_GRACE_PERIOD,
             prune_hysteresis_duration: PRUNE_HYSTERESIS_DURATION,
             verification_request_timeout: VERIFICATION_REQUEST_TIMEOUT,
@@ -342,12 +342,12 @@ impl ReplicationConfig {
         (2 * Self::audit_sample_count(stored_chunks)).max(1)
     }
 
-    /// Compute the audit response timeout for a challenge with `chunk_count`
-    /// keys: `base + per_chunk * chunk_count`.
+    /// Compute the audit response timeout for a challenge with
+    /// `challenged_key_count` keys: `base + per_key * challenged_key_count`.
     #[must_use]
-    pub fn audit_response_timeout(&self, chunk_count: usize) -> Duration {
-        let chunks = u32::try_from(chunk_count).unwrap_or(u32::MAX);
-        self.audit_response_base + self.audit_response_per_chunk * chunks
+    pub fn audit_response_timeout(&self, challenged_key_count: usize) -> Duration {
+        let keys = u32::try_from(challenged_key_count).unwrap_or(u32::MAX);
+        self.audit_response_base + self.audit_response_per_key * keys
     }
 
     /// Returns a random duration in `[audit_tick_interval_min,
@@ -402,6 +402,11 @@ mod tests {
             config.prune_hysteresis_duration,
             Duration::from_secs(3 * 24 * 60 * 60)
         );
+    }
+
+    #[test]
+    fn audit_failure_weight_is_five() {
+        assert!((AUDIT_FAILURE_TRUST_WEIGHT - 5.0).abs() <= f64::EPSILON);
     }
 
     #[test]
@@ -694,8 +699,8 @@ mod tests {
     #[test]
     fn scenario_31_audit_cadence_within_jitter_bounds() {
         let config = ReplicationConfig {
-            audit_tick_interval_min: Duration::from_secs(1800),
-            audit_tick_interval_max: Duration::from_secs(3600),
+            audit_tick_interval_min: Duration::from_secs(600),
+            audit_tick_interval_max: Duration::from_secs(1200),
             ..ReplicationConfig::default()
         };
 
@@ -722,7 +727,7 @@ mod tests {
             prev = interval;
         }
 
-        // With 100 samples from a 30-minute range, at least two should differ
+        // With 100 samples from a 10-minute range, at least two should differ
         // (probabilistically near-certain).
         assert!(
             saw_different,

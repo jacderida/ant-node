@@ -730,13 +730,9 @@ impl PaymentVerifier {
             ))
         })?;
         let median_price = median.price;
-        let tied_quotes: Vec<&QuotePaymentInfo> = single_payment
-            .quotes
-            .iter()
-            .filter(|quote| quote.price == median_price)
-            .collect();
+        let tied_quotes = Self::ordered_median_tied_quotes(single_payment, median);
 
-        info!(
+        debug!(
             "Verifying single-node quote payment: median price {median_price}, {} quote(s) tied",
             tied_quotes.len()
         );
@@ -760,7 +756,7 @@ impl PaymentVerifier {
                 on_chain_amount,
             ) {
                 Ok(verified_amount) => {
-                    info!(
+                    debug!(
                         "Single-node payment verified: {verified_amount} atto paid for quote {}",
                         candidate.quote_hash
                     );
@@ -781,6 +777,24 @@ impl PaymentVerifier {
              expected at least {expected_amount}, checked {} tied quote(s).{detail}",
             tied_quotes.len()
         )))
+    }
+
+    /// Return median-price quotes with the selected median first, so the
+    /// normal single-node path needs one on-chain lookup. Other median-price
+    /// ties are kept as fallback for deterministic tie-order drift.
+    fn ordered_median_tied_quotes<'a>(
+        single_payment: &'a SingleNodePayment,
+        median: &'a QuotePaymentInfo,
+    ) -> Vec<&'a QuotePaymentInfo> {
+        let mut tied_quotes = Vec::with_capacity(CLOSE_GROUP_SIZE);
+        tied_quotes.push(median);
+        tied_quotes.extend(
+            single_payment
+                .quotes
+                .iter()
+                .filter(|quote| quote.price == median.price && !std::ptr::eq(*quote, median)),
+        );
+        tied_quotes
     }
 
     /// Validate the contract record for a single quote against amount and recipient.
@@ -2229,6 +2243,38 @@ mod tests {
         );
 
         assert_eq!(result.expect("valid completed payment"), on_chain_amount);
+    }
+
+    #[test]
+    fn ordered_median_tied_quotes_checks_selected_median_first() {
+        const TIED_PRICE_ATTO: u64 = 10;
+
+        let quotes = std::array::from_fn(|idx| {
+            let tag = u8::try_from(idx).expect("CLOSE_GROUP_SIZE fits in u8");
+            let price = Amount::from(TIED_PRICE_ATTO);
+            QuotePaymentInfo {
+                quote_hash: FixedBytes::from([tag; 32]),
+                rewards_address: RewardsAddress::new([tag; 20]),
+                amount: PaymentVerifier::expected_single_node_payment_amount(price)
+                    .expect("expected amount"),
+                price,
+            }
+        });
+        let single_payment = SingleNodePayment { quotes };
+        let median = single_payment.paid_quote().expect("median quote");
+
+        let ordered = PaymentVerifier::ordered_median_tied_quotes(&single_payment, median);
+
+        assert_eq!(ordered.len(), CLOSE_GROUP_SIZE);
+        assert_eq!(
+            ordered.first().expect("first tied quote").quote_hash,
+            median.quote_hash
+        );
+        let selected_median_count = ordered
+            .iter()
+            .filter(|quote| quote.quote_hash == median.quote_hash)
+            .count();
+        assert_eq!(selected_median_count, 1);
     }
 
     #[test]

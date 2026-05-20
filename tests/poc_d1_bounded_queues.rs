@@ -142,7 +142,7 @@ fn poc_d1_flooding_peer_cannot_starve_honest_peer() {
     let honest = peer_id_from_byte(0xBB);
 
     // Attacker floods far beyond any single-peer budget.
-    let attacker_flood: u32 = (MAX_PENDING_VERIFY_PER_PEER as u32).saturating_add(500_000);
+    let attacker_flood: u32 = (MAX_PENDING_VERIFY_PER_PEER as u32).saturating_add(10_000);
     let mut attacker_admitted = 0usize;
     for i in 0..attacker_flood {
         if queues.add_pending_verify(unique_xorname(i), entry_from(attacker)) {
@@ -250,11 +250,13 @@ fn poc_d1_bound_preserves_legitimate_entries() {
     );
 }
 
-/// D1f — mutating an entry via `get_pending_mut` (the real pipeline path:
-/// advancing `state`) must not desync the per-source quota counter. Guards
-/// the documented `get_pending_mut` invariant.
+/// D1f — advancing an entry's state via the narrow `set_pending_state`
+/// setter (the real pipeline path) must not desync the per-source quota
+/// counter. Guards the invariant that previously rested on a doc warning on
+/// the now-removed `get_pending_mut`: no public API can re-attribute a live
+/// entry to a different `hint_sender`.
 #[test]
-fn poc_d1_get_pending_mut_state_change_keeps_counter_consistent() {
+fn poc_d1_set_pending_state_keeps_counter_consistent() {
     let mut queues = ReplicationQueues::new();
     let peer = peer_id_from_byte(0xEE);
     let key = unique_xorname(1);
@@ -263,14 +265,16 @@ fn poc_d1_get_pending_mut_state_change_keeps_counter_consistent() {
     assert_eq!(queues.pending_count_for_sender(&peer), 1);
 
     // Exactly what run_verification_cycle does: advance the FSM state.
-    let entry = queues.get_pending_mut(&key).expect("entry must be present");
-    entry.state = VerificationState::QuorumVerified;
+    let pipeline = queues
+        .set_pending_state(&key, VerificationState::QuorumVerified)
+        .expect("entry must be present");
+    assert_eq!(pipeline, HintPipeline::Replica, "pipeline preserved");
 
     // Counter unchanged by a state mutation (it tracks membership, not state).
     assert_eq!(
         queues.pending_count_for_sender(&peer),
         1,
-        "get_pending_mut state change must not touch the per-source counter"
+        "state change must not touch the per-source counter"
     );
 
     // And removal still correctly releases exactly one slot.

@@ -1860,9 +1860,10 @@ async fn run_verification_cycle(ctx: VerificationCycleContext<'_>) {
         let mut q = queues.write().await;
         for key in &pending_keys {
             if paid_list.contains(key).unwrap_or(false) {
-                if let Some(entry) = q.get_pending_mut(key) {
-                    entry.state = VerificationState::PaidListVerified;
-                    match entry.pipeline {
+                if let Some(pipeline) =
+                    q.set_pending_state(key, VerificationState::PaidListVerified)
+                {
+                    match pipeline {
                         HintPipeline::PaidOnly => {
                             // Paid-only + local paid state needs one more
                             // responsibility check outside this lock: if we

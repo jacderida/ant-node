@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 use crate::logging::debug;
 
 use crate::ant_protocol::XorName;
-use crate::replication::types::{FetchCandidate, VerificationEntry};
+use crate::replication::types::{
+    FetchCandidate, HintPipeline, VerificationEntry, VerificationState,
+};
 use saorsa_core::identity::PeerId;
 
 /// Global hard upper bound on the number of keys held in `pending_verify`.
@@ -210,17 +212,25 @@ impl ReplicationQueues {
         self.pending_verify.get(key)
     }
 
-    /// Get a mutable reference to a pending verification entry.
+    /// Advance a pending entry's verification `state`, returning the entry's
+    /// `pipeline` (so the caller can branch on it) when the key was found.
     ///
-    /// INVARIANT: callers MUST NOT reassign `entry.hint_sender` through the
-    /// returned reference. The per-source quota counter
-    /// (`pending_per_sender`) is keyed by the `hint_sender` recorded at
-    /// admission; re-attributing a live entry to a different peer here would
-    /// orphan a count (decremented against the wrong peer on removal/eviction)
-    /// and silently desync the quota. Mutate only verification-progress
-    /// fields (e.g. `state`, `verified_sources`, `tried_sources`).
-    pub fn get_pending_mut(&mut self, key: &XorName) -> Option<&mut VerificationEntry> {
-        self.pending_verify.get_mut(key)
+    /// Replaces a prior `get_pending_mut` which handed out `&mut VerificationEntry`
+    /// and relied on a doc-comment to keep callers from re-assigning
+    /// `hint_sender`. The per-source quota counter (`pending_per_sender`) is
+    /// keyed by `hint_sender` recorded at admission; re-attributing a live
+    /// entry to a different peer would orphan a count and silently desync
+    /// the quota — exactly the silent-starvation class this fix prevents.
+    /// Narrowing the mutation API to a single setter makes that mistake
+    /// impossible to commit by accident.
+    pub fn set_pending_state(
+        &mut self,
+        key: &XorName,
+        state: VerificationState,
+    ) -> Option<HintPipeline> {
+        let entry = self.pending_verify.get_mut(key)?;
+        entry.state = state;
+        Some(entry.pipeline)
     }
 
     /// Remove a key from pending verification.
@@ -408,7 +418,6 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::replication::types::{HintPipeline, VerificationState};
 
     /// Build a `PeerId` from a single byte (zero-padded to 32 bytes).
     fn peer_id_from_byte(b: u8) -> PeerId {

@@ -70,6 +70,8 @@ pub struct PrunePassContext<'a> {
     pub sync_state: &'a Arc<RwLock<NeighborSyncState>>,
     /// Key-specific repair proofs used to gate prune-confirmation audits.
     pub repair_proofs: &'a Arc<RwLock<RepairProofs>>,
+    /// Current local neighbor-sync cycle epoch.
+    pub current_sync_epoch: u64,
     /// Whether remote prune-confirmation audits are allowed this pass.
     pub allow_remote_prune_audits: bool,
 }
@@ -312,9 +314,18 @@ async fn evaluate_record_prune_key(
         return outcome;
     }
 
-    if !target_peers_have_repair_proofs(key, &target_peers, ctx.repair_proofs).await {
+    let current_close_peers: Vec<PeerId> = closest.iter().map(|node| node.peer_id).collect();
+    if !target_peers_have_mature_repair_proofs(
+        key,
+        &target_peers,
+        &current_close_peers,
+        ctx.repair_proofs,
+        ctx.current_sync_epoch,
+    )
+    .await
+    {
         debug!(
-            "Deferring prune for {} until current close group has repair proofs",
+            "Deferring prune for {} until current close group has mature repair proofs",
             hex::encode(key)
         );
         return outcome;
@@ -403,15 +414,17 @@ fn remote_close_group_peers(close_group: &[DHTNode], self_id: &PeerId) -> Vec<Pe
         .collect()
 }
 
-async fn target_peers_have_repair_proofs(
+async fn target_peers_have_mature_repair_proofs(
     key: &XorName,
     target_peers: &[PeerId],
+    current_close_peers: &[PeerId],
     repair_proofs: &Arc<RwLock<RepairProofs>>,
+    current_sync_epoch: u64,
 ) -> bool {
-    let proofs = repair_proofs.read().await;
-    target_peers
-        .iter()
-        .all(|peer| proofs.has_replica_hint(peer, key))
+    let mut proofs = repair_proofs.write().await;
+    target_peers.iter().all(|peer| {
+        proofs.has_mature_replica_hint(peer, key, current_close_peers, current_sync_epoch)
+    })
 }
 
 async fn prune_scan_start(

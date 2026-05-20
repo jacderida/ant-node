@@ -137,6 +137,7 @@ async fn record_repair_proofs_for_peers(
     config: &ReplicationConfig,
     peers: &[PeerId],
     key: &[u8; 32],
+    hinted_at_epoch: u64,
 ) {
     let close_peers: Vec<PeerId> = p2p_node
         .dht_manager()
@@ -148,10 +149,11 @@ async fn record_repair_proofs_for_peers(
     let mut proofs = repair_proofs.write().await;
     for peer in peers {
         assert!(
-            proofs.record_replica_hint_sent(*peer, *key, &close_peers),
+            proofs.record_replica_hint_sent(*peer, *key, &close_peers, hinted_at_epoch),
             "test target should be in close group for repair-proof recording"
         );
     }
+    drop(proofs);
 }
 
 /// Fresh write happy path (Section 18 #1).
@@ -471,6 +473,9 @@ async fn test_audit_absent_key_returns_sentinel() {
 #[tokio::test]
 #[serial]
 async fn test_prune_pass_requires_remote_confirmation_before_delete() {
+    const HINT_EPOCH: u64 = 7;
+    const CURRENT_EPOCH: u64 = HINT_EPOCH + 1;
+
     let harness = TestHarness::setup_minimal().await.expect("setup");
     harness.warmup_dht().await.expect("warmup");
 
@@ -508,6 +513,7 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
         &config,
         &gate_targets,
         &gate_address,
+        HINT_EPOCH,
     )
     .await;
 
@@ -519,6 +525,7 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
         config: &config,
         sync_state: &sync_state,
         repair_proofs: &repair_proofs,
+        current_sync_epoch: CURRENT_EPOCH,
         allow_remote_prune_audits: false,
     })
     .await;
@@ -536,6 +543,7 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
         config: &config,
         sync_state: &sync_state,
         repair_proofs: &repair_proofs,
+        current_sync_epoch: CURRENT_EPOCH,
         allow_remote_prune_audits: true,
     })
     .await;
@@ -566,6 +574,7 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
         &config,
         &missing_targets,
         &missing_address,
+        HINT_EPOCH,
     )
     .await;
 
@@ -577,6 +586,7 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
         config: &config,
         sync_state: &sync_state,
         repair_proofs: &repair_proofs,
+        current_sync_epoch: CURRENT_EPOCH,
         allow_remote_prune_audits: true,
     })
     .await;
@@ -602,6 +612,7 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
         config: &config,
         sync_state: &sync_state,
         repair_proofs: &repair_proofs,
+        current_sync_epoch: CURRENT_EPOCH,
         allow_remote_prune_audits: true,
     })
     .await;

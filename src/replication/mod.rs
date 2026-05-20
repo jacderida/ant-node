@@ -129,6 +129,8 @@ pub struct ReplicationEngine {
     /// are lightweight (`PeerSyncRecord` is two fields) and peer IDs are
     /// naturally bounded by the routing table's k-bucket capacity.
     sync_history: Arc<RwLock<HashMap<PeerId, PeerSyncRecord>>>,
+    /// Completed local neighbor-sync cycle epoch for proof maturity.
+    sync_cycle_epoch: Arc<RwLock<u64>>,
     /// Per-key repair proof tracking for audit eligibility.
     repair_proofs: Arc<RwLock<RepairProofs>>,
     /// Bootstrap state tracking.
@@ -189,6 +191,7 @@ impl ReplicationEngine {
             queues: Arc::new(RwLock::new(ReplicationQueues::new())),
             sync_state: Arc::new(RwLock::new(initial_neighbors)),
             sync_history: Arc::new(RwLock::new(HashMap::new())),
+            sync_cycle_epoch: Arc::new(RwLock::new(0)),
             repair_proofs: Arc::new(RwLock::new(RepairProofs::new())),
             bootstrap_state: Arc::new(RwLock::new(BootstrapState::new())),
             is_bootstrapping: Arc::new(RwLock::new(true)),
@@ -361,6 +364,7 @@ impl ReplicationEngine {
         let is_bootstrapping = Arc::clone(&self.is_bootstrapping);
         let bootstrap_state = Arc::clone(&self.bootstrap_state);
         let sync_history = Arc::clone(&self.sync_history);
+        let sync_cycle_epoch = Arc::clone(&self.sync_cycle_epoch);
         let repair_proofs = Arc::clone(&self.repair_proofs);
         let sync_trigger = Arc::clone(&self.sync_trigger);
 
@@ -403,6 +407,7 @@ impl ReplicationEngine {
                                     &is_bootstrapping,
                                     &bootstrap_state,
                                     &sync_history,
+                                    &sync_cycle_epoch,
                                     &repair_proofs,
                                     rr_message_id.as_deref(),
                                 ).await {
@@ -425,11 +430,17 @@ impl ReplicationEngine {
                     // PeerDisconnected event against the close group.
                     dht_event = dht_events.recv() => {
                         let Ok(dht_event) = dht_event else { continue };
-                        if let DhtNetworkEvent::KClosestPeersChanged { .. } = dht_event {
-                            debug!(
-                                "K-closest peers changed, triggering early neighbor sync"
-                            );
-                            sync_trigger.notify_one();
+                        match dht_event {
+                            DhtNetworkEvent::KClosestPeersChanged { .. } => {
+                                debug!(
+                                    "K-closest peers changed, triggering early neighbor sync"
+                                );
+                                sync_trigger.notify_one();
+                            }
+                            DhtNetworkEvent::PeerRemoved { peer_id } => {
+                                repair_proofs.write().await.remove_peer(&peer_id);
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -448,6 +459,7 @@ impl ReplicationEngine {
         let shutdown = self.shutdown.clone();
         let sync_state = Arc::clone(&self.sync_state);
         let sync_history = Arc::clone(&self.sync_history);
+        let sync_cycle_epoch = Arc::clone(&self.sync_cycle_epoch);
         let repair_proofs = Arc::clone(&self.repair_proofs);
         let is_bootstrapping = Arc::clone(&self.is_bootstrapping);
         let bootstrap_state = Arc::clone(&self.bootstrap_state);
@@ -476,6 +488,7 @@ impl ReplicationEngine {
                         &config,
                         &sync_state,
                         &sync_history,
+                        &sync_cycle_epoch,
                         &repair_proofs,
                         &is_bootstrapping,
                         &bootstrap_state,
@@ -515,6 +528,7 @@ impl ReplicationEngine {
         let config = Arc::clone(&self.config);
         let shutdown = self.shutdown.clone();
         let sync_history = Arc::clone(&self.sync_history);
+        let sync_cycle_epoch = Arc::clone(&self.sync_cycle_epoch);
         let repair_proofs = Arc::clone(&self.repair_proofs);
         let bootstrap_state = Arc::clone(&self.bootstrap_state);
         let is_bootstrapping = Arc::clone(&self.is_bootstrapping);
@@ -540,9 +554,17 @@ impl ReplicationEngine {
                 let bootstrapping = *is_bootstrapping.read().await;
                 let result = {
                     let history = sync_history.read().await;
-                    let proofs = repair_proofs.read().await.clone();
-                    audit::audit_tick(&p2p, &storage, &config, &history, &proofs, bootstrapping)
-                        .await
+                    let current_sync_epoch = *sync_cycle_epoch.read().await;
+                    audit::audit_tick(
+                        &p2p,
+                        &storage,
+                        &config,
+                        &history,
+                        &repair_proofs,
+                        current_sync_epoch,
+                        bootstrapping,
+                    )
+                    .await
                 };
                 handle_audit_result(&result, &p2p, &sync_state, &config).await;
             }
@@ -556,13 +578,14 @@ impl ReplicationEngine {
                         let bootstrapping = *is_bootstrapping.read().await;
                         let result = {
                             let history = sync_history.read().await;
-                            let proofs = repair_proofs.read().await.clone();
+                            let current_sync_epoch = *sync_cycle_epoch.read().await;
                             audit::audit_tick(
                                 &p2p,
                                 &storage,
                                 &config,
                                 &history,
-                                &proofs,
+                                &repair_proofs,
+                                current_sync_epoch,
                                 bootstrapping,
                             )
                             .await
@@ -789,6 +812,7 @@ impl ReplicationEngine {
     /// After the gate, finds close neighbors, syncs with each in
     /// round-robin batches, admits returned hints into the verification
     /// pipeline, and tracks discovered keys for bootstrap drain detection.
+    #[allow(clippy::too_many_lines)]
     fn start_bootstrap_sync(
         &mut self,
         dht_events: tokio::sync::broadcast::Receiver<DhtNetworkEvent>,
@@ -802,6 +826,7 @@ impl ReplicationEngine {
         let is_bootstrapping = Arc::clone(&self.is_bootstrapping);
         let bootstrap_state = Arc::clone(&self.bootstrap_state);
         let bootstrap_complete_notify = Arc::clone(&self.bootstrap_complete_notify);
+        let sync_cycle_epoch = Arc::clone(&self.sync_cycle_epoch);
         let repair_proofs = Arc::clone(&self.repair_proofs);
 
         let handle = tokio::spawn(async move {
@@ -868,6 +893,7 @@ impl ReplicationEngine {
                                 peer,
                                 &outcome.sent_replica_hints,
                                 &repair_proofs,
+                                &sync_cycle_epoch,
                                 &p2p,
                                 &config,
                             )
@@ -945,6 +971,7 @@ async fn handle_replication_message(
     is_bootstrapping: &Arc<RwLock<bool>>,
     bootstrap_state: &Arc<RwLock<BootstrapState>>,
     sync_history: &Arc<RwLock<HashMap<PeerId, PeerSyncRecord>>>,
+    sync_cycle_epoch: &Arc<RwLock<u64>>,
     repair_proofs: &Arc<RwLock<RepairProofs>>,
     rr_message_id: Option<&str>,
 ) -> Result<()> {
@@ -990,6 +1017,7 @@ async fn handle_replication_message(
                 bootstrapping,
                 bootstrap_state,
                 sync_history,
+                sync_cycle_epoch,
                 repair_proofs,
                 msg.request_id,
                 rr_message_id,
@@ -1286,6 +1314,7 @@ async fn handle_neighbor_sync_request(
     is_bootstrapping: bool,
     bootstrap_state: &Arc<RwLock<BootstrapState>>,
     sync_history: &Arc<RwLock<HashMap<PeerId, PeerSyncRecord>>>,
+    sync_cycle_epoch: &Arc<RwLock<u64>>,
     repair_proofs: &Arc<RwLock<RepairProofs>>,
     request_id: u64,
     rr_message_id: Option<&str>,
@@ -1325,18 +1354,8 @@ async fn handle_neighbor_sync_request(
         return Ok(());
     }
 
-    if response_sent && !request.bootstrapping {
-        record_sent_replica_hints(
-            source,
-            &response.replica_hints,
-            repair_proofs,
-            p2p_node,
-            config,
-        )
-        .await;
-    }
-
-    // Update sync history for this peer.
+    // Update sync history for this peer before recording repair proofs so a
+    // same-tick audit cannot combine a fresh key proof with stale peer maturity.
     {
         let mut history = sync_history.write().await;
         let record = history.entry(*source).or_insert(PeerSyncRecord {
@@ -1345,6 +1364,18 @@ async fn handle_neighbor_sync_request(
         });
         record.last_sync = Some(Instant::now());
         record.cycles_since_sync = 0;
+    }
+
+    if response_sent && !request.bootstrapping {
+        record_sent_replica_hints(
+            source,
+            &response.replica_hints,
+            repair_proofs,
+            sync_cycle_epoch,
+            p2p_node,
+            config,
+        )
+        .await;
     }
 
     // Admit inbound hints and queue for verification.
@@ -1548,6 +1579,7 @@ async fn record_sent_replica_hints(
     peer: &PeerId,
     keys: &[XorName],
     repair_proofs: &Arc<RwLock<RepairProofs>>,
+    sync_cycle_epoch: &Arc<RwLock<u64>>,
     p2p_node: &Arc<P2PNode>,
     config: &ReplicationConfig,
 ) {
@@ -1555,6 +1587,7 @@ async fn record_sent_replica_hints(
         return;
     }
 
+    let hinted_at_epoch = *sync_cycle_epoch.read().await;
     let dht = p2p_node.dht_manager();
     let mut records = Vec::with_capacity(keys.len());
     for key in keys {
@@ -1569,7 +1602,7 @@ async fn record_sent_replica_hints(
 
     let mut proofs = repair_proofs.write().await;
     for (key, close_peers) in records {
-        if proofs.record_replica_hint_sent(*peer, key, &close_peers) {
+        if proofs.record_replica_hint_sent(*peer, key, &close_peers, hinted_at_epoch) {
             debug!(
                 "Recorded repair hint proof for peer {peer} and key {}",
                 hex::encode(key)
@@ -1592,6 +1625,7 @@ async fn run_neighbor_sync_round(
     config: &ReplicationConfig,
     sync_state: &Arc<RwLock<NeighborSyncState>>,
     sync_history: &Arc<RwLock<HashMap<PeerId, PeerSyncRecord>>>,
+    sync_cycle_epoch: &Arc<RwLock<u64>>,
     repair_proofs: &Arc<RwLock<RepairProofs>>,
     is_bootstrapping: &Arc<RwLock<bool>>,
     bootstrap_state: &Arc<RwLock<BootstrapState>>,
@@ -1604,6 +1638,20 @@ async fn run_neighbor_sync_round(
     // prune pass and DHT snapshot so other tasks are not starved.
     let cycle_complete = sync_state.read().await.is_cycle_complete();
     if cycle_complete {
+        // A completed local neighbor-sync cycle matures key-specific repair
+        // proofs recorded in earlier epochs.
+        {
+            let mut history = sync_history.write().await;
+            for record in history.values_mut() {
+                record.cycles_since_sync = record.cycles_since_sync.saturating_add(1);
+            }
+        }
+        let current_sync_epoch = {
+            let mut epoch = sync_cycle_epoch.write().await;
+            *epoch = epoch.saturating_add(1);
+            *epoch
+        };
+
         // Post-cycle pruning (Section 11) — runs without holding sync_state.
         // Remote prune-confirmation audits are storage-proof audits and only
         // run after bootstrap has drained.
@@ -1616,17 +1664,10 @@ async fn run_neighbor_sync_round(
             config,
             sync_state,
             repair_proofs,
+            current_sync_epoch,
             allow_remote_prune_audits,
         })
         .await;
-
-        // Increment `cycles_since_sync` for all peers.
-        {
-            let mut history = sync_history.write().await;
-            for record in history.values_mut() {
-                record.cycles_since_sync = record.cycles_since_sync.saturating_add(1);
-            }
-        }
 
         // Take fresh close-neighbor snapshot (DHT query, no lock held).
         let neighbors =
@@ -1694,6 +1735,7 @@ async fn run_neighbor_sync_round(
                 queues,
                 sync_state,
                 sync_history,
+                sync_cycle_epoch,
                 repair_proofs,
             )
             .await;
@@ -1731,6 +1773,7 @@ async fn run_neighbor_sync_round(
                         queues,
                         sync_state,
                         sync_history,
+                        sync_cycle_epoch,
                         repair_proofs,
                     )
                     .await;
@@ -1757,6 +1800,7 @@ async fn handle_sync_response(
     queues: &Arc<RwLock<ReplicationQueues>>,
     sync_state: &Arc<RwLock<NeighborSyncState>>,
     sync_history: &Arc<RwLock<HashMap<PeerId, PeerSyncRecord>>>,
+    sync_cycle_epoch: &Arc<RwLock<u64>>,
     repair_proofs: &Arc<RwLock<RepairProofs>>,
 ) {
     // Record successful sync.
@@ -1818,7 +1862,15 @@ async fn handle_sync_response(
             let mut state = sync_state.write().await;
             state.clear_active_bootstrap_claim(peer);
         }
-        record_sent_replica_hints(peer, sent_replica_hints, repair_proofs, p2p_node, config).await;
+        record_sent_replica_hints(
+            peer,
+            sent_replica_hints,
+            repair_proofs,
+            sync_cycle_epoch,
+            p2p_node,
+            config,
+        )
+        .await;
         let outcome = admit_and_queue_hints(
             self_id,
             peer,

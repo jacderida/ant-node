@@ -21,6 +21,7 @@ use crate::replication::types::{
 use crate::storage::LmdbStorage;
 use saorsa_core::identity::PeerId;
 use saorsa_core::P2PNode;
+use tokio::sync::RwLock;
 
 // ---------------------------------------------------------------------------
 // Audit tick result
@@ -69,7 +70,8 @@ pub async fn audit_tick(
     storage: &Arc<LmdbStorage>,
     config: &ReplicationConfig,
     sync_history: &HashMap<PeerId, PeerSyncRecord>,
-    repair_proofs: &RepairProofs,
+    repair_proofs: &Arc<RwLock<RepairProofs>>,
+    current_sync_epoch: u64,
     is_bootstrapping: bool,
 ) -> AuditTickResult {
     // Invariant 19: never audit while still bootstrapping.
@@ -125,15 +127,29 @@ pub async fn audit_tick(
     // Step 4: Filter to keys where the chosen peer is in the close group and
     // this node has proof that it already sent the peer a repair hint for the
     // specific key.
-    let mut peer_keys = Vec::new();
+    let mut sampled_key_groups = Vec::new();
     for key in &sampled_keys {
         let closest = dht
             .find_closest_nodes_local_with_self(key, config.close_group_size)
             .await;
-        if closest.iter().any(|n| n.peer_id == challenged_peer)
-            && repair_proofs.has_replica_hint(&challenged_peer, key)
-        {
-            peer_keys.push(*key);
+        let close_peers: Vec<PeerId> = closest.iter().map(|node| node.peer_id).collect();
+        if close_peers.contains(&challenged_peer) {
+            sampled_key_groups.push((*key, close_peers));
+        }
+    }
+
+    let mut peer_keys = Vec::new();
+    {
+        let mut proofs = repair_proofs.write().await;
+        for (key, close_peers) in sampled_key_groups {
+            if proofs.has_mature_replica_hint(
+                &challenged_peer,
+                &key,
+                &close_peers,
+                current_sync_epoch,
+            ) {
+                peer_keys.push(key);
+            }
         }
     }
 

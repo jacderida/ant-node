@@ -371,6 +371,17 @@ pub struct BootstrapState {
     /// Keys discovered during bootstrap that are still in the verification /
     /// fetch pipeline.
     pub pending_keys: HashSet<XorName>,
+    /// Peers whose last bootstrap admission cycle had one or more hints
+    /// silently dropped at the `pending_verify` capacity bounds. Each entry
+    /// represents "this source still owes us at least one re-hinted key
+    /// after the queues drain". `check_bootstrap_drained` refuses to claim
+    /// the node fully drained while this set is non-empty: a source's
+    /// presence is cleared by its next admission cycle that completes with
+    /// zero capacity rejections (i.e. the source successfully re-delivered
+    /// everything that previously overflowed). Tracking per-source instead
+    /// of a global counter prevents one peer's rejection from being
+    /// "cleared" by an unrelated peer's clean cycle.
+    pub capacity_rejected_sources: HashSet<PeerId>,
 }
 
 impl BootstrapState {
@@ -381,6 +392,7 @@ impl BootstrapState {
             drained: false,
             pending_peer_requests: 0,
             pending_keys: HashSet::new(),
+            capacity_rejected_sources: HashSet::new(),
         }
     }
 

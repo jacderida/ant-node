@@ -506,8 +506,17 @@ impl PaymentVerifier {
     /// 4. Peer ID bindings match the ML-DSA-65 public keys
     /// 5. This node is among the quoted recipients
     /// 6. All ML-DSA-65 signatures are valid (offloaded to `spawn_blocking`)
-    /// 7. The median-priced quote was paid at least 3x its price on-chain
-    ///    (looked up via `completedPayments(quoteHash)` on the payment vault)
+    /// 7. Per-candidate F2/F5 binding: there exists a quote `Q` where ALL of
+    ///    the following hold on the SAME `Q` — (a) `Q.rewards_address` is
+    ///    THIS node's `local_rewards_address`, (b) `Q.price` is at or above
+    ///    this node's live price floor (`calculate_price(records_stored)` /
+    ///    `PRICE_FLOOR_TOLERANCE_DIVISOR`), (c) on-chain
+    ///    `completedPayments(Q.hash).amount >= 3 * Q.price`, AND (d) on-chain
+    ///    `completedPayments(Q.hash).rewardsAddress` (the 16-byte
+    ///    truncation the contract actually stores) matches this node's
+    ///    address. There is NO median selection — the floor and recipient
+    ///    binding are enforced per-candidate so neither the underpricing
+    ///    primitive nor the pay-yourself primitive survives.
     ///
     /// For unit tests that don't need on-chain verification, pre-populate
     /// the cache so `verify_payment` returns `CachedAsVerified` before
@@ -558,15 +567,21 @@ impl PaymentVerifier {
         //    so the 3x on-chain amount is negligible.
         //
         // Sound invariant enforced below: accept ONLY if there exists a quote
-        // `Q` in the proof such that
+        // `Q` in the proof such that ALL of the following hold on the SAME Q:
         //   (a) `Q.rewards_address == this node's local_rewards_address`
-        //       (the payment actually pays *us*, not the attacker), AND
-        //   (b) `Q.price >= price_floor` (a fair price for *this* node), AND
-        //   (c) on-chain `completedPayments(Q.hash).amount >= 3 * Q.price`.
+        //       (the proof attributes payment to *us*, not the attacker),
+        //   (b) `Q.price >= price_floor` (a fair price for *this* node),
+        //   (c) on-chain `completedPayments(Q.hash).amount >= 3 * Q.price`,
+        //   (d) on-chain `completedPayments(Q.hash).rewardsAddress` (a 16-byte
+        //       truncation the contract stores; see the `local_first16`
+        //       derivation below) matches this node's address — i.e. the ANT
+        //       was actually sent to us on-chain, not redirected to the
+        //       attacker's own wallet by `payForQuotes`.
         //
-        // (a)+(b) are checked on the SAME quote whose 3x payment is verified
-        // on-chain in (c), so decoy/tied-price tricks and self-payment are
-        // both defeated.
+        // (a)+(b) gate the candidate set; (c)+(d) check the trusted on-chain
+        // record for the same Q. Decoy/tied-price tricks and self-payment
+        // are both defeated because the same quote that meets the pre-RPC
+        // gate is also the quote whose on-chain payment we verify.
 
         // `map_or_else` would force the side-effecting `warn!` into a closure
         // and hurt readability; the explicit branch is clearer here.
@@ -578,8 +593,9 @@ impl PaymentVerifier {
             floor.current() / Amount::from(PRICE_FLOOR_TOLERANCE_DIVISOR)
         } else {
             // A production node MUST configure a price floor. Without one the
-            // underpricing leg is not bounded — surface loudly. The recipient
-            // binding (a) + on-chain (c) still apply, so this is not silently
+            // underpricing leg (b) is not bounded — surface loudly. The
+            // recipient bindings (a) + (d) and the 3x amount check (c) still
+            // apply, so this is not silently
             // exploitable, but it is not a supported prod configuration.
             crate::logging::warn!(
                 "PaymentVerifier has no price_floor configured; single-node \
@@ -613,7 +629,8 @@ impl PaymentVerifier {
 
         // Prefer the cheapest qualifying quote so a legitimately-paid proof
         // is found with the fewest RPC calls; all candidates already satisfy
-        // (a) and (b), so any on-chain hit is sound.
+        // (a) and (b), so a candidate that ALSO satisfies (c) and (d)
+        // on-chain is a sound accept.
         paying_candidates.sort_by_key(|q| q.price);
 
         let provider = evmlib::utils::http_provider(self.config.evm.network.rpc_url().clone());

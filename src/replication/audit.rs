@@ -1195,7 +1195,7 @@ mod tests {
     }
 
     #[test]
-    fn audit_key_filter_accepts_only_mature_current_snapshot_repair_proofs() {
+    fn audit_key_filter_retains_stable_proofs_and_rejects_evicted_peers() {
         const HINT_EPOCH: u64 = 7;
         const CURRENT_EPOCH: u64 = HINT_EPOCH + 1;
         const CHALLENGED_PEER_BYTE: u8 = 0xA1;
@@ -1204,7 +1204,8 @@ mod tests {
         const MATURE_KEY_BYTE: u8 = 0xB1;
         const SAME_EPOCH_KEY_BYTE: u8 = 0xB2;
         const MISSING_PROOF_KEY_BYTE: u8 = 0xB3;
-        const STALE_SNAPSHOT_KEY_BYTE: u8 = 0xB4;
+        const STABLE_CHURN_KEY_BYTE: u8 = 0xB4;
+        const EVICTED_KEY_BYTE: u8 = 0xB5;
         const XOR_NAME_LEN: usize = 32;
 
         let challenged_peer = peer_id_from_bytes([CHALLENGED_PEER_BYTE; XOR_NAME_LEN]);
@@ -1213,9 +1214,11 @@ mod tests {
         let mature_key = [MATURE_KEY_BYTE; XOR_NAME_LEN];
         let same_epoch_key = [SAME_EPOCH_KEY_BYTE; XOR_NAME_LEN];
         let missing_proof_key = [MISSING_PROOF_KEY_BYTE; XOR_NAME_LEN];
-        let stale_snapshot_key = [STALE_SNAPSHOT_KEY_BYTE; XOR_NAME_LEN];
+        let stable_churn_key = [STABLE_CHURN_KEY_BYTE; XOR_NAME_LEN];
+        let evicted_key = [EVICTED_KEY_BYTE; XOR_NAME_LEN];
         let close_group = HashSet::from([challenged_peer, other_peer]);
         let changed_close_group = HashSet::from([challenged_peer, new_peer]);
+        let evicted_close_group = HashSet::from([other_peer, new_peer]);
         let mut repair_proofs = RepairProofs::new();
 
         assert!(repair_proofs.record_replica_hint_sent(
@@ -1232,7 +1235,13 @@ mod tests {
         ));
         assert!(repair_proofs.record_replica_hint_sent(
             challenged_peer,
-            stale_snapshot_key,
+            stable_churn_key,
+            &close_group,
+            HINT_EPOCH,
+        ));
+        assert!(repair_proofs.record_replica_hint_sent(
+            challenged_peer,
+            evicted_key,
             &close_group,
             HINT_EPOCH,
         ));
@@ -1240,8 +1249,9 @@ mod tests {
         let sampled_key_groups = vec![
             (mature_key, close_group.clone()),
             (same_epoch_key, close_group.clone()),
-            (missing_proof_key, close_group),
-            (stale_snapshot_key, changed_close_group),
+            (missing_proof_key, close_group.clone()),
+            (stable_churn_key, changed_close_group),
+            (evicted_key, evicted_close_group),
         ];
         let peer_keys = mature_audit_keys_for_peer(
             &challenged_peer,
@@ -1252,8 +1262,8 @@ mod tests {
 
         assert_eq!(
             peer_keys,
-            vec![mature_key],
-            "only mature proofs for the current close-group snapshot should become audit keys"
+            vec![mature_key, stable_churn_key],
+            "mature proofs for stable close-group peers should become audit keys, while same-epoch, missing, and evicted-peer proofs should not"
         );
     }
 

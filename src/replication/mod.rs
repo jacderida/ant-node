@@ -1339,7 +1339,7 @@ async fn handle_neighbor_sync_request(
         .await;
 
     // Send response.
-    let response_sent = send_replication_response(
+    let response_sent = send_replication_response_checked(
         source,
         p2p_node,
         request_id,
@@ -1530,17 +1530,32 @@ async fn handle_audit_challenge_msg(
 // Message sending helper
 // ---------------------------------------------------------------------------
 
-/// Send a replication response message.
+/// Send a replication response message as a best-effort reply.
+///
+/// Encode and send failures are logged by the checked helper. Most response
+/// paths do not need to branch on send success, so this wrapper keeps those
+/// call sites explicit about their best-effort behavior.
+async fn send_replication_response(
+    peer: &PeerId,
+    p2p_node: &Arc<P2PNode>,
+    request_id: u64,
+    body: ReplicationMessageBody,
+    rr_message_id: Option<&str>,
+) {
+    let _ =
+        send_replication_response_checked(peer, p2p_node, request_id, body, rr_message_id).await;
+}
+
+/// Send a replication response message and report whether it was accepted.
 ///
 /// Returns `true` after the message is encoded and accepted by the P2P send
-/// path. Returns `false` after logging an encode or send failure. Most callers
-/// only need best-effort responses, but repair-proof recording uses this to
-/// avoid trusting hints that were not actually sent.
+/// path. Returns `false` after logging an encode or send failure. Repair-proof
+/// recording uses this to avoid trusting hints that were not actually sent.
 ///
 /// When `rr_message_id` is `Some`, the response is sent via the `/rr/`
 /// request-response path so saorsa-core can route it back to the caller's
 /// `send_request` future. Otherwise it is sent as a plain message.
-async fn send_replication_response(
+async fn send_replication_response_checked(
     peer: &PeerId,
     p2p_node: &Arc<P2PNode>,
     request_id: u64,

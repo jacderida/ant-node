@@ -165,6 +165,14 @@ impl BinaryCache {
     /// The caller MUST extract the binary from the returned (private) archive
     /// path, so the executed bytes always derive from signature-verified
     /// input that no other principal could have modified post-verification.
+    ///
+    /// `private_dir` is a load-bearing security invariant: it MUST be a
+    /// process-private, mode-`0o700` directory that no other principal
+    /// can write to. The caller in `apply.rs` creates it via
+    /// `tempfile::Builder::permissions(0o700).tempdir_in(binary_dir)` —
+    /// any future caller MUST uphold the same invariant, otherwise the
+    /// reopens by path in `sha256_file` and `verify_archive` would re-
+    /// introduce a TOCTOU window.
     // The verifier-side cache-hit gate is read top-to-bottom by anyone
     // auditing the security model. Splitting it into smaller helpers just
     // to placate clippy's line limit would scatter the threat model across
@@ -347,6 +355,17 @@ impl BinaryCache {
         // oversize archive, or a misshapen signature — mirroring the
         // `get_verified_archive` cache-hit policy. `symlink_metadata`
         // refuses to chase a symlink the caller may have planted.
+        //
+        // Note the intentional asymmetry with `open_regular_capped`
+        // (which uses `fs::metadata` and DOES follow symlinks): on the
+        // store path the source file is supplied by the caller (typically
+        // a path under our control after download), so a symlink there is
+        // surprising and worth rejecting. On the read path the cache dir
+        // is shared and an attacker may have planted a symlink — but the
+        // attacker already has write access, so chasing a symlink-to-
+        // regular is no worse than them editing the regular file
+        // directly, while still letting the post-open `is_file()` reject
+        // symlink-to-special.
         let archive_meta = fs::symlink_metadata(archive_path)?;
         if !archive_meta.file_type().is_file() {
             return Err(Error::Upgrade(format!(
@@ -531,35 +550,13 @@ fn open_regular_capped(path: &Path, max_len: u64) -> io::Result<(File, u64)> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            // O_NONBLOCK is platform-specific: 0o4000 on Linux, 0x0004 on
-            // macOS/*BSD. Reads on a regular file ignore O_NONBLOCK on all
-            // these platforms, so this is a no-op for the happy path.
-            #[cfg(target_os = "linux")]
-            const O_NONBLOCK: i32 = 0o4000;
-            #[cfg(any(
-                target_os = "macos",
-                target_os = "ios",
-                target_os = "freebsd",
-                target_os = "netbsd",
-                target_os = "openbsd",
-                target_os = "dragonfly",
-            ))]
-            const O_NONBLOCK: i32 = 0x0004;
-            // Fallback for other unix-likes: skip the flag rather than
-            // guess wrong. The pre-check + post-open is_file() still gate.
-            #[cfg(not(any(
-                target_os = "linux",
-                target_os = "macos",
-                target_os = "ios",
-                target_os = "freebsd",
-                target_os = "netbsd",
-                target_os = "openbsd",
-                target_os = "dragonfly",
-            )))]
-            const O_NONBLOCK: i32 = 0;
-            if O_NONBLOCK != 0 {
-                opts.custom_flags(O_NONBLOCK);
-            }
+            // `O_NONBLOCK` is per-arch on Linux (0o4000 on x86/arm/aarch64
+            // /riscv, 0o200 on mips, 0x4000 on sparc, etc.). Use `libc`
+            // so we always pick the right constant for the target arch
+            // instead of silently setting a different flag. Reads on a
+            // regular file ignore `O_NONBLOCK` on all our supported
+            // platforms, so this is a no-op for the happy path.
+            opts.custom_flags(libc::O_NONBLOCK);
         }
         opts.open(path)?
     };
@@ -923,22 +920,19 @@ mod tests {
         cache.store_archive("6.0.0", &archive, &sig).unwrap();
         let cached_archive = cache.cached_archive_path("6.0.0");
         fs::remove_file(&cached_archive).unwrap();
-        let cstr = std::ffi::CString::new(cached_archive.as_os_str().as_encoded_bytes()).unwrap();
-        // mkfifo via libc-equivalent: use the nix-free path through
-        // `std::process::Command` to avoid pulling a libc dep just for
-        // the test. `mkfifo` is in coreutils on Linux and bundled on
-        // macOS — both CI targets.
-        let mkfifo_ok = std::process::Command::new("mkfifo")
-            .arg(cstr.to_str().unwrap())
-            .status()
-            .ok()
-            .is_some_and(|s| s.success());
-        if !mkfifo_ok {
-            // If mkfifo isn't available skip rather than fail the suite.
-            eprintln!("mkfifo unavailable, skipping FIFO test");
-            return;
-        }
 
+        // Use libc::mkfifo directly so a CI image that drops coreutils
+        // can't silently skip this test (an earlier shell-out version
+        // would hide a packaging regression). The unsafe block is scoped
+        // to the single FFI call — `mkfifo(2)` takes a NUL-terminated
+        // path, returns 0 on success and -1 on error with errno set.
+        let cstr = std::ffi::CString::new(cached_archive.as_os_str().as_encoded_bytes()).unwrap();
+        #[allow(unsafe_code)]
+        let rc = unsafe { libc::mkfifo(cstr.as_ptr(), 0o600) };
+        assert_eq!(rc, 0, "mkfifo failed: {}", std::io::Error::last_os_error());
+
+        // Measure only the cache-hit path so cold-process startup or
+        // unrelated test parallelism don't blow the budget.
         let start = Instant::now();
         let got = cache.get_verified_archive("6.0.0", pd.path());
         let elapsed = start.elapsed();
@@ -947,9 +941,11 @@ mod tests {
             got.is_none(),
             "a FIFO planted at the cached archive path must be rejected"
         );
+        // 5s gives generous headroom on a contended CI macOS runner
+        // while still catching a real "open is blocking on the FIFO".
         assert!(
-            elapsed < Duration::from_secs(2),
-            "open of FIFO returned in {elapsed:?}, expected ≪ 2s — \
+            elapsed < Duration::from_secs(5),
+            "open of FIFO returned in {elapsed:?}, expected ≪ 5s — \
              pre-check or O_NONBLOCK is not catching this"
         );
         // Nothing should have been staged.

@@ -856,6 +856,7 @@ dependencies = [
  "heed",
  "hex",
  "hkdf",
+ "libc",
  "lru",
  "objc2",
  "objc2-foundation",

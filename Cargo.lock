@@ -809,7 +809,7 @@ dependencies = [
 
 [[package]]
 name = "ant-node"
-version = "0.11.5-rc.1"
+version = "0.11.5-rc.2"
 dependencies = [
  "alloy",
  "ant-protocol",
@@ -861,8 +861,8 @@ dependencies = [
 
 [[package]]
 name = "ant-protocol"
-version = "2.1.2-rc.1"
-source = "git+https://github.com/WithAutonomi/ant-protocol?branch=rc-2026.5.4#3d57d10ba7112169e3e02e955a4272dfcb13c550"
+version = "2.1.2-rc.2"
+source = "git+https://github.com/WithAutonomi/ant-protocol?branch=rc-2026.5.4#114e67a19abc5470a56e516b92d9796c2ab2633f"
 dependencies = [
  "blake3",
  "bytes",
@@ -1305,9 +1305,9 @@ checksum = "2dee39a0ee5b4095224a0cfc6bf4cc1baf0f9624b96b367e53b66d974e51d953"
 
 [[package]]
 name = "bitcoin_hashes"
-version = "0.14.1"
+version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26ec84b80c482df901772e931a9a681e26a1b9ee2302edeff23cb30328745c8b"
+checksum = "4ed83caece3afc59919481b33b472e1432d1abc4641ed9100be142ef5110b406"
 dependencies = [
  "bitcoin-io",
  "hex-conservative",
@@ -3469,9 +3469,9 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmimalloc-sys"
-version = "0.1.47"
+version = "0.1.49"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d1eacfa31c33ec25e873c136ba5669f00f9866d0688bea7be4d3f7e43067df6"
+checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
 dependencies = [
  "cc",
 ]
@@ -3596,9 +3596,9 @@ dependencies = [
 
 [[package]]
 name = "mimalloc"
-version = "0.1.50"
+version = "0.1.52"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3627c4272df786b9260cabaa46aec1d59c93ede723d4c3ef646c503816b0640"
+checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
 dependencies = [
  "libmimalloc-sys",
 ]
@@ -4865,8 +4865,8 @@ dependencies = [
 
 [[package]]
 name = "saorsa-core"
-version = "0.24.5-rc.1"
-source = "git+https://github.com/saorsa-labs/saorsa-core?branch=rc-2026.5.4#82bb541237b66f4e0976ca7124f990bce2811a35"
+version = "0.24.5-rc.2"
+source = "git+https://github.com/saorsa-labs/saorsa-core?branch=rc-2026.5.4#3de07d588cb06d752c6c30969e97aa71df201851"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -1363,18 +1363,23 @@ impl PaymentVerifier {
         let lookup_count = Self::closeness_lookup_count(pool.candidate_nodes.len());
 
         // Fast path: answer from the local routing table. This is a pure
-        // in-memory k-bucket read (`find_closest_nodes_local` returns
-        // `Vec<DHTNode>` with no network I/O and no `Result`), so it is safe to
-        // call from this PUT-handling request handler — unlike
+        // in-memory k-bucket read (`find_closest_nodes_local_by_distance`
+        // returns `Vec<DHTNode>` with no network I/O and no `Result`), so it is
+        // safe to call from this PUT-handling request handler — unlike
         // `find_closest_nodes_network`, which runs an iterative Kademlia lookup
         // (up to MAX_ITERATIONS rounds, bounded by CLOSENESS_LOOKUP_TIMEOUT) and
-        // is the dominant term in slow per-chunk store times. The local table is
-        // already the view this node trusts for the close-group responsibility
-        // check (`find_closest_nodes_local_with_self` above), so using it here
-        // brings the Merkle closeness check in line with that precedent.
-        let mut network_peers = p2p_node
+        // is the dominant term in slow per-chunk store times.
+        //
+        // We use the XOR-only `_by_distance` variant deliberately, NOT the
+        // reachability-reranked `find_closest_nodes_local`: this is a closeness
+        // *verification*, so it must mirror the uploader's pure XOR-distance
+        // view. The reachability re-rank (which the close-group *selection* path
+        // uses) could demote an XOR-close relay-only peer out of the compared
+        // window and falsely reject an honest candidate pool that legitimately
+        // contains that peer. See saorsa-labs/saorsa-core#121.
+        let mut closeness_peers = p2p_node
             .dht_manager()
-            .find_closest_nodes_local(&pool_address.0, lookup_count)
+            .find_closest_nodes_local_by_distance(&pool_address.0, lookup_count)
             .await;
 
         // Sparse-table fallback: only when the local table genuinely cannot
@@ -1384,18 +1389,18 @@ impl PaymentVerifier {
         // victim's local routing table sparse, so a forged pool cannot force the
         // expensive 240s network path (DoS-safe). On a well-connected production
         // node the local table is dense near any key, so this path is rare.
-        if Self::closeness_should_fall_back_to_network(network_peers.len()) {
+        if Self::closeness_should_fall_back_to_network(closeness_peers.len()) {
             debug!(
                 "Merkle closeness: local table returned only {} peers (< {}) for \
                  pool midpoint {}; falling back to network lookup",
-                network_peers.len(),
+                closeness_peers.len(),
                 Self::CLOSENESS_LOOKUP_WIDTH,
                 hex::encode(pool_address.0),
             );
             let network_lookup = p2p_node
                 .dht_manager()
                 .find_closest_nodes_network(&pool_address.0, lookup_count);
-            network_peers =
+            closeness_peers =
                 match tokio::time::timeout(Self::CLOSENESS_LOOKUP_TIMEOUT, network_lookup).await {
                     Ok(Ok(peers)) => peers,
                     Ok(Err(e)) => {
@@ -1424,8 +1429,8 @@ impl PaymentVerifier {
                 };
         }
 
-        let network_peer_ids: Vec<PeerId> = network_peers.iter().map(|n| n.peer_id).collect();
-        Self::check_closeness_match(&candidate_peer_ids, &network_peer_ids, &pool_address.0)
+        let closeness_peer_ids: Vec<PeerId> = closeness_peers.iter().map(|n| n.peer_id).collect();
+        Self::check_closeness_match(&candidate_peer_ids, &closeness_peer_ids, &pool_address.0)
     }
 
     /// Verify a merkle batch payment proof.

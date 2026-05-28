@@ -809,7 +809,7 @@ dependencies = [
 
 [[package]]
 name = "ant-node"
-version = "0.11.5-rc.4"
+version = "0.11.5"
 dependencies = [
  "alloy",
  "ant-protocol",

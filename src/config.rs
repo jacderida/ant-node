@@ -398,7 +398,12 @@ fn default_log_level() -> String {
 }
 
 const fn default_check_interval() -> u64 {
-    1 // 1 hour
+    // EXPERIMENT BUILD (memory-leak A/B): the auto-upgrade check interval is
+    // extended from 1 hour to 30 days so this v0.11.4 build never upgrades
+    // itself to v0.11.5 during the ~24h comparison run. The deploy path does
+    // not set check_interval_hours, so this compiled default is what nodes use.
+    // Do NOT ship — revert before any real release.
+    720 // 30 days
 }
 
 const fn default_staged_rollout_hours() -> u64 {

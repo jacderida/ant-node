@@ -259,6 +259,8 @@ impl AntProtocol {
                 info!("Stored chunk {addr_hex} ({content_len} bytes)");
                 // Increment the close-records counter consumed by calculate_price.
                 self.quote_generator.record_store();
+                self.payment_verifier
+                    .set_records_stored(self.quote_generator.records_stored() as u64);
 
                 // 6. Notify replication engine for fresh fan-out.
                 //    Only emit when a real proof is present — cached-as-verified

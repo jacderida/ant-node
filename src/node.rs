@@ -398,11 +398,10 @@ impl NodeBuilder {
         // This same signer is used for both regular quotes and merkle candidate quotes.
         crate::payment::wire_ml_dsa_signer(&mut quote_generator, identity)?;
 
-        let protocol = AntProtocol::new(
-            Arc::new(storage),
-            Arc::new(payment_verifier),
-            Arc::new(quote_generator),
-        );
+        let storage = Arc::new(storage);
+        let payment_verifier = Arc::new(payment_verifier);
+
+        let protocol = AntProtocol::new(storage, payment_verifier, Arc::new(quote_generator));
 
         info!(
             "ANT protocol handler initialized with ML-DSA-65 signing (protocol={CHUNK_PROTOCOL_ID})"

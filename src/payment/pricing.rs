@@ -42,6 +42,43 @@ const PRICE_BASELINE_WEI: u128 = 3_906_250_000_000_000;
 /// `0.03515625 ANT × 10¹⁸ wei/ANT = 35_156_250_000_000_000 wei`.
 const PRICE_COEFFICIENT_WEI: u128 = 35_156_250_000_000_000;
 
+/// Price increment per squared record after simplifying `PRICE_COEFFICIENT_WEI / DIVISOR_SQUARED`.
+const PRICE_PER_RECORD_SQUARED_WEI: u128 = PRICE_COEFFICIENT_WEI / DIVISOR_SQUARED;
+
+/// Derive the quoted record count from a quote price.
+///
+/// This is the inverse of [`calculate_price`] and is used to validate quote
+/// freshness without relying on wall-clock timestamps. It intentionally floors
+/// to the nearest integer record count, matching the existing storage-delta
+/// tolerance behaviour.
+///
+/// Saturates to `u64::MAX` for any price that would otherwise overflow `u64`.
+/// This matters because the verifier calls this on untrusted deserialized
+/// `quote.price` values BEFORE signature verification: a panic here is a
+/// pre-auth crash vector. Saturating leaves the delta check to reject the
+/// quote as out-of-range without aborting the process.
+#[must_use]
+pub fn derive_records_stored_from_price(price: Amount) -> u64 {
+    let baseline = Amount::from(PRICE_BASELINE_WEI);
+    if price <= baseline {
+        return 0;
+    }
+
+    let excess = price - baseline;
+    let n_squared = excess / Amount::from(PRICE_PER_RECORD_SQUARED_WEI);
+    let root = n_squared.root(2);
+    // ruint's `Uint::to::<u64>()` panics on overflow. We MUST NOT panic here:
+    // freshness runs on untrusted deserialized `quote.price` before signature
+    // verification, so a hostile oversized price would otherwise be a pre-auth
+    // crash vector. Saturate to `u64::MAX` instead; the delta check rejects
+    // out-of-range quotes.
+    if root > Amount::from(u64::MAX) {
+        u64::MAX
+    } else {
+        root.to::<u64>()
+    }
+}
+
 /// Calculate storage price in wei from the number of close records stored.
 ///
 /// Formula: `price_wei = BASELINE + n² × K / D²`
@@ -185,5 +222,32 @@ mod tests {
         assert_eq!(price, expected_price(100));
         assert!(price < Amount::from(WEI_PER_TOKEN)); // well below 1 ANT
         assert!(price > Amount::from(PRICE_BASELINE_WEI)); // strictly above baseline
+    }
+
+    #[test]
+    fn test_derive_records_stored_from_price_round_trips() {
+        for records in [0usize, 1, 5, 100, 6_000, 12_000, 60_000] {
+            let price = calculate_price(records);
+            assert_eq!(derive_records_stored_from_price(price), records as u64);
+        }
+    }
+
+    #[test]
+    fn test_derive_records_stored_from_baseline_or_lower_is_zero() {
+        assert_eq!(derive_records_stored_from_price(Amount::ZERO), 0);
+        assert_eq!(
+            derive_records_stored_from_price(Amount::from(PRICE_BASELINE_WEI)),
+            0
+        );
+    }
+
+    #[test]
+    fn test_derive_records_stored_from_max_price_saturates_no_panic() {
+        // Hostile/malformed quotes may carry an oversized U256 price.
+        // The verifier calls this BEFORE signature verification, so we MUST
+        // NOT panic on overflow — saturate to u64::MAX and let the delta
+        // check reject the quote.
+        let v = derive_records_stored_from_price(Amount::MAX);
+        assert_eq!(v, u64::MAX);
     }
 }

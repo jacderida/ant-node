@@ -74,6 +74,12 @@ impl AntProtocol {
         payment_verifier: Arc<PaymentVerifier>,
         quote_generator: Arc<QuoteGenerator>,
     ) -> Self {
+        // Keep the PaymentVerifier's freshness gate wired to the same
+        // authoritative store used by this protocol handler. Attaching here
+        // makes the invariant automatic for every AntProtocol construction
+        // path, including tests and future startup variants.
+        payment_verifier.attach_storage(Arc::clone(&storage));
+
         Self {
             storage,
             payment_verifier,
@@ -258,6 +264,9 @@ impl AntProtocol {
                 let content_len = request.content.len();
                 info!("Stored chunk {addr_hex} ({content_len} bytes)");
                 // Increment the close-records counter consumed by calculate_price.
+                // The PaymentVerifier reads its current record count directly
+                // from LmdbStorage::current_chunks(), so we no longer need to
+                // push the value through a side counter here.
                 self.quote_generator.record_store();
 
                 // 6. Notify replication engine for fresh fan-out.

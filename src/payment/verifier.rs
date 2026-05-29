@@ -5,12 +5,14 @@
 
 use crate::ant_protocol::CLOSE_GROUP_SIZE;
 use crate::error::{Error, Result};
-use crate::logging::{debug, info};
+use crate::logging::{debug, info, warn};
 use crate::payment::cache::{CacheStats, VerifiedCache, XorName};
+use crate::payment::pricing::derive_records_stored_from_price;
 use crate::payment::proof::{
     deserialize_merkle_proof, deserialize_proof, detect_proof_type, ProofType,
 };
 use crate::payment::single_node::SingleNodePayment;
+use crate::storage::lmdb::LmdbStorage;
 use ant_protocol::payment::verify::{verify_quote_content, verify_quote_signature};
 use evmlib::common::Amount;
 use evmlib::contract::payment_vault;
@@ -25,7 +27,6 @@ use saorsa_core::identity::PeerId;
 use saorsa_core::P2PNode;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
 
 /// Minimum allowed size for a payment proof in bytes.
 ///
@@ -41,16 +42,15 @@ pub const MIN_PAYMENT_PROOF_SIZE_BYTES: usize = 32;
 /// 256 KB provides headroom while still capping memory during verification.
 pub const MAX_PAYMENT_PROOF_SIZE_BYTES: usize = 262_144;
 
-/// Maximum age of a payment quote before it's considered expired (24 hours).
-/// Prevents replaying old cheap quotes against nearly-full nodes. Past-side
-/// clock skew is absorbed entirely by this window — there is no separate
-/// past-skew tolerance.
-const QUOTE_MAX_AGE_SECS: u64 = 86_400;
+/// Minimum absolute tolerance for the storage-delta freshness check.
+/// A quote is accepted if the difference between the quoted record count inferred from price
+/// and the node's current `records_stored` is at most this many records.
+const QUOTE_STORAGE_DELTA_MIN_TOLERANCE: u64 = 5;
 
-/// Maximum tolerated forward skew when a quote's timestamp is ahead of the
-/// verifying node's wall clock (300 seconds). Applies exclusively to the
-/// future direction; past-dated quotes are governed by `QUOTE_MAX_AGE_SECS`.
-const QUOTE_FUTURE_SKEW_TOLERANCE_SECS: u64 = 300;
+/// Percentage tolerance for the storage-delta freshness check.
+/// The effective tolerance is the larger of the percentage and
+/// [`QUOTE_STORAGE_DELTA_MIN_TOLERANCE`].
+const QUOTE_STORAGE_DELTA_PCT_TOLERANCE: u64 = 5;
 
 /// Configuration for EVM payment verification.
 ///
@@ -139,6 +139,19 @@ pub struct PaymentVerifier {
     /// midpoint in the live DHT. `None` in unit tests that don't exercise
     /// merkle verification; production startup MUST call [`attach_p2p_node`].
     p2p_node: RwLock<Option<Arc<P2PNode>>>,
+    /// LMDB storage handle, attached post-construction so the storage-delta
+    /// freshness check can read the authoritative on-disk record count without
+    /// depending on a side counter that may drift from replication/repair/prune
+    /// paths. `None` in unit tests that pre-set [`Self::test_records_override`];
+    /// production startup MUST call [`attach_storage`].
+    storage: RwLock<Option<Arc<LmdbStorage>>>,
+    /// Test-only override for the storage-delta freshness check.
+    ///
+    /// When `Some(n)`, `validate_quote_freshness` uses `n` as the current
+    /// record count instead of querying `storage.current_chunks()`. Set via
+    /// [`Self::set_records_stored_for_tests`] so unit tests that don't wire a
+    /// real `LmdbStorage` can still drive the freshness logic.
+    test_records_override: RwLock<Option<u64>>,
     /// Configuration.
     config: PaymentVerifierConfig,
 }
@@ -255,6 +268,8 @@ impl PaymentVerifier {
             closeness_pass_cache,
             inflight_closeness,
             p2p_node: RwLock::new(None),
+            storage: RwLock::new(None),
+            test_records_override: RwLock::new(None),
             config,
         }
     }
@@ -270,6 +285,50 @@ impl PaymentVerifier {
     pub fn attach_p2p_node(&self, node: Arc<P2PNode>) {
         *self.p2p_node.write() = Some(node);
         debug!("PaymentVerifier: P2PNode attached for merkle closeness checks");
+    }
+
+    /// Attach the node's [`LmdbStorage`] handle so storage-delta freshness
+    /// checks can query the authoritative on-disk record count.
+    ///
+    /// Production startup MUST call this once the storage exists; otherwise
+    /// `validate_quote_freshness` falls back to treating the current count as
+    /// zero, which will reject all non-trivial quotes. Idempotent: calling
+    /// twice replaces the handle.
+    pub fn attach_storage(&self, storage: Arc<LmdbStorage>) {
+        *self.storage.write() = Some(storage);
+        debug!("PaymentVerifier: LmdbStorage attached for storage-delta freshness checks");
+    }
+
+    /// Test-only setter for the current record count used by storage-delta
+    /// freshness checks. Lets unit tests drive the freshness logic without
+    /// wiring a real `LmdbStorage`. Has no effect in production code because
+    /// production code is expected to call [`Self::attach_storage`] instead.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn set_records_stored_for_tests(&self, count: u64) {
+        *self.test_records_override.write() = Some(count);
+    }
+
+    /// Snapshot the current record count for freshness comparisons.
+    ///
+    /// Prefers the attached `LmdbStorage` (authoritative — covers client PUTs,
+    /// replication stores, repair fetches, and prune deletes by definition).
+    /// Falls back to a test override if one was set. Returns `None` only when
+    /// no source is available (mis-configured production startup); the caller
+    /// treats that as "unknown" and skips storage-delta gating rather than
+    /// rejecting all quotes outright.
+    fn current_records_stored(&self) -> Option<u64> {
+        if let Some(storage) = self.storage.read().as_ref() {
+            match storage.current_chunks() {
+                Ok(n) => return Some(n),
+                Err(e) => {
+                    warn!(
+                        "PaymentVerifier: failed to read current_chunks() for freshness check: {e}"
+                    );
+                    return None;
+                }
+            }
+        }
+        *self.test_records_override.read()
     }
 
     /// Check if payment is required for the given `XorName`.
@@ -459,7 +518,7 @@ impl PaymentVerifier {
 
         Self::validate_quote_structure(payment)?;
         Self::validate_quote_content(payment, xorname)?;
-        Self::validate_quote_timestamps(payment)?;
+        self.validate_quote_freshness(payment)?;
         Self::validate_peer_bindings(payment)?;
         self.validate_local_recipient(payment)?;
 
@@ -550,37 +609,44 @@ impl PaymentVerifier {
         Ok(())
     }
 
-    /// Verify quote freshness — reject stale quotes and ones too far in the future.
+    /// Verify quote freshness using storage-delta inferred from price, not wall-clock time.
     ///
-    /// A quote whose timestamp is in the past is accepted as long as its age
-    /// does not exceed `QUOTE_MAX_AGE_SECS`. A quote whose timestamp is in
-    /// the future relative to this node is accepted only if the forward skew
-    /// does not exceed `QUOTE_FUTURE_SKEW_TOLERANCE_SECS`.
-    fn validate_quote_timestamps(payment: &ProofOfPayment) -> Result<()> {
-        let now = SystemTime::now();
-        let max_age = Duration::from_secs(QUOTE_MAX_AGE_SECS);
-        let max_future_skew = Duration::from_secs(QUOTE_FUTURE_SKEW_TOLERANCE_SECS);
+    /// The quote price encodes the quoting node's record count via the quadratic
+    /// pricing formula. Comparing that inferred count to this node's current
+    /// record count removes the platform clock dependency that caused Windows/UTC
+    /// false rejections. Quote timestamps are deliberately not used here.
+    ///
+    /// The verifier reads the current record count from the attached
+    /// [`LmdbStorage`] via `current_chunks()` — that's an O(1) B-tree page-
+    /// header read and is the authoritative count regardless of which path
+    /// stored the record (client PUT, replication store, repair fetch) or
+    /// removed it (prune delete). If no storage source is available (mis-
+    /// configured production startup, or a unit test that didn't set a test
+    /// override), the storage-delta gate is skipped entirely rather than
+    /// rejecting every quote — see [`Self::current_records_stored`].
+    fn validate_quote_freshness(&self, payment: &ProofOfPayment) -> Result<()> {
+        let Some(current_records) = self.current_records_stored() else {
+            debug!(
+                "PaymentVerifier: no record-count source attached; skipping \
+                 storage-delta freshness check"
+            );
+            return Ok(());
+        };
 
         for (encoded_peer_id, quote) in &payment.peer_quotes {
-            match now.duration_since(quote.timestamp) {
-                Ok(age) => {
-                    if age > max_age {
-                        return Err(Error::Payment(format!(
-                            "Quote from peer {encoded_peer_id:?} expired: age {}s exceeds max {QUOTE_MAX_AGE_SECS}s",
-                            age.as_secs()
-                        )));
-                    }
-                }
-                Err(future) => {
-                    let skew = future.duration();
-                    if skew > max_future_skew {
-                        return Err(Error::Payment(format!(
-                            "Quote from peer {encoded_peer_id:?} has timestamp {}s in the future \
-                             (exceeds {QUOTE_FUTURE_SKEW_TOLERANCE_SECS}s tolerance)",
-                            skew.as_secs()
-                        )));
-                    }
-                }
+            let quoted_records = derive_records_stored_from_price(quote.price);
+
+            let delta = quoted_records.abs_diff(current_records);
+            let pct_tolerance = quoted_records
+                .saturating_mul(QUOTE_STORAGE_DELTA_PCT_TOLERANCE)
+                .saturating_div(100);
+            let tolerance = QUOTE_STORAGE_DELTA_MIN_TOLERANCE.max(pct_tolerance);
+
+            if delta > tolerance {
+                return Err(Error::Payment(format!(
+                    "Quote from peer {encoded_peer_id:?} stale by {delta} records \
+                     (quoted {quoted_records} vs current {current_records}, tolerance {tolerance})"
+                )));
             }
         }
         Ok(())
@@ -1310,6 +1376,7 @@ impl PaymentVerifier {
 mod tests {
     use super::*;
     use evmlib::merkle_payments::MerklePaymentCandidatePool;
+    use std::time::SystemTime;
 
     /// Create a verifier for unit tests. EVM is always on, but tests can
     /// pre-populate the cache to bypass on-chain verification.
@@ -1680,6 +1747,63 @@ mod tests {
         }
     }
 
+    /// Helper: create a fake quote whose price encodes the supplied record count.
+    fn make_fake_quote_at_records(
+        xorname: [u8; 32],
+        timestamp: SystemTime,
+        rewards_address: RewardsAddress,
+        records: usize,
+    ) -> evmlib::PaymentQuote {
+        let mut quote = make_fake_quote(xorname, timestamp, rewards_address);
+        quote.price = crate::payment::pricing::calculate_price(records);
+        quote
+    }
+
+    #[test]
+    fn test_storage_delta_within_tolerance_accepted() {
+        use evmlib::{EncodedPeerId, RewardsAddress};
+
+        let verifier = create_test_verifier();
+        verifier.set_records_stored_for_tests(105);
+        let xorname = [0xE0u8; 32];
+        let quote = make_fake_quote_at_records(
+            xorname,
+            SystemTime::now(),
+            RewardsAddress::new([1u8; 20]),
+            100,
+        );
+        let payment = ProofOfPayment {
+            peer_quotes: vec![(EncodedPeerId::new(rand::random()), quote)],
+        };
+
+        verifier
+            .validate_quote_freshness(&payment)
+            .expect("delta within tolerance should pass");
+    }
+
+    #[test]
+    fn test_storage_delta_exceeds_tolerance_rejected() {
+        use evmlib::{EncodedPeerId, RewardsAddress};
+
+        let verifier = create_test_verifier();
+        verifier.set_records_stored_for_tests(107);
+        let xorname = [0xE1u8; 32];
+        let quote = make_fake_quote_at_records(
+            xorname,
+            SystemTime::now(),
+            RewardsAddress::new([1u8; 20]),
+            100,
+        );
+        let payment = ProofOfPayment {
+            peer_quotes: vec![(EncodedPeerId::new(rand::random()), quote)],
+        };
+
+        let err = verifier
+            .validate_quote_freshness(&payment)
+            .expect_err("delta beyond tolerance should fail");
+        assert!(format!("{err}").contains("stale by 7 records"));
+    }
+
     /// Helper: wrap quotes into a tagged serialized `PaymentProof`.
     fn serialize_proof(peer_quotes: Vec<(evmlib::EncodedPeerId, evmlib::PaymentQuote)>) -> Vec<u8> {
         use crate::payment::proof::{serialize_single_node_proof, PaymentProof};
@@ -1692,7 +1816,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_expired_quote_rejected() {
+    async fn test_old_quote_uses_storage_delta_not_timestamp() {
         use evmlib::{EncodedPeerId, RewardsAddress};
         use std::time::Duration;
 
@@ -1712,16 +1836,15 @@ mod tests {
         let proof_bytes = serialize_proof(peer_quotes);
         let result = verifier.verify_payment(&xorname, Some(&proof_bytes)).await;
 
-        assert!(result.is_err(), "Should reject expired quote");
-        let err_msg = format!("{}", result.expect_err("should fail"));
+        let err_msg = format!("{}", result.expect_err("should fail at later check"));
         assert!(
-            err_msg.contains("expired"),
-            "Error should mention 'expired': {err_msg}"
+            !err_msg.contains("expired"),
+            "Should not reject by timestamp age: {err_msg}"
         );
     }
 
     #[tokio::test]
-    async fn test_future_timestamp_rejected() {
+    async fn test_future_quote_uses_storage_delta_not_timestamp() {
         use evmlib::{EncodedPeerId, RewardsAddress};
         use std::time::Duration;
 
@@ -1741,11 +1864,10 @@ mod tests {
         let proof_bytes = serialize_proof(peer_quotes);
         let result = verifier.verify_payment(&xorname, Some(&proof_bytes)).await;
 
-        assert!(result.is_err(), "Should reject future-timestamped quote");
-        let err_msg = format!("{}", result.expect_err("should fail"));
+        let err_msg = format!("{}", result.expect_err("should fail at later check"));
         assert!(
-            err_msg.contains("future"),
-            "Error should mention 'future': {err_msg}"
+            !err_msg.contains("future"),
+            "Should not reject by future timestamp: {err_msg}"
         );
     }
 
@@ -1779,7 +1901,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_quote_just_beyond_clock_skew_tolerance_rejected() {
+    async fn test_quote_beyond_clock_skew_still_uses_storage_delta() {
         use evmlib::{EncodedPeerId, RewardsAddress};
         use std::time::Duration;
 
@@ -1799,14 +1921,10 @@ mod tests {
         let proof_bytes = serialize_proof(peer_quotes);
         let result = verifier.verify_payment(&xorname, Some(&proof_bytes)).await;
 
+        let err_msg = format!("{}", result.expect_err("should fail at later check"));
         assert!(
-            result.is_err(),
-            "Should reject quote beyond clock skew tolerance"
-        );
-        let err_msg = format!("{}", result.expect_err("should fail"));
-        assert!(
-            err_msg.contains("future"),
-            "Error should mention 'future': {err_msg}"
+            !err_msg.contains("future"),
+            "Should not reject by future timestamp: {err_msg}"
         );
     }
 

@@ -401,12 +401,6 @@ impl NodeBuilder {
         let storage = Arc::new(storage);
         let payment_verifier = Arc::new(payment_verifier);
 
-        // Give the verifier a handle to the on-disk record store so its
-        // storage-delta freshness check reads the authoritative count instead
-        // of relying on a side counter that may drift across replication,
-        // repair, and prune paths.
-        payment_verifier.attach_storage(Arc::clone(&storage));
-
         let protocol = AntProtocol::new(storage, payment_verifier, Arc::new(quote_generator));
 
         info!(

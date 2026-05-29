@@ -74,6 +74,12 @@ impl AntProtocol {
         payment_verifier: Arc<PaymentVerifier>,
         quote_generator: Arc<QuoteGenerator>,
     ) -> Self {
+        // Keep the PaymentVerifier's freshness gate wired to the same
+        // authoritative store used by this protocol handler. Attaching here
+        // makes the invariant automatic for every AntProtocol construction
+        // path, including tests and future startup variants.
+        payment_verifier.attach_storage(Arc::clone(&storage));
+
         Self {
             storage,
             payment_verifier,

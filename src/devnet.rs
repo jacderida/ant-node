@@ -566,10 +566,6 @@ impl Devnet {
         let storage = Arc::new(storage);
         let payment_verifier = Arc::new(payment_verifier);
 
-        // Attach storage so storage-delta freshness checks query the
-        // authoritative on-disk count.
-        payment_verifier.attach_storage(Arc::clone(&storage));
-
         Ok(AntProtocol::new(
             storage,
             payment_verifier,

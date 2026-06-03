@@ -7,7 +7,7 @@ use crate::ant_protocol::CLOSE_GROUP_SIZE;
 use crate::error::{Error, Result};
 use crate::logging::{debug, info, warn};
 use crate::payment::cache::{CacheStats, VerifiedCache, XorName};
-use crate::payment::pricing::derive_records_stored_from_price;
+use crate::payment::pricing::{calculate_price, derive_records_stored_from_price};
 use crate::payment::proof::{
     deserialize_merkle_proof, deserialize_proof, detect_proof_type, ProofType,
 };
@@ -42,15 +42,25 @@ pub const MIN_PAYMENT_PROOF_SIZE_BYTES: usize = 32;
 /// 256 KB provides headroom while still capping memory during verification.
 pub const MAX_PAYMENT_PROOF_SIZE_BYTES: usize = 262_144;
 
-/// Minimum absolute tolerance for the storage-delta freshness check.
-/// A quote is accepted if the difference between the quoted record count inferred from price
-/// and the node's current `records_stored` is at most this many records.
-const QUOTE_STORAGE_DELTA_MIN_TOLERANCE: u64 = 5;
-
-/// Percentage tolerance for the storage-delta freshness check.
-/// The effective tolerance is the larger of the percentage and
-/// [`QUOTE_STORAGE_DELTA_MIN_TOLERANCE`].
-const QUOTE_STORAGE_DELTA_PCT_TOLERANCE: u64 = 5;
+/// Maximum percentage by which a quote's paid price may fall *below* the node's
+/// current price before the quote is rejected as stale.
+///
+/// The freshness gate is one-directional and price-based, not a symmetric
+/// record-count delta:
+///
+/// - **Over-payment is always accepted.** If the client paid at least the
+///   node's current price (e.g. the node pruned records and is now cheaper),
+///   the quote is fine — a node has no reason to reject money.
+/// - **Only meaningful under-payment is rejected.** A quote priced below the
+///   current price by more than this percentage is rejected as stale.
+///
+/// Comparing prices instead of raw record counts makes the tolerance
+/// self-scaling against the quadratic pricing curve: at low/moderate fill the
+/// curve is nearly flat, so normal in-flight churn (the node storing a handful
+/// of replicated records between quoting and verifying) is a negligible price
+/// change and passes; at high fill the curve is steep, so the same percentage
+/// still catches genuinely stale, underpriced quotes.
+const QUOTE_PRICE_STALENESS_PCT_TOLERANCE: u64 = 25;
 
 /// Configuration for EVM payment verification.
 ///
@@ -609,43 +619,60 @@ impl PaymentVerifier {
         Ok(())
     }
 
-    /// Verify quote freshness using storage-delta inferred from price, not wall-clock time.
+    /// Verify quote freshness by price staleness, not wall-clock time and not a
+    /// symmetric record-count delta.
     ///
     /// The quote price encodes the quoting node's record count via the quadratic
-    /// pricing formula. Comparing that inferred count to this node's current
-    /// record count removes the platform clock dependency that caused Windows/UTC
-    /// false rejections. Quote timestamps are deliberately not used here.
+    /// pricing formula. We compute the price the node would charge *now* for its
+    /// current fullness and reject the quote only if the client under-paid that
+    /// current price by more than [`QUOTE_PRICE_STALENESS_PCT_TOLERANCE`]. This:
     ///
-    /// The verifier reads the current record count from the attached
-    /// [`LmdbStorage`] via `current_chunks()` — that's an O(1) B-tree page-
-    /// header read and is the authoritative count regardless of which path
-    /// stored the record (client PUT, replication store, repair fetch) or
-    /// removed it (prune delete). If no storage source is available (mis-
-    /// configured production startup, or a unit test that didn't set a test
-    /// override), the storage-delta gate is skipped entirely rather than
+    /// - removes the platform clock dependency that caused Windows/UTC false
+    ///   rejections (timestamps are deliberately unused);
+    /// - never rejects an over-payment (the previous symmetric `abs_diff` check
+    ///   rejected quotes where the node had *fewer* records than when it quoted,
+    ///   i.e. the client paid for a fuller, pricier node — nonsensical to
+    ///   reject); and
+    /// - self-scales with the pricing curve, so benign in-flight churn (a node
+    ///   storing a few replicated records between quoting and verifying) — a
+    ///   negligible price move where the curve is flat — no longer rejects an
+    ///   otherwise-valid payment. On a fresh, rapidly-filling testnet that churn
+    ///   routinely exceeded the old fixed 5-record tolerance and rejected ~100%
+    ///   of uploads via the multiplicative per-chunk effect.
+    ///
+    /// The current record count comes from the attached [`LmdbStorage`] via
+    /// `current_chunks()` — an O(1) B-tree page-header read, authoritative
+    /// regardless of which path stored the record (client PUT, replication
+    /// store, repair fetch) or removed it (prune delete). If no storage source
+    /// is available (mis-configured production startup, or a unit test that
+    /// didn't set a test override), the gate is skipped entirely rather than
     /// rejecting every quote — see [`Self::current_records_stored`].
     fn validate_quote_freshness(&self, payment: &ProofOfPayment) -> Result<()> {
         let Some(current_records) = self.current_records_stored() else {
             debug!(
                 "PaymentVerifier: no record-count source attached; skipping \
-                 storage-delta freshness check"
+                 quote price-staleness check"
             );
             return Ok(());
         };
 
+        // The price the node would charge right now for its current fullness,
+        // and the floor a quote may not drop below (one-directional: paying at
+        // or above `current_price` is always accepted).
+        let current_price = calculate_price(usize::try_from(current_records).unwrap_or(usize::MAX));
+        let min_acceptable_price = current_price.saturating_mul(Amount::from(
+            100u64.saturating_sub(QUOTE_PRICE_STALENESS_PCT_TOLERANCE),
+        )) / Amount::from(100u64);
+
         for (encoded_peer_id, quote) in &payment.peer_quotes {
-            let quoted_records = derive_records_stored_from_price(quote.price);
-
-            let delta = quoted_records.abs_diff(current_records);
-            let pct_tolerance = quoted_records
-                .saturating_mul(QUOTE_STORAGE_DELTA_PCT_TOLERANCE)
-                .saturating_div(100);
-            let tolerance = QUOTE_STORAGE_DELTA_MIN_TOLERANCE.max(pct_tolerance);
-
-            if delta > tolerance {
+            if quote.price < min_acceptable_price {
+                let quoted_records = derive_records_stored_from_price(quote.price);
                 return Err(Error::Payment(format!(
-                    "Quote from peer {encoded_peer_id:?} stale by {delta} records \
-                     (quoted {quoted_records} vs current {current_records}, tolerance {tolerance})"
+                    "Quote from peer {encoded_peer_id:?} stale: paid price encodes \
+                     {quoted_records} records but node currently holds {current_records} \
+                     (paid {}, minimum acceptable {min_acceptable_price} at \
+                     {QUOTE_PRICE_STALENESS_PCT_TOLERANCE}% under-payment tolerance)",
+                    quote.price
                 )));
             }
         }
@@ -670,24 +697,30 @@ impl PaymentVerifier {
         Ok(())
     }
 
-    /// Minimum number of candidate `pub_keys` (out of 16) whose derived `PeerId`
-    /// must match the DHT's actual closest peers to the pool midpoint address.
+    /// Minimum number of candidate `pub_keys` (out of 16) whose derived
+    /// `PeerId` must be among the DHT's actual closest peers to the pool
+    /// midpoint address for the pool to be accepted.
     ///
-    /// Set below 16/16 to absorb normal routing-table skew between the
-    /// payer's view and this node's view — on a well-connected network the
-    /// divergence between two nodes' closest-set views is typically 1-2
-    /// peers, occasionally 3 during churn. 13/16 tolerates 3 divergent
-    /// peers while still limiting how many candidates an attacker can
-    /// fabricate before the check bites. A lower threshold (e.g. 9/16)
-    /// would let an attacker who controls 7 real neighbourhood peers plant
-    /// 7 fabricated candidates and still pass.
+    /// Set to a simple majority (9/16). Two nodes' views of the closest set
+    /// to a midpoint diverge on a young, high-churn, NAT-heavy network — by
+    /// more than a near-unanimous threshold tolerates — so a stricter bar
+    /// rejected honest pools whose candidates are genuinely drawn from the
+    /// midpoint's close group but don't all reappear in this storer's own
+    /// lookup. A majority absorbs that divergence while still requiring most
+    /// candidates to be real peers the live DHT lists as closest.
     ///
-    /// This is the pure "fabricated key" defence; it does not stop an
-    /// attacker who can grind the pool midpoint address to land near 13
-    /// pre-chosen keys AND run those keys as Sybil DHT participants. That
-    /// requires an orthogonal Sybil-resistance layer and is out of scope
-    /// for this check.
-    const CANDIDATE_CLOSENESS_REQUIRED: usize = 13;
+    /// Security cost: a lower threshold widens the room for the "pay-yourself"
+    /// attack — an attacker running real neighbourhood peers needs fewer of
+    /// them to clear a majority than to clear a near-unanimous bar. No theft
+    /// of funds is possible regardless (payment binds on-chain to the rewards
+    /// address); the cost is that grinding storage payments back to your own
+    /// nodes gets cheaper. Each counted candidate must still be a peer the
+    /// live DHT actually returns as closest — a fabricated off-network key
+    /// cannot satisfy this — so the floor is "run N real top-K Sybil nodes
+    /// AND grind the midpoint", just with a smaller N. Pairs with the planned
+    /// pool-midpoint consensus-anchor work, which removes the midpoint
+    /// grinding freedom that makes a low threshold dangerous.
+    const CANDIDATE_CLOSENESS_REQUIRED: usize = 9;
 
     /// Timeout for the authoritative network lookup used by the closeness
     /// check.
@@ -744,11 +777,12 @@ impl PaymentVerifier {
     /// timeout bump above.
     ///
     /// Security: the pay-yourself attack still requires the attacker's
-    /// fabricated `PeerId`s to land in the storer's authoritative top-K.
-    /// K=32 doubles the window vs K=16 (≈1 extra bit of grinding), but
-    /// the dominant cost is still Sybil-grinding midpoint addresses or
-    /// running real nodes near the target — same security floor.
-    /// `CANDIDATE_CLOSENESS_REQUIRED` (13/16) is unchanged.
+    /// fabricated `PeerId`s to land in the storer's authoritative top-K, so
+    /// the dominant cost is Sybil-grinding midpoint addresses or running real
+    /// nodes near the target. The leniency for honest divergence comes from
+    /// the `CANDIDATE_CLOSENESS_REQUIRED` majority threshold, not from this
+    /// window; widening the window further was measured as too heavy on the
+    /// lookup path.
     const CLOSENESS_LOOKUP_WIDTH: usize = 2 * evmlib::merkle_payments::CANDIDATES_PER_POOL;
 
     /// Maximum waiter → leader retries when the leader's future was cancelled
@@ -811,8 +845,8 @@ impl PaymentVerifier {
     /// **Known limitation — Sybil-grinding**: `midpoint_proof.address()` is a
     /// BLAKE3 hash of attacker-controllable inputs (leaf bytes, tree root,
     /// timestamp). A determined attacker who *also* runs Sybil DHT nodes can
-    /// grind the midpoint until it lands in a region where 13 of their
-    /// Sybil keys are the true network-closest — at which point this check
+    /// grind the midpoint until it lands in a region where a majority of
+    /// their Sybil keys are the true network-closest — at which point this check
     /// passes for the attacker. Closing that gap requires binding the
     /// midpoint to an attacker-uncontrolled value (e.g. a block hash at
     /// payment time or an on-chain VRF) or a Sybil-resistant identity
@@ -964,9 +998,18 @@ impl PaymentVerifier {
     }
 
     /// Pure-logic closeness check: given the pool's candidate peer IDs and
-    /// the storer's authoritative network view (top-K closest peers to the
-    /// pool midpoint), decide whether the pool passes the
+    /// the storer's authoritative network view (closest peers to the pool
+    /// midpoint), decide whether the pool passes the
     /// `CANDIDATE_CLOSENESS_REQUIRED`-of-N threshold.
+    ///
+    /// A candidate counts only if its `PeerId` is one of the peers the
+    /// storer's own network lookup returned (exact set membership). This is
+    /// the property that makes the gate meaningful: a passing candidate must
+    /// be a real, reachable peer the live DHT actually routes to and lists
+    /// among the closest — it cannot be a key fabricated off-network. The
+    /// leniency in this check is purely the lowered threshold (a majority
+    /// rather than near-unanimity), which tolerates the closest-set
+    /// divergence between two nodes' views without admitting fabricated keys.
     ///
     /// Extracted from `verify_merkle_candidate_closeness_inner` so tests
     /// can exercise the matching logic without standing up a real DHT.
@@ -1000,7 +1043,7 @@ impl PaymentVerifier {
             )));
         }
 
-        // Set-membership check against the returned closest-peers list.
+        // Exact-match membership against the returned closest peers.
         // Candidate `PeerId`s are deduplicated upstream, so each match
         // corresponds to a distinct peer.
         let network_set: std::collections::HashSet<PeerId> =
@@ -1759,15 +1802,20 @@ mod tests {
         quote
     }
 
+    /// A small upward record drift between quoting and verifying — the normal
+    /// in-flight churn on a busy network — must pass. The old fixed 5-record
+    /// tolerance rejected a drift of 10 as "stale by 10 records"; the
+    /// price-based gate sees a negligible price move on the near-flat curve and
+    /// accepts it.
     #[test]
-    fn test_storage_delta_within_tolerance_accepted() {
+    fn test_small_record_drift_accepted() {
         use evmlib::{EncodedPeerId, RewardsAddress};
 
         let verifier = create_test_verifier();
-        verifier.set_records_stored_for_tests(105);
-        let xorname = [0xE0u8; 32];
+        // Node gained 10 records since quoting (100 -> 110).
+        verifier.set_records_stored_for_tests(110);
         let quote = make_fake_quote_at_records(
-            xorname,
+            [0xE0u8; 32],
             SystemTime::now(),
             RewardsAddress::new([1u8; 20]),
             100,
@@ -1778,18 +1826,47 @@ mod tests {
 
         verifier
             .validate_quote_freshness(&payment)
-            .expect("delta within tolerance should pass");
+            .expect("benign in-flight drift should pass");
     }
 
+    /// Over-payment must always be accepted: the node had MORE records when it
+    /// quoted than it does now (e.g. it pruned), so the client paid for a
+    /// fuller, pricier node. The old symmetric `abs_diff` gate wrongly rejected
+    /// this; ~36% of STG-01 rejections were exactly this case.
     #[test]
-    fn test_storage_delta_exceeds_tolerance_rejected() {
+    fn test_overpayment_accepted() {
         use evmlib::{EncodedPeerId, RewardsAddress};
 
         let verifier = create_test_verifier();
-        verifier.set_records_stored_for_tests(107);
-        let xorname = [0xE1u8; 32];
+        // Quote priced at 6000 records, but node now holds only 100.
+        verifier.set_records_stored_for_tests(100);
         let quote = make_fake_quote_at_records(
-            xorname,
+            [0xE2u8; 32],
+            SystemTime::now(),
+            RewardsAddress::new([1u8; 20]),
+            6000,
+        );
+        let payment = ProofOfPayment {
+            peer_quotes: vec![(EncodedPeerId::new(rand::random()), quote)],
+        };
+
+        verifier
+            .validate_quote_freshness(&payment)
+            .expect("over-payment must never be rejected");
+    }
+
+    /// Genuine staleness — a quote that under-prices the node's current fullness
+    /// by far more than the tolerance — is still rejected. Quote encodes 100
+    /// records but the node now holds 6000, so the quadratic curve makes the
+    /// paid price a small fraction of the current price.
+    #[test]
+    fn test_underpriced_quote_rejected() {
+        use evmlib::{EncodedPeerId, RewardsAddress};
+
+        let verifier = create_test_verifier();
+        verifier.set_records_stored_for_tests(6000);
+        let quote = make_fake_quote_at_records(
+            [0xE1u8; 32],
             SystemTime::now(),
             RewardsAddress::new([1u8; 20]),
             100,
@@ -1800,8 +1877,8 @@ mod tests {
 
         let err = verifier
             .validate_quote_freshness(&payment)
-            .expect_err("delta beyond tolerance should fail");
-        assert!(format!("{err}").contains("stale by 7 records"));
+            .expect_err("a quote underpricing by >25% should fail");
+        assert!(format!("{err}").contains("stale"));
     }
 
     /// Helper: wrap quotes into a tagged serialized `PaymentProof`.
@@ -2294,7 +2371,7 @@ mod tests {
     #[tokio::test]
     async fn closeness_rejects_pool_with_duplicate_candidate_pub_keys() {
         // An attacker who submits 16 copies of the same real peer's pub_key
-        // would otherwise satisfy the 13/16 closeness threshold trivially:
+        // would otherwise satisfy the closeness threshold trivially:
         // that one peer's membership in the DHT-returned set would count
         // 16 times. The dedupe check in verify_merkle_candidate_closeness_inner
         // must reject the pool BEFORE the network lookup runs (so this test
@@ -2866,15 +2943,15 @@ mod tests {
     }
 
     #[test]
-    fn closeness_required_threshold_unchanged_at_13() {
-        // Sanity-check that widening the lookup did not also lower the
-        // matching threshold. The 13/16 floor is the security knob; the
-        // window widening is purely a false-positive fix for honest pools.
+    fn closeness_required_threshold_is_majority() {
+        // Pin the threshold so a future change can't silently move it. This
+        // is the security knob: a 9/16 majority tolerates closest-set
+        // divergence between two nodes' views while still requiring most
+        // candidates to be real peers the live DHT lists as closest.
         assert_eq!(
             PaymentVerifier::CANDIDATE_CLOSENESS_REQUIRED,
-            13,
-            "Widening the lookup window must not lower the matching \
-             threshold — that would weaken the pay-yourself defence"
+            9,
+            "closeness threshold is a 9/16 majority"
         );
     }
 
@@ -2920,23 +2997,19 @@ mod tests {
     );
 
     // =========================================================================
-    // Regression tests for the original STG-01 failure modes
+    // Closeness-match logic tests
     //
     // These tests use the extracted `check_closeness_match` helper to
     // exercise the matching logic directly with synthetic peer-ID sets,
-    // without standing up a real DHT. They prove the two failure modes
-    // observed on STG-01 on 2026-05-01 are fixed by the K=16 → K=32
-    // change:
+    // without standing up a real DHT. They cover:
     //
-    //   - "K=16 storer rejects honest pool whose candidates legitimately
-    //     include peers from positions 17–32" (~73% of mismatches)
+    //   - the 9/16 majority threshold (accept at exactly 9, reject below);
+    //   - that a candidate counts only via exact membership in the storer's
+    //     returned closest peers, so off-network fabrications are rejected;
+    //   - the sparse-network short-circuit.
     //
-    // and that the security floor (`CANDIDATE_CLOSENESS_REQUIRED = 13/16`)
-    // still rejects forged pools at the wider window.
-    //
-    // Pool address used as the XOR midpoint: `[0u8; 32]`.
-    // Synthetic PeerIds use distinct constant byte patterns so each test
-    // can reason about which IDs are "in the network's top-K" vs not.
+    // Synthetic PeerIds put the tag in `bytes[0]`, so a candidate is in or
+    // out of the network's returned set purely by tag value.
     // =========================================================================
 
     /// Build a deterministic `PeerId` from a single byte tag.
@@ -2964,78 +3037,50 @@ mod tests {
 
     #[test]
     fn closeness_match_passes_when_candidates_span_positions_1_to_15_and_17() {
-        // STG-01 regression test: the client's pool contains 16 candidates,
-        // 15 of which are at network-true positions 1..=15, and ONE of
-        // which is at position 17 (because the network-true position-16
-        // peer was unresponsive when the client over-queried 32).
-        //
-        // Pre-fix (K=16 storer): network_peer_ids = 16 entries (positions
-        // 1..=16); position 17 is NOT in the network set, so matched =
-        // 15 < 13 — wait, 15 ≥ 13, that path actually passes too. The
-        // failure mode was a *worse* skew where 4+ of the storer's top-16
-        // were unresponsive at the client side. Let me model that case
-        // precisely below.
+        // The client's pool contains 16 candidates, 15 at network-true
+        // positions 1..=15 plus one at position 17 (the position-16 peer was
+        // unresponsive when the client over-queried). Under K=32 all 16 are
+        // exact matches, comfortably ≥ the 9/16 majority.
         let candidates = synthetic_peer_ids(15)
             .into_iter()
             .chain(std::iter::once(synthetic_peer_id(17)))
             .collect::<Vec<_>>();
-        // Post-fix lookup window = 32, includes position 17.
+        // Lookup window = 32, includes position 17.
         let network: Vec<PeerId> = (1..=32).map(synthetic_peer_id).collect();
         let pool_address = [0u8; 32];
         let result = PaymentVerifier::check_closeness_match(&candidates, &network, &pool_address);
         assert!(
             result.is_ok(),
-            "pool with one candidate at position 17 must pass under K=32: {result:?}"
+            "pool with one candidate at position 17 must pass: {result:?}"
         );
     }
 
     #[test]
-    fn closeness_match_fails_at_k_16_passes_at_k_32_for_honest_skew() {
-        // The actual STG-01 failure mode: the client's 16 candidates
-        // legitimately span network-true positions {1..=12, 17, 19, 21,
-        // 23} — i.e. 12 positions in the storer's top-16 plus 4 in the
-        // 17–32 window (because positions 13–16 were unresponsive when
-        // the client over-queried).
+    fn closeness_match_accepts_honest_skew_via_exact_matches() {
+        // Honest skew: the client's 16 candidates span network-true positions
+        // {1..=12, 17, 19, 21, 23}. The lookup window of 32 covers all of
+        // them, so all 16 are exact matches — trivially ≥ the 9/16 majority.
         let candidates: Vec<PeerId> = (1..=12u8)
             .chain([17u8, 19, 21, 23])
             .map(synthetic_peer_id)
             .collect();
         let pool_address = [0u8; 32];
+        let network: Vec<PeerId> = (1..=32).map(synthetic_peer_id).collect();
 
-        // Pre-fix (K=16): network = positions 1..=16. Only 12 of the 16
-        // candidates appear — below the 13/16 threshold. This is the
-        // exact false-positive rejection STG-01 was hitting.
-        let network_pre_fix: Vec<PeerId> = (1..=16).map(synthetic_peer_id).collect();
-        let result_pre_fix =
-            PaymentVerifier::check_closeness_match(&candidates, &network_pre_fix, &pool_address);
+        let result = PaymentVerifier::check_closeness_match(&candidates, &network, &pool_address);
         assert!(
-            result_pre_fix.is_err(),
-            "PRE-FIX: K=16 storer should reject the honest pool (this is \
-             the bug we observed; if this assertion stops failing the \
-             refactor lost the rejection logic): {result_pre_fix:?}"
-        );
-
-        // Post-fix (K=32): network = positions 1..=32. All 16 candidates
-        // appear (12 at 1..=12, 4 at 17/19/21/23). matched = 16 ≥ 13:
-        // pool accepted. This is the fix.
-        let network_post_fix: Vec<PeerId> = (1..=32).map(synthetic_peer_id).collect();
-        let result_post_fix =
-            PaymentVerifier::check_closeness_match(&candidates, &network_post_fix, &pool_address);
-        assert!(
-            result_post_fix.is_ok(),
-            "POST-FIX: K=32 storer must accept the same honest pool: {result_post_fix:?}"
+            result.is_ok(),
+            "honest pool fully inside the lookup window must pass: {result:?}"
         );
     }
 
     #[test]
-    fn closeness_match_rejects_forged_pool_at_k_32() {
-        // Security floor regression: a fully-forged pool whose candidate
-        // PeerIds are network-disjoint must still be rejected at the
-        // wider window K=32. The 13/16 threshold is the security knob;
-        // widening the lookup window must not soften it.
-        //
-        // Tag bytes 100..=115 are deliberately disjoint from the network
-        // set (1..=32).
+    fn closeness_match_rejects_forged_pool() {
+        // Security floor: a fully-forged pool whose candidate PeerIds are
+        // disjoint from the network's returned closest peers must be
+        // rejected. The lowered majority threshold must NOT let off-network
+        // fabrications pass — every counted candidate has to be a peer the
+        // live DHT actually returned.
         let forged_candidates: Vec<PeerId> = (100..=115).map(synthetic_peer_id).collect();
         let network: Vec<PeerId> = (1..=32).map(synthetic_peer_id).collect();
         let pool_address = [0u8; 32];
@@ -3049,42 +3094,43 @@ mod tests {
                     "expected forged-pool rejection message, got: {msg}"
                 );
             }
-            other => panic!(
-                "forged pool with all candidates outside network's top-32 \
-                 must be rejected at K=32 (security floor): {other:?}"
-            ),
+            other => {
+                panic!("forged pool disjoint from the network set must be rejected: {other:?}")
+            }
         }
     }
 
     #[test]
-    fn closeness_match_rejects_pool_at_exactly_12_of_16_match() {
-        // Threshold sanity: a pool with exactly 12 of 16 candidates in
-        // the network set must still be rejected (12 < 13).
-        let mut candidates = synthetic_peer_ids(12);
-        candidates.extend((100..=103).map(synthetic_peer_id)); // 4 disjoint
+    fn closeness_match_rejects_pool_below_majority() {
+        // Threshold sanity: 8 candidates are exact matches (tags 1..=8) and
+        // the other 8 are off-network fabrications (tags 100..=107). 8 < 9
+        // → reject.
+        let mut candidates = synthetic_peer_ids(8);
+        candidates.extend((100..=107).map(synthetic_peer_id)); // 8 fabrications
         let network: Vec<PeerId> = (1..=32).map(synthetic_peer_id).collect();
         let pool_address = [0u8; 32];
 
         let result = PaymentVerifier::check_closeness_match(&candidates, &network, &pool_address);
         assert!(
             result.is_err(),
-            "12/16 < threshold of 13/16 must reject regardless of K: {result:?}"
+            "8 matches < majority of 9/16 must reject: {result:?}"
         );
     }
 
     #[test]
-    fn closeness_match_accepts_pool_at_exactly_13_of_16_match() {
-        // Threshold sanity: a pool with exactly 13 of 16 candidates in
-        // the network set must pass (13 ≥ 13).
-        let mut candidates = synthetic_peer_ids(13);
-        candidates.extend((100..=102).map(synthetic_peer_id)); // 3 disjoint
+    fn closeness_match_accepts_at_exactly_majority() {
+        // Threshold sanity: exactly 9 candidates are exact matches (tags
+        // 1..=9), the other 7 are off-network fabrications (tags 100..=106).
+        // 9 ≥ 9 → accept.
+        let mut candidates = synthetic_peer_ids(9);
+        candidates.extend((100..=106).map(synthetic_peer_id)); // 7 fabrications
         let network: Vec<PeerId> = (1..=32).map(synthetic_peer_id).collect();
         let pool_address = [0u8; 32];
 
         let result = PaymentVerifier::check_closeness_match(&candidates, &network, &pool_address);
         assert!(
             result.is_ok(),
-            "13/16 ≥ threshold of 13/16 must accept: {result:?}"
+            "9/16 ≥ majority threshold must accept: {result:?}"
         );
     }
 
@@ -3095,14 +3141,14 @@ mod tests {
         // candidate set can't pass because the storer doesn't have an
         // authoritative view to compare against.
         let candidates = synthetic_peer_ids(16);
-        let network = synthetic_peer_ids(12); // < CANDIDATE_CLOSENESS_REQUIRED
+        let network = synthetic_peer_ids(8); // < CANDIDATE_CLOSENESS_REQUIRED (9)
         let pool_address = [0u8; 32];
 
         let result = PaymentVerifier::check_closeness_match(&candidates, &network, &pool_address);
         match result {
             Err(Error::Payment(msg)) => {
                 assert!(
-                    msg.contains("authoritative DHT lookup returned only 12"),
+                    msg.contains("authoritative DHT lookup returned only 8"),
                     "expected sparse-DHT error message, got: {msg}"
                 );
             }

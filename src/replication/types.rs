@@ -179,6 +179,21 @@ pub struct KeyVerificationEvidence {
 // Failure evidence (Section 14 — TrustEngine integration)
 // ---------------------------------------------------------------------------
 
+/// Counts that describe a confirmed audit failure without logging per-key
+/// detail at `ERROR` level.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AuditFailureSummary {
+    /// Number of keys in the original audit challenge.
+    pub challenged_keys: usize,
+    /// Number of keys that still failed after responsibility confirmation.
+    pub failed_keys: usize,
+    /// Confirmed failures where the responder returned the absent-key sentinel.
+    pub absent_keys: usize,
+    /// Confirmed failures where the responder returned a digest that did not
+    /// match the challenger's local bytes.
+    pub digest_mismatch_keys: usize,
+}
+
 /// Failure evidence types emitted to `TrustEngine` (Section 14).
 #[derive(Debug, Clone)]
 pub enum FailureEvidence {
@@ -197,6 +212,8 @@ pub enum FailureEvidence {
         challenged_peer: PeerId,
         /// Keys confirmed as failed.
         confirmed_failed_keys: Vec<XorName>,
+        /// Aggregated reason counts for the confirmed failures.
+        summary: AuditFailureSummary,
         /// Why the audit failed.
         reason: AuditFailureReason,
     },

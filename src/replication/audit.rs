@@ -16,7 +16,7 @@ use crate::replication::protocol::{
     ReplicationMessageBody, ABSENT_KEY_DIGEST,
 };
 use crate::replication::types::{
-    AuditFailureReason, FailureEvidence, PeerSyncRecord, RepairProofs,
+    AuditFailureReason, AuditFailureSummary, FailureEvidence, PeerSyncRecord, RepairProofs,
 };
 use crate::storage::LmdbStorage;
 use saorsa_core::identity::PeerId;
@@ -360,6 +360,74 @@ fn mature_audit_keys_for_peer(
         .collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuditKeyFailureKind {
+    Absent,
+    DigestMismatch,
+    Unclassified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AuditKeyFailure {
+    key: XorName,
+    kind: AuditKeyFailureKind,
+}
+
+impl AuditKeyFailure {
+    fn absent(key: XorName) -> Self {
+        Self {
+            key,
+            kind: AuditKeyFailureKind::Absent,
+        }
+    }
+
+    fn digest_mismatch(key: XorName) -> Self {
+        Self {
+            key,
+            kind: AuditKeyFailureKind::DigestMismatch,
+        }
+    }
+
+    fn unclassified(key: XorName) -> Self {
+        Self {
+            key,
+            kind: AuditKeyFailureKind::Unclassified,
+        }
+    }
+}
+
+fn build_audit_failure_summary(
+    challenged_key_count: usize,
+    confirmed_failures: &[AuditKeyFailure],
+) -> AuditFailureSummary {
+    let mut summary = AuditFailureSummary {
+        challenged_keys: challenged_key_count,
+        failed_keys: confirmed_failures.len(),
+        ..AuditFailureSummary::default()
+    };
+
+    for failure in confirmed_failures {
+        match failure.kind {
+            AuditKeyFailureKind::Absent => summary.absent_keys += 1,
+            AuditKeyFailureKind::DigestMismatch => summary.digest_mismatch_keys += 1,
+            AuditKeyFailureKind::Unclassified => {}
+        }
+    }
+
+    summary
+}
+
+fn audit_digest_failure_reason(confirmed_failures: &[AuditKeyFailure]) -> AuditFailureReason {
+    if confirmed_failures
+        .iter()
+        .all(|failure| failure.kind == AuditKeyFailureKind::Absent)
+    {
+        AuditFailureReason::KeyAbsent
+    } else {
+        AuditFailureReason::DigestMismatch
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Digest verification
 // ---------------------------------------------------------------------------
@@ -402,7 +470,7 @@ async fn verify_digests(
 
         // Check for absent sentinel.
         if *received_digest == ABSENT_KEY_DIGEST {
-            failed_keys.push(*key);
+            failed_keys.push(AuditKeyFailure::absent(*key));
             continue;
         }
 
@@ -425,7 +493,7 @@ async fn verify_digests(
 
         let expected = compute_audit_digest(nonce, challenged_peer_bytes, key, &local_bytes);
         if *received_digest != expected {
-            failed_keys.push(*key);
+            failed_keys.push(AuditKeyFailure::digest_mismatch(*key));
         }
     }
 
@@ -441,11 +509,12 @@ async fn verify_digests(
     }
 
     // Step 9: Responsibility confirmation for failed keys.
-    handle_audit_failure(
+    handle_classified_audit_failure(
         challenged_peer,
         challenge_id,
         &failed_keys,
         AuditFailureReason::DigestMismatch,
+        keys.len(),
         p2p_node,
         config,
     )
@@ -465,20 +534,46 @@ async fn handle_audit_failure(
     p2p_node: &Arc<P2PNode>,
     config: &ReplicationConfig,
 ) -> AuditTickResult {
+    let failures = failed_keys
+        .iter()
+        .copied()
+        .map(AuditKeyFailure::unclassified)
+        .collect::<Vec<_>>();
+    handle_classified_audit_failure(
+        challenged_peer,
+        challenge_id,
+        &failures,
+        reason,
+        failed_keys.len(),
+        p2p_node,
+        config,
+    )
+    .await
+}
+
+async fn handle_classified_audit_failure(
+    challenged_peer: &PeerId,
+    challenge_id: u64,
+    failed_keys: &[AuditKeyFailure],
+    reason: AuditFailureReason,
+    challenged_key_count: usize,
+    p2p_node: &Arc<P2PNode>,
+    config: &ReplicationConfig,
+) -> AuditTickResult {
     let dht = p2p_node.dht_manager();
     let mut confirmed_failures = Vec::new();
 
     // Step 9a-b: Fresh local RT lookup for each failed key.
-    for key in failed_keys {
+    for failure in failed_keys {
         let closest = dht
-            .find_closest_nodes_local_with_self(key, config.close_group_size)
+            .find_closest_nodes_local_with_self(&failure.key, config.close_group_size)
             .await;
         if closest.iter().any(|n| n.peer_id == *challenged_peer) {
-            confirmed_failures.push(*key);
+            confirmed_failures.push(*failure);
         } else {
             debug!(
                 "Audit: peer {challenged_peer} not responsible for {} (removed from failure set)",
-                hex::encode(key)
+                hex::encode(failure.key)
             );
         }
     }
@@ -492,11 +587,23 @@ async fn handle_audit_failure(
         return AuditTickResult::Idle;
     }
 
+    let summary = build_audit_failure_summary(challenged_key_count, &confirmed_failures);
+    let reason = if reason == AuditFailureReason::DigestMismatch {
+        audit_digest_failure_reason(&confirmed_failures)
+    } else {
+        reason
+    };
+    let confirmed_failed_keys = confirmed_failures
+        .iter()
+        .map(|failure| failure.key)
+        .collect();
+
     // Step 9d: Non-empty confirmed set -> emit evidence.
     let evidence = FailureEvidence::AuditFailure {
         challenge_id,
         challenged_peer: *challenged_peer,
-        confirmed_failed_keys: confirmed_failures,
+        confirmed_failed_keys,
+        summary,
         reason,
     };
 
@@ -1124,6 +1231,7 @@ mod tests {
             challenge_id: 5500,
             challenged_peer: peer,
             confirmed_failed_keys: confirmed_failures,
+            summary: AuditFailureSummary::default(),
             reason: AuditFailureReason::DigestMismatch,
         };
         if let FailureEvidence::AuditFailure {
@@ -1191,6 +1299,59 @@ mod tests {
         assert!(
             eligible.contains(&peer),
             "continued bootstrap claims must remain auditable so past-grace abuse can be observed"
+        );
+    }
+
+    #[test]
+    fn audit_failure_summary_counts_confirmed_absent_and_mismatch_keys() {
+        let absent_key = [0xA1; 32];
+        let mismatch_key = [0xB2; 32];
+        let confirmed = vec![
+            AuditKeyFailure::absent(absent_key),
+            AuditKeyFailure::digest_mismatch(mismatch_key),
+        ];
+
+        let summary = build_audit_failure_summary(5, &confirmed);
+
+        assert_eq!(summary.challenged_keys, 5);
+        assert_eq!(summary.failed_keys, 2);
+        assert_eq!(summary.absent_keys, 1);
+        assert_eq!(summary.digest_mismatch_keys, 1);
+    }
+
+    #[test]
+    fn audit_failure_summary_leaves_unclassified_rejections_out_of_absent_mismatch_counts() {
+        let rejected_key = [0xC3; 32];
+        let confirmed = vec![AuditKeyFailure::unclassified(rejected_key)];
+
+        let summary = build_audit_failure_summary(3, &confirmed);
+
+        assert_eq!(summary.challenged_keys, 3);
+        assert_eq!(summary.failed_keys, 1);
+        assert_eq!(summary.absent_keys, 0);
+        assert_eq!(summary.digest_mismatch_keys, 0);
+    }
+
+    #[test]
+    fn audit_digest_failure_reason_is_key_absent_when_all_confirmed_failures_are_absent() {
+        let failures = vec![AuditKeyFailure::absent([0xD4; 32])];
+
+        assert_eq!(
+            audit_digest_failure_reason(&failures),
+            AuditFailureReason::KeyAbsent
+        );
+    }
+
+    #[test]
+    fn audit_digest_failure_reason_is_digest_mismatch_for_mixed_failures() {
+        let failures = vec![
+            AuditKeyFailure::absent([0xD5; 32]),
+            AuditKeyFailure::digest_mismatch([0xE6; 32]),
+        ];
+
+        assert_eq!(
+            audit_digest_failure_reason(&failures),
+            AuditFailureReason::DigestMismatch
         );
     }
 
@@ -1620,6 +1781,7 @@ mod tests {
             challenge_id: 5300,
             challenged_peer,
             confirmed_failed_keys: confirmed,
+            summary: AuditFailureSummary::default(),
             reason: AuditFailureReason::DigestMismatch,
         };
 

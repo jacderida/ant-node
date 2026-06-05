@@ -2554,13 +2554,17 @@ async fn handle_audit_result(
             if let FailureEvidence::AuditFailure {
                 challenged_peer,
                 confirmed_failed_keys,
+                summary,
                 reason,
                 ..
             } = evidence
             {
                 error!(
-                    "Audit failure for {challenged_peer}: {} confirmed failed keys",
-                    confirmed_failed_keys.len()
+                    "Audit failure for {challenged_peer}: reason={reason:?}, confirmed_failed_keys={}, challenged_keys={}, absent_keys={}, digest_mismatch_keys={}",
+                    confirmed_failed_keys.len(),
+                    summary.challenged_keys,
+                    summary.absent_keys,
+                    summary.digest_mismatch_keys,
                 );
                 if audit_failure_clears_bootstrap_claim(reason) {
                     // Peer returned a non-bootstrap response — clear the active

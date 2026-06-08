@@ -1151,6 +1151,32 @@ async fn handle_fresh_offer(
         return Ok(());
     }
 
+    // Disk-space pre-check — mirror the PUT handler (V2-411). A full node can
+    // never store this record, so reject it before the expensive payment
+    // verification (EVM on-chain query / merkle pool work) rather than verifying
+    // and only then failing at `storage.put` below. Reuses the cached capacity
+    // check (passing results only, so freed space is detected promptly), and the
+    // store path keeps its own check as defence-in-depth.
+    if let Err(e) = storage.check_capacity() {
+        info!(
+            target: "ant_node::storage::disk_precheck",
+            key = %hex::encode(offer.key),
+            "Rejecting fresh replication offer before payment verification: {e}"
+        );
+        send_replication_response(
+            source,
+            p2p_node,
+            request_id,
+            ReplicationMessageBody::FreshReplicationResponse(FreshReplicationResponse::Rejected {
+                key: offer.key,
+                reason: format!("Storage error: {e}"),
+            }),
+            rr_message_id,
+        )
+        .await;
+        return Ok(());
+    }
+
     // Gap 1: Validate PoP via PaymentVerifier. This is an already-settled
     // receipt handed over by a neighbour, not a live sale — Replication
     // context skips the storer-being-paid-now checks (own-quote price

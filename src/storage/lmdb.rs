@@ -587,7 +587,7 @@ impl LmdbStorage {
     /// doing expensive setup (e.g. the PUT handler skipping payment
     /// verification on a disk-full node — see `V2-411`).
     ///
-    /// Delegates to [`Self::check_disk_space_cached`], so it shares the same
+    /// Delegates to the private `check_disk_space_cached`, so it shares the same
     /// TTL cache and only ever performs an `fs2::available_space` syscall on a
     /// cache miss. Returns the same `Insufficient disk space …` error the
     /// store path raises, keeping caller behaviour identical.

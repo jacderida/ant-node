@@ -1169,7 +1169,7 @@ async fn handle_fresh_offer(
             request_id,
             ReplicationMessageBody::FreshReplicationResponse(FreshReplicationResponse::Rejected {
                 key: offer.key,
-                reason: format!("Storage error: {e}"),
+                reason: e.to_string(),
             }),
             rr_message_id,
         )
@@ -1262,7 +1262,7 @@ async fn handle_fresh_offer(
                 ReplicationMessageBody::FreshReplicationResponse(
                     FreshReplicationResponse::Rejected {
                         key: offer.key,
-                        reason: format!("Storage error: {e}"),
+                        reason: e.to_string(),
                     },
                 ),
                 rr_message_id,

@@ -596,7 +596,7 @@ impl LmdbStorage {
     ///
     /// Returns [`Error::Storage`] when available space is below the configured
     /// reserve, or when the disk-space query itself fails.
-    pub fn check_capacity(&self) -> Result<()> {
+    pub(crate) fn check_capacity(&self) -> Result<()> {
         self.check_disk_space_cached()
     }
 

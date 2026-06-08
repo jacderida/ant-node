@@ -248,9 +248,11 @@ impl AntProtocol {
         //    lookup, and an on-chain Arbitrum RPC). A disk-full node can never
         //    satisfy this PUT, so reject it here rather than burning that work
         //    only to fail the reserve check inside `storage.put` (V2-411). The
-        //    check is cached (passing results only), so this is effectively
-        //    free per-PUT and still detects freed space promptly. The store
-        //    path keeps its own check as defence-in-depth.
+        //    check caches passing results, so it is free per-PUT on a healthy
+        //    node; a disk-full node re-runs a cheap `available_space` syscall
+        //    each PUT (still negligible next to the verification it avoids) and
+        //    so detects freed space promptly. The store path keeps its own
+        //    check as defence-in-depth.
         if let Err(e) = self.storage.check_capacity() {
             info!(
                 target: "ant_node::storage::disk_precheck",

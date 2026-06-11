@@ -1703,6 +1703,8 @@ async fn run_neighbor_sync_round(
             sync_state,
             repair_proofs,
             current_sync_epoch,
+            #[cfg(any(test, feature = "test-utils"))]
+            repair_proof_now: None,
             allow_remote_prune_audits,
         })
         .await;

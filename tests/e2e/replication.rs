@@ -139,7 +139,7 @@ async fn record_repair_proofs_for_peers(
     peers: &[PeerId],
     key: &[u8; 32],
     hinted_at_epoch: u64,
-) {
+) -> Instant {
     let close_peers: HashSet<PeerId> = p2p_node
         .dht_manager()
         .find_closest_nodes_local_with_self(key, config.close_group_size)
@@ -148,9 +148,10 @@ async fn record_repair_proofs_for_peers(
         .map(|node| node.peer_id)
         .collect();
     let mut proofs = repair_proofs.write().await;
-    let hinted_at = Instant::now()
-        .checked_sub(REPAIR_HINT_MIN_AGE)
-        .unwrap_or_else(Instant::now);
+    let hinted_at = Instant::now();
+    let repair_proof_now = hinted_at
+        .checked_add(REPAIR_HINT_MIN_AGE)
+        .unwrap_or(hinted_at);
     for peer in peers {
         assert!(
             proofs.record_replica_hint_sent_at(
@@ -164,6 +165,7 @@ async fn record_repair_proofs_for_peers(
         );
     }
     drop(proofs);
+    repair_proof_now
 }
 
 /// Fresh write happy path (Section 18 #1).
@@ -517,7 +519,7 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
         .await
         .expect("put gate record on pruner");
     store_record_on_peers(&harness, &gate_targets, &gate_address, &gate_content).await;
-    record_repair_proofs_for_peers(
+    let gate_repair_proof_now = record_repair_proofs_for_peers(
         &repair_proofs,
         &pruner_p2p,
         &config,
@@ -536,6 +538,7 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
         sync_state: &sync_state,
         repair_proofs: &repair_proofs,
         current_sync_epoch: CURRENT_EPOCH,
+        repair_proof_now: Some(gate_repair_proof_now),
         allow_remote_prune_audits: false,
     })
     .await;
@@ -554,6 +557,7 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
         sync_state: &sync_state,
         repair_proofs: &repair_proofs,
         current_sync_epoch: CURRENT_EPOCH,
+        repair_proof_now: Some(gate_repair_proof_now),
         allow_remote_prune_audits: true,
     })
     .await;
@@ -578,7 +582,7 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
         &missing_content,
     )
     .await;
-    record_repair_proofs_for_peers(
+    let missing_repair_proof_now = record_repair_proofs_for_peers(
         &repair_proofs,
         &pruner_p2p,
         &config,
@@ -597,6 +601,7 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
         sync_state: &sync_state,
         repair_proofs: &repair_proofs,
         current_sync_epoch: CURRENT_EPOCH,
+        repair_proof_now: Some(missing_repair_proof_now),
         allow_remote_prune_audits: true,
     })
     .await;
@@ -623,6 +628,7 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
         sync_state: &sync_state,
         repair_proofs: &repair_proofs,
         current_sync_epoch: CURRENT_EPOCH,
+        repair_proof_now: Some(missing_repair_proof_now),
         allow_remote_prune_audits: true,
     })
     .await;

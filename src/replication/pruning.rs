@@ -72,6 +72,9 @@ pub struct PrunePassContext<'a> {
     pub repair_proofs: &'a Arc<RwLock<RepairProofs>>,
     /// Current local neighbor-sync cycle epoch for repair-proof maturity.
     pub current_sync_epoch: u64,
+    /// Test-only clock override for repair-proof maturity checks.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub repair_proof_now: Option<Instant>,
     /// Whether remote prune-confirmation audits are allowed this pass.
     pub allow_remote_prune_audits: bool,
 }
@@ -173,6 +176,8 @@ pub async fn run_prune_pass(
         sync_state,
         repair_proofs: &repair_proofs,
         current_sync_epoch: 0,
+        #[cfg(any(test, feature = "test-utils"))]
+        repair_proof_now: None,
         allow_remote_prune_audits,
     })
     .await
@@ -347,13 +352,17 @@ async fn evaluate_record_prune_key(
     }
 
     let current_close_peers: HashSet<PeerId> = closest.iter().map(|node| node.peer_id).collect();
+    #[cfg(any(test, feature = "test-utils"))]
+    let repair_proof_now = ctx.repair_proof_now.unwrap_or(now);
+    #[cfg(not(any(test, feature = "test-utils")))]
+    let repair_proof_now = now;
     if !target_peers_have_mature_repair_proofs(
         key,
         &target_peers,
         &current_close_peers,
         ctx.repair_proofs,
         ctx.current_sync_epoch,
-        now,
+        repair_proof_now,
     )
     .await
     {

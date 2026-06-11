@@ -37,10 +37,12 @@ use super::REPLICATION_TRUST_WEIGHT;
 
 const MAX_CONCURRENT_PRUNE_AUDIT_CHALLENGES: usize = 32;
 
-/// Maximum expired `PaidForList` entries verified against the paid close
-/// group per prune pass. Bounds the per-pass verification fan-out the same
-/// way `MAX_PRUNE_AUDIT_CHALLENGES_PER_PASS` bounds record audits.
+/// Maximum expired `PaidForList` entries selected for verification per prune
+/// pass. The unique peer fan-out for those entries is capped separately.
 const MAX_PAID_PRUNE_VERIFICATIONS_PER_PASS: usize = 32;
+/// Maximum unique peers contacted for paid-list verification per prune pass.
+/// `quorum::run_verification_round` sends one request per target peer.
+const MAX_PAID_PRUNE_VERIFICATION_PEERS_PER_PASS: usize = MAX_CONCURRENT_PRUNE_AUDIT_CHALLENGES;
 
 // ---------------------------------------------------------------------------
 // Result type
@@ -106,6 +108,41 @@ struct PaidPruneStats {
     pruned: usize,
 }
 
+#[derive(Debug, Default)]
+struct PaidPruneDeferredCounts {
+    entry_budget: usize,
+    remote_gate: usize,
+    peer_budget: usize,
+}
+
+impl PaidPruneDeferredCounts {
+    fn log(&self) {
+        if self.entry_budget > 0 {
+            debug!(
+                "Deferred {} expired PaidForList entries beyond the per-pass verification cap \
+                 ({MAX_PAID_PRUNE_VERIFICATIONS_PER_PASS})",
+                self.entry_budget,
+            );
+        }
+
+        if self.remote_gate > 0 {
+            debug!(
+                "Deferred {} expired PaidForList entries until bootstrap drain allows remote \
+                 paid-prune verification",
+                self.remote_gate,
+            );
+        }
+
+        if self.peer_budget > 0 {
+            debug!(
+                "Deferred {} expired PaidForList entries beyond the per-pass paid-prune peer cap \
+                 ({MAX_PAID_PRUNE_VERIFICATION_PEERS_PER_PASS})",
+                self.peer_budget,
+            );
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RecordPruneCandidate {
     key: XorName,
@@ -132,6 +169,14 @@ enum RecordPruneKeyState {
     BootstrapDeferred,
     BudgetDeferred,
     Candidate(RecordPruneCandidate),
+}
+
+enum PaidPruneKeyState {
+    None,
+    RemoteDeferred,
+    EntryBudgetDeferred,
+    PeerBudgetDeferred,
+    Candidate(Vec<PeerId>),
 }
 
 #[derive(Default)]
@@ -193,8 +238,15 @@ pub async fn run_prune_pass(
 pub async fn run_prune_pass_with_context(ctx: PrunePassContext<'_>) -> PruneResult {
     let (stored_count, record_stats) = prune_stored_records(&ctx).await;
     let now = Instant::now();
-    let (paid_count, paid_stats) =
-        prune_paid_entries(ctx.self_id, ctx.paid_list, ctx.p2p_node, ctx.config, now).await;
+    let (paid_count, paid_stats) = prune_paid_entries(
+        ctx.self_id,
+        ctx.paid_list,
+        ctx.p2p_node,
+        ctx.config,
+        now,
+        ctx.allow_remote_prune_audits,
+    )
+    .await;
 
     let result = PruneResult {
         records_pruned: record_stats.pruned,
@@ -398,6 +450,7 @@ async fn prune_paid_entries(
     p2p_node: &Arc<P2PNode>,
     config: &ReplicationConfig,
     now: Instant,
+    allow_remote_prune_audits: bool,
 ) -> (usize, PaidPruneStats) {
     let paid_keys = match paid_list.all_keys() {
         Ok(keys) => keys,
@@ -410,7 +463,8 @@ async fn prune_paid_entries(
     let dht = p2p_node.dht_manager();
     let mut stats = PaidPruneStats::default();
     let mut expired_candidates: Vec<(XorName, Vec<PeerId>)> = Vec::new();
-    let mut verification_deferred = 0usize;
+    let mut deferred_counts = PaidPruneDeferredCounts::default();
+    let mut selected_verification_peers = HashSet::new();
     // Rotate the scan start so expired entries beyond the per-pass cap are
     // not starved by the same head-of-list entries every pass.
     let scan_start = paid_list.paid_prune_scan_start(paid_keys.len());
@@ -441,12 +495,31 @@ async fn prune_paid_entries(
                     .checked_duration_since(first_seen)
                     .unwrap_or(Duration::ZERO);
                 if elapsed >= config.prune_hysteresis_duration {
-                    if expired_candidates.len() < MAX_PAID_PRUNE_VERIFICATIONS_PER_PASS {
-                        let target_peers = remote_close_group_peers(&closest, self_id);
-                        expired_candidates.push((*key, target_peers));
-                        last_selected_offset = Some(offset);
-                    } else {
-                        verification_deferred = verification_deferred.saturating_add(1);
+                    match select_paid_prune_candidate(
+                        key,
+                        &closest,
+                        self_id,
+                        allow_remote_prune_audits,
+                        expired_candidates.len(),
+                        &mut selected_verification_peers,
+                    ) {
+                        PaidPruneKeyState::None => {}
+                        PaidPruneKeyState::RemoteDeferred => {
+                            deferred_counts.remote_gate =
+                                deferred_counts.remote_gate.saturating_add(1);
+                        }
+                        PaidPruneKeyState::EntryBudgetDeferred => {
+                            deferred_counts.entry_budget =
+                                deferred_counts.entry_budget.saturating_add(1);
+                        }
+                        PaidPruneKeyState::PeerBudgetDeferred => {
+                            deferred_counts.peer_budget =
+                                deferred_counts.peer_budget.saturating_add(1);
+                        }
+                        PaidPruneKeyState::Candidate(target_peers) => {
+                            expired_candidates.push((*key, target_peers));
+                            last_selected_offset = Some(offset);
+                        }
                     }
                 }
             }
@@ -454,13 +527,7 @@ async fn prune_paid_entries(
     }
 
     paid_list.advance_paid_prune_cursor(paid_keys.len(), scan_start, last_selected_offset);
-
-    if verification_deferred > 0 {
-        debug!(
-            "Deferred {verification_deferred} expired PaidForList entries beyond the \
-             per-pass verification cap ({MAX_PAID_PRUNE_VERIFICATIONS_PER_PASS})"
-        );
-    }
+    deferred_counts.log();
 
     let confirmed_by_key =
         collect_paid_prune_confirmations(&expired_candidates, p2p_node, config).await;
@@ -474,20 +541,58 @@ async fn prune_paid_entries(
     )
     .await;
     stats.cleared += revalidated_cleared;
-
-    if !paid_keys_to_delete.is_empty() {
-        match paid_list.remove_batch(&paid_keys_to_delete).await {
-            Ok(count) => {
-                stats.pruned = count;
-                debug!("Pruned {count} out-of-range PaidForList entries");
-            }
-            Err(e) => {
-                warn!("Failed to prune PaidForList entries: {e}");
-            }
-        }
-    }
+    stats.pruned = delete_paid_entries(&paid_keys_to_delete, paid_list).await;
 
     (paid_keys.len(), stats)
+}
+
+fn select_paid_prune_candidate(
+    key: &XorName,
+    closest: &[DHTNode],
+    self_id: &PeerId,
+    allow_remote_prune_audits: bool,
+    selected_candidate_count: usize,
+    selected_verification_peers: &mut HashSet<PeerId>,
+) -> PaidPruneKeyState {
+    if !allow_remote_prune_audits {
+        return PaidPruneKeyState::RemoteDeferred;
+    }
+
+    let target_peers = remote_close_group_peers(closest, self_id);
+    if target_peers.is_empty() {
+        warn!(
+            "Cannot prune paid entry {}: current paid close group has no remote peers",
+            hex::encode(key)
+        );
+        return PaidPruneKeyState::None;
+    }
+
+    if selected_candidate_count >= MAX_PAID_PRUNE_VERIFICATIONS_PER_PASS {
+        return PaidPruneKeyState::EntryBudgetDeferred;
+    }
+
+    if !reserve_paid_prune_peer_budget(&target_peers, selected_verification_peers) {
+        return PaidPruneKeyState::PeerBudgetDeferred;
+    }
+
+    PaidPruneKeyState::Candidate(target_peers)
+}
+
+async fn delete_paid_entries(keys_to_delete: &[XorName], paid_list: &Arc<PaidList>) -> usize {
+    if keys_to_delete.is_empty() {
+        return 0;
+    }
+
+    match paid_list.remove_batch(keys_to_delete).await {
+        Ok(count) => {
+            debug!("Pruned {count} out-of-range PaidForList entries");
+            count
+        }
+        Err(e) => {
+            warn!("Failed to prune PaidForList entries: {e}");
+            0
+        }
+    }
 }
 
 /// Re-check each confirmed candidate against current local state before
@@ -583,6 +688,26 @@ fn paid_prune_confirmations_needed(group_size: usize) -> usize {
     (3 * group_size).div_ceil(4)
 }
 
+fn reserve_paid_prune_peer_budget(
+    target_peers: &[PeerId],
+    selected_verification_peers: &mut HashSet<PeerId>,
+) -> bool {
+    let new_peer_count = target_peers
+        .iter()
+        .filter(|peer| !selected_verification_peers.contains(peer))
+        .count();
+    if selected_verification_peers
+        .len()
+        .saturating_add(new_peer_count)
+        > MAX_PAID_PRUNE_VERIFICATION_PEERS_PER_PASS
+    {
+        return false;
+    }
+
+    selected_verification_peers.extend(target_peers.iter().copied());
+    true
+}
+
 /// Ask the current paid close group whether they track each expired key in
 /// their `PaidForList`, and return the confirming peers per key.
 ///
@@ -646,8 +771,8 @@ fn paid_confirmations_by_key(
         let confirmed: HashSet<PeerId> = key_evidence
             .paid_list
             .iter()
-            .filter(|(peer, status)| {
-                **status == PaidListEvidence::Confirmed && target_peers.contains(peer)
+            .filter(|&(peer, status)| {
+                *status == PaidListEvidence::Confirmed && target_peers.contains(peer)
             })
             .map(|(peer, _)| *peer)
             .collect();
@@ -1278,6 +1403,12 @@ mod tests {
         [b; 32]
     }
 
+    fn peer_ids(count: usize) -> Vec<PeerId> {
+        (0..count)
+            .map(|idx| peer_id_from_byte(u8::try_from(idx + 1).expect("peer byte")))
+            .collect()
+    }
+
     fn candidate(key: XorName, target_peers: Vec<PeerId>) -> RecordPruneCandidate {
         RecordPruneCandidate { key, target_peers }
     }
@@ -1362,6 +1493,48 @@ mod tests {
         assert_eq!(paid_prune_confirmations_needed(4), 3);
         // Production paid close group: 15 of 20 confirmations required.
         assert_eq!(paid_prune_confirmations_needed(20), 15);
+    }
+
+    #[test]
+    fn paid_prune_peer_budget_allows_overlapping_targets() {
+        let peers = peer_ids(MAX_PAID_PRUNE_VERIFICATION_PEERS_PER_PASS);
+        let mut selected_peers = HashSet::new();
+
+        assert!(reserve_paid_prune_peer_budget(&peers, &mut selected_peers));
+        assert_eq!(
+            selected_peers.len(),
+            MAX_PAID_PRUNE_VERIFICATION_PEERS_PER_PASS,
+        );
+
+        let overlapping_targets = vec![peers[0], peers[1]];
+        assert!(reserve_paid_prune_peer_budget(
+            &overlapping_targets,
+            &mut selected_peers,
+        ));
+        assert_eq!(
+            selected_peers.len(),
+            MAX_PAID_PRUNE_VERIFICATION_PEERS_PER_PASS,
+        );
+    }
+
+    #[test]
+    fn paid_prune_peer_budget_rejects_new_peers_past_cap() {
+        let peers = peer_ids(MAX_PAID_PRUNE_VERIFICATION_PEERS_PER_PASS + 1);
+        let mut selected_peers = HashSet::new();
+
+        assert!(reserve_paid_prune_peer_budget(
+            &peers[..MAX_PAID_PRUNE_VERIFICATION_PEERS_PER_PASS],
+            &mut selected_peers,
+        ));
+        assert!(!reserve_paid_prune_peer_budget(
+            &peers[MAX_PAID_PRUNE_VERIFICATION_PEERS_PER_PASS..],
+            &mut selected_peers,
+        ));
+        assert_eq!(
+            selected_peers.len(),
+            MAX_PAID_PRUNE_VERIFICATION_PEERS_PER_PASS,
+        );
+        assert!(!selected_peers.contains(&peers[MAX_PAID_PRUNE_VERIFICATION_PEERS_PER_PASS]));
     }
 
     #[test]

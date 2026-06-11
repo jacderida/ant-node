@@ -26,12 +26,21 @@ use crate::replication::protocol::{
     compute_audit_digest, AuditChallenge, AuditResponse, ReplicationMessage,
     ReplicationMessageBody, ABSENT_KEY_DIGEST,
 };
-use crate::replication::types::{BootstrapClaimObservation, NeighborSyncState, RepairProofs};
+use crate::replication::quorum::{self, VerificationTargets};
+use crate::replication::types::{
+    BootstrapClaimObservation, KeyVerificationEvidence, NeighborSyncState, PaidListEvidence,
+    RepairProofs,
+};
 use crate::storage::LmdbStorage;
 
 use super::REPLICATION_TRUST_WEIGHT;
 
 const MAX_CONCURRENT_PRUNE_AUDIT_CHALLENGES: usize = 32;
+
+/// Maximum expired `PaidForList` entries verified against the paid close
+/// group per prune pass. Bounds the per-pass verification fan-out the same
+/// way `MAX_PRUNE_AUDIT_CHALLENGES_PER_PASS` bounds record audits.
+const MAX_PAID_PRUNE_VERIFICATIONS_PER_PASS: usize = 32;
 
 // ---------------------------------------------------------------------------
 // Result type
@@ -140,13 +149,15 @@ struct PruneAuditReportState {
 /// For each stored record K:
 /// - If `IsResponsible(self, K)`: clear `RecordOutOfRangeFirstSeen`.
 /// - If not responsible: set timestamp if not already set; delete if the
-///   timestamp is at least `PRUNE_HYSTERESIS_DURATION` old and the current
-///   close group proves it stores the record.
+///   timestamp is at least `PRUNE_HYSTERESIS_DURATION` old and all but one
+///   of the current close group prove they store the record.
 ///
 /// For each `PaidForList` entry K:
 /// - If self is in `PaidCloseGroup(K)`: clear `PaidOutOfRangeFirstSeen`.
 /// - If not in group: set timestamp if not already set; remove entry if the
-///   timestamp is at least `PRUNE_HYSTERESIS_DURATION` old.
+///   timestamp is at least `PRUNE_HYSTERESIS_DURATION` old and three
+///   quarters of the current paid close group (15 of 20 at production
+///   parameters) confirm the key in their own `PaidForList`.
 ///
 /// Compatibility wrapper for callers that have not adopted repair-proof
 /// tracking. It preserves the original public signature, but it has no proof
@@ -182,8 +193,15 @@ pub async fn run_prune_pass(
 pub async fn run_prune_pass_with_context(ctx: PrunePassContext<'_>) -> PruneResult {
     let (stored_count, record_stats) = prune_stored_records(&ctx).await;
     let now = Instant::now();
-    let (paid_count, paid_stats) =
-        prune_paid_entries(ctx.self_id, ctx.paid_list, ctx.p2p_node, ctx.config, now).await;
+    let (paid_count, paid_stats) = prune_paid_entries(
+        ctx.self_id,
+        ctx.paid_list,
+        ctx.p2p_node,
+        ctx.config,
+        ctx.sync_state,
+        now,
+    )
+    .await;
 
     let result = PruneResult {
         records_pruned: record_stats.pruned,
@@ -346,32 +364,37 @@ async fn evaluate_record_prune_key(
         return outcome;
     }
 
+    // Only peers we have hinted (mature repair proof) may be audited; the
+    // proof threshold must be reachable among them. A never-synced peer in
+    // the close group reduces the audit pool instead of vetoing the prune.
     let current_close_peers: HashSet<PeerId> = closest.iter().map(|node| node.peer_id).collect();
-    if !target_peers_have_mature_repair_proofs(
+    let audit_targets = peers_with_mature_repair_proofs(
         key,
         &target_peers,
         &current_close_peers,
         ctx.repair_proofs,
         ctx.current_sync_epoch,
     )
-    .await
-    {
+    .await;
+    let proofs_needed = prune_proofs_needed(target_peers.len());
+    if proofs_needed == 0 || audit_targets.len() < proofs_needed {
         debug!(
-            "Deferring prune for {} until current close group has mature repair proofs",
+            "Deferring prune for {} until enough of the close group has mature \
+             repair proofs",
             hex::encode(key)
         );
         return outcome;
     }
 
-    if target_peers.len() > *audit_challenge_budget {
+    if audit_targets.len() > *audit_challenge_budget {
         outcome.state = RecordPruneKeyState::BudgetDeferred;
         return outcome;
     }
 
-    *audit_challenge_budget -= target_peers.len();
+    *audit_challenge_budget -= audit_targets.len();
     outcome.state = RecordPruneKeyState::Candidate(RecordPruneCandidate {
         key: *key,
-        target_peers,
+        target_peers: audit_targets,
     });
     outcome
 }
@@ -381,6 +404,7 @@ async fn prune_paid_entries(
     paid_list: &Arc<PaidList>,
     p2p_node: &Arc<P2PNode>,
     config: &ReplicationConfig,
+    sync_state: &Arc<RwLock<NeighborSyncState>>,
     now: Instant,
 ) -> (usize, PaidPruneStats) {
     let paid_keys = match paid_list.all_keys() {
@@ -393,9 +417,17 @@ async fn prune_paid_entries(
 
     let dht = p2p_node.dht_manager();
     let mut stats = PaidPruneStats::default();
-    let mut paid_keys_to_delete = Vec::new();
+    let mut expired_candidates: Vec<(XorName, Vec<PeerId>)> = Vec::new();
+    let mut verification_deferred = 0usize;
+    // Rotate the scan start so expired entries beyond the per-pass cap are
+    // not starved by the same head-of-list entries every pass.
+    let scan_start = paid_prune_scan_start(sync_state, paid_keys.len()).await;
+    let mut last_selected_offset = None;
 
-    for key in &paid_keys {
+    for offset in 0..paid_keys.len() {
+        let Some(key) = paid_keys.get((scan_start + offset) % paid_keys.len()) else {
+            continue;
+        };
         let closest: Vec<DHTNode> = dht
             .find_closest_nodes_local_with_self(key, config.paid_list_close_group_size)
             .await;
@@ -417,11 +449,45 @@ async fn prune_paid_entries(
                     .checked_duration_since(first_seen)
                     .unwrap_or(Duration::ZERO);
                 if elapsed >= config.prune_hysteresis_duration {
-                    paid_keys_to_delete.push(*key);
+                    if expired_candidates.len() < MAX_PAID_PRUNE_VERIFICATIONS_PER_PASS {
+                        let target_peers = remote_close_group_peers(&closest, self_id);
+                        expired_candidates.push((*key, target_peers));
+                        last_selected_offset = Some(offset);
+                    } else {
+                        verification_deferred = verification_deferred.saturating_add(1);
+                    }
                 }
             }
         }
     }
+
+    advance_paid_prune_cursor(
+        sync_state,
+        paid_keys.len(),
+        scan_start,
+        last_selected_offset,
+    )
+    .await;
+
+    if verification_deferred > 0 {
+        debug!(
+            "Deferred {verification_deferred} expired PaidForList entries beyond the \
+             per-pass verification cap ({MAX_PAID_PRUNE_VERIFICATIONS_PER_PASS})"
+        );
+    }
+
+    let confirmed_by_key =
+        collect_paid_prune_confirmations(&expired_candidates, p2p_node, config).await;
+    let (paid_keys_to_delete, revalidated_cleared) = revalidated_paid_prune_keys(
+        &expired_candidates,
+        &confirmed_by_key,
+        self_id,
+        paid_list,
+        p2p_node,
+        config,
+    )
+    .await;
+    stats.cleared += revalidated_cleared;
 
     if !paid_keys_to_delete.is_empty() {
         match paid_list.remove_batch(&paid_keys_to_delete).await {
@@ -438,6 +504,104 @@ async fn prune_paid_entries(
     (paid_keys.len(), stats)
 }
 
+async fn paid_prune_scan_start(
+    sync_state: &Arc<RwLock<NeighborSyncState>>,
+    paid_key_count: usize,
+) -> usize {
+    if paid_key_count == 0 {
+        return 0;
+    }
+    sync_state.read().await.paid_prune_cursor % paid_key_count
+}
+
+async fn advance_paid_prune_cursor(
+    sync_state: &Arc<RwLock<NeighborSyncState>>,
+    paid_key_count: usize,
+    scan_start: usize,
+    last_selected_offset: Option<usize>,
+) {
+    if paid_key_count == 0 {
+        sync_state.write().await.paid_prune_cursor = 0;
+        return;
+    }
+
+    let advance_by = last_selected_offset.map_or(1, |offset| offset.saturating_add(1));
+    sync_state.write().await.paid_prune_cursor = (scan_start + advance_by) % paid_key_count;
+}
+
+/// Re-check each confirmed candidate against current local state before
+/// deletion.
+///
+/// The network round in [`collect_paid_prune_confirmations`] takes time;
+/// the paid close group may have changed underneath it, including self
+/// moving back into range. Mirrors [`revalidated_record_prune_keys`]:
+/// confirmations only count from peers still in the current paid close
+/// group, against a threshold computed from that current group.
+async fn revalidated_paid_prune_keys(
+    expired_candidates: &[(XorName, Vec<PeerId>)],
+    confirmed_by_key: &HashMap<XorName, HashSet<PeerId>>,
+    self_id: &PeerId,
+    paid_list: &Arc<PaidList>,
+    p2p_node: &Arc<P2PNode>,
+    config: &ReplicationConfig,
+) -> (Vec<XorName>, usize) {
+    let dht = p2p_node.dht_manager();
+    let mut keys_to_delete = Vec::new();
+    let mut cleared = 0;
+    let now = Instant::now();
+
+    for (key, _) in expired_candidates {
+        let closest: Vec<DHTNode> = dht
+            .find_closest_nodes_local_with_self(key, config.paid_list_close_group_size)
+            .await;
+
+        if closest.iter().any(|n| n.peer_id == *self_id) {
+            if paid_list.paid_out_of_range_since(key).is_some() {
+                paid_list.clear_paid_out_of_range(key);
+                cleared += 1;
+            }
+            continue;
+        }
+
+        let Some(first_seen) = paid_list.paid_out_of_range_since(key) else {
+            continue;
+        };
+        let elapsed = now
+            .checked_duration_since(first_seen)
+            .unwrap_or(Duration::ZERO);
+        if elapsed < config.prune_hysteresis_duration {
+            continue;
+        }
+
+        let current_target_peers = remote_close_group_peers(&closest, self_id);
+        if current_target_peers.is_empty() {
+            warn!(
+                "Cannot prune paid entry {}: current paid close group has no remote peers",
+                hex::encode(key)
+            );
+            continue;
+        }
+
+        let confirmations_needed = paid_prune_confirmations_needed(current_target_peers.len());
+        if target_peers_reported_present(
+            key,
+            &current_target_peers,
+            confirmed_by_key,
+            confirmations_needed,
+        ) {
+            keys_to_delete.push(*key);
+        } else {
+            debug!(
+                "Deferring paid-entry prune for {} until enough of the current paid \
+                 close group confirm it",
+                hex::encode(key)
+            );
+        }
+    }
+
+    (keys_to_delete, cleared)
+}
+
 fn remote_close_group_peers(close_group: &[DHTNode], self_id: &PeerId) -> Vec<PeerId> {
     close_group
         .iter()
@@ -446,17 +610,112 @@ fn remote_close_group_peers(close_group: &[DHTNode], self_id: &PeerId) -> Vec<Pe
         .collect()
 }
 
-async fn target_peers_have_mature_repair_proofs(
+/// Confirmations required before removing an out-of-range `PaidForList`
+/// entry: three quarters of the paid close group rounded up, 15 of 20 at
+/// production parameters.
+///
+/// Paid-entry pruning is deliberately gated on the paid lists of the current
+/// paid close group, never on chunk possession: the paid list is the
+/// authorization record, and a wide confirmed majority must already track
+/// the key before this node may forget it.
+fn paid_prune_confirmations_needed(group_size: usize) -> usize {
+    (3 * group_size).div_ceil(4)
+}
+
+/// Ask the current paid close group whether they track each expired key in
+/// their `PaidForList`, and return the confirming peers per key.
+///
+/// The deletion decision happens afterwards in
+/// [`revalidated_paid_prune_keys`], against the paid close group as it
+/// stands once the network round has completed.
+async fn collect_paid_prune_confirmations(
+    expired_candidates: &[(XorName, Vec<PeerId>)],
+    p2p_node: &Arc<P2PNode>,
+    config: &ReplicationConfig,
+) -> HashMap<XorName, HashSet<PeerId>> {
+    if expired_candidates.is_empty() {
+        return HashMap::new();
+    }
+
+    let mut targets = VerificationTargets::default();
+    let mut keys = Vec::new();
+    for (key, target_peers) in expired_candidates {
+        if target_peers.is_empty() {
+            warn!(
+                "Cannot prune paid entry {}: current paid close group has no remote peers",
+                hex::encode(key)
+            );
+            continue;
+        }
+        keys.push(*key);
+        for peer in target_peers {
+            targets.all_peers.insert(*peer);
+            targets.peer_to_keys.entry(*peer).or_default().push(*key);
+            targets
+                .peer_to_paid_keys
+                .entry(*peer)
+                .or_default()
+                .insert(*key);
+        }
+        targets.paid_targets.insert(*key, target_peers.clone());
+        targets.paid_group_sizes.insert(*key, target_peers.len());
+    }
+    for keys_list in targets.peer_to_keys.values_mut() {
+        keys_list.sort_unstable();
+        keys_list.dedup();
+    }
+
+    let evidence = quorum::run_verification_round(&keys, &targets, p2p_node, config).await;
+    paid_confirmations_by_key(expired_candidates, &evidence)
+}
+
+/// Aggregate `Confirmed` paid-list evidence into per-key peer sets.
+///
+/// Only peers in the candidate's own target set count; `NotFound` and
+/// `Unresolved` answers never confirm.
+fn paid_confirmations_by_key(
+    expired_candidates: &[(XorName, Vec<PeerId>)],
+    evidence: &HashMap<XorName, KeyVerificationEvidence>,
+) -> HashMap<XorName, HashSet<PeerId>> {
+    let mut confirmed_by_key: HashMap<XorName, HashSet<PeerId>> = HashMap::new();
+    for (key, target_peers) in expired_candidates {
+        let Some(key_evidence) = evidence.get(key) else {
+            continue;
+        };
+        let confirmed: HashSet<PeerId> = key_evidence
+            .paid_list
+            .iter()
+            .filter(|(peer, status)| {
+                **status == PaidListEvidence::Confirmed && target_peers.contains(peer)
+            })
+            .map(|(peer, _)| *peer)
+            .collect();
+        if !confirmed.is_empty() {
+            confirmed_by_key.insert(*key, confirmed);
+        }
+    }
+    confirmed_by_key
+}
+
+/// Filter `target_peers` down to those with a mature repair proof for `key`.
+///
+/// Per design rule 20, peers without a key-specific mature repair hint proof
+/// are never audited for that key.
+async fn peers_with_mature_repair_proofs(
     key: &XorName,
     target_peers: &[PeerId],
     current_close_peers: &HashSet<PeerId>,
     repair_proofs: &Arc<RwLock<RepairProofs>>,
     current_sync_epoch: u64,
-) -> bool {
+) -> Vec<PeerId> {
     let mut proofs = repair_proofs.write().await;
-    target_peers.iter().all(|peer| {
-        proofs.has_mature_replica_hint(peer, key, current_close_peers, current_sync_epoch)
-    })
+    target_peers
+        .iter()
+        .filter(|peer| {
+            proofs.has_mature_replica_hint(peer, key, current_close_peers, current_sync_epoch)
+        })
+        .copied()
+        .collect()
 }
 
 async fn prune_scan_start(
@@ -512,10 +771,14 @@ async fn delete_stored_records(
 
 /// Collect positive presence reports for prune candidates.
 ///
-/// Peers that fail to prove storage block pruning for their keys. The
-/// retained local record continues to participate in normal neighbor-sync
-/// repair because replica hint construction walks all locally stored keys,
-/// including out-of-range keys retained by hysteresis.
+/// A key is deleted once all but one of the current close group prove
+/// possession ([`prune_proofs_needed`]). Requiring unanimous proofs left
+/// out-of-range records undeletable whenever a single close-group peer
+/// lagged, while the all-but-one threshold still demands more copies than
+/// the storage quorum used elsewhere. Keys below the proof threshold stay
+/// local, and the retained record continues to participate in normal
+/// neighbor-sync repair because replica hint construction walks all locally
+/// stored keys, including out-of-range keys retained by hysteresis.
 async fn collect_record_prune_proofs(
     candidates: &[RecordPruneCandidate],
     storage: &Arc<LmdbStorage>,
@@ -600,11 +863,18 @@ async fn revalidated_record_prune_keys(
             continue;
         }
 
-        if target_peers_reported_present(&candidate.key, &current_target_peers, present_by_key) {
+        let proofs_needed = prune_proofs_needed(current_target_peers.len());
+        if target_peers_reported_present(
+            &candidate.key,
+            &current_target_peers,
+            present_by_key,
+            proofs_needed,
+        ) {
             keys_to_delete.push(candidate.key);
         } else {
             debug!(
-                "Deferring prune for {} until current close group reports it",
+                "Deferring prune for {} until all but one of the current close group \
+                 report it",
                 hex::encode(candidate.key)
             );
         }
@@ -627,25 +897,63 @@ fn build_peer_audit_challenges(candidates: &[RecordPruneCandidate]) -> Vec<(Peer
 fn confirmed_keys_from_presence(
     candidates: &[RecordPruneCandidate],
     present_by_key: &HashMap<XorName, HashSet<PeerId>>,
+    proofs_needed: usize,
 ) -> Vec<XorName> {
     candidates
         .iter()
         .filter(|candidate| {
-            target_peers_reported_present(&candidate.key, &candidate.target_peers, present_by_key)
+            target_peers_reported_present(
+                &candidate.key,
+                &candidate.target_peers,
+                present_by_key,
+                proofs_needed,
+            )
         })
         .map(|candidate| candidate.key)
         .collect()
 }
 
+/// Proofs required before deleting an out-of-range record: all but one of
+/// the close group (6 of 7 at production parameters).
+///
+/// Stricter than the storage quorum (`QuorumNeeded`) because pruning only
+/// runs after `PRUNE_HYSTERESIS_DURATION` out of range, by which time many
+/// sync cycles should have replicated the record across the whole close
+/// group. Tolerating exactly one lagging peer keeps a single absent peer
+/// from vetoing deletion forever without accepting under-replication.
+/// Groups of one or two peers require every proof: tolerating a miss there
+/// would allow deletion on a single attestation.
+fn prune_proofs_needed(group_size: usize) -> usize {
+    if group_size <= 2 {
+        group_size
+    } else {
+        group_size - 1
+    }
+}
+
+/// Whether enough target peers proved possession to allow deletion.
+///
+/// `proofs_needed == 0` means confirmation is impossible (no targets), not
+/// trivially met.
 fn target_peers_reported_present(
     key: &XorName,
     target_peers: &[PeerId],
     present_by_key: &HashMap<XorName, HashSet<PeerId>>,
+    proofs_needed: usize,
 ) -> bool {
+    if proofs_needed == 0 {
+        return false;
+    }
     let Some(present_peers) = present_by_key.get(key) else {
         return false;
     };
-    target_peers.iter().all(|peer| present_peers.contains(peer))
+    // Count distinct proven peers: iterating the present set keeps a
+    // duplicated entry in `target_peers` from being counted twice.
+    let proven = present_peers
+        .iter()
+        .filter(|peer| target_peers.contains(peer))
+        .count();
+    proven >= proofs_needed
 }
 
 /// Challenge a peer to prove it holds the exact record bytes for `key`.
@@ -782,19 +1090,25 @@ fn prune_audit_response_status(
                 warn!("Prune audit challenge ID mismatch from {peer}");
                 return PruneAuditStatus::Failed;
             }
-            if digests.len() != 1 {
+            let [digest] = digests.as_slice() else {
                 warn!(
                     "Prune audit response from {peer} returned {} digests for one challenged key",
                     digests.len(),
                 );
                 return PruneAuditStatus::Failed;
+            };
+            if *digest == ABSENT_KEY_DIGEST {
+                warn!(
+                    "Prune audit proof from {peer} failed for {}: peer reports key absent",
+                    hex::encode(key)
+                );
+                return PruneAuditStatus::Failed;
             }
-
-            if audit_digest_proves_key(peer, key, nonce, local_bytes, &digests[0]) {
+            if audit_digest_proves_key(peer, key, nonce, local_bytes, digest) {
                 PruneAuditStatus::Proven
             } else {
                 warn!(
-                    "Prune audit proof from {peer} failed for {}",
+                    "Prune audit proof from {peer} failed for {}: digest mismatch",
                     hex::encode(key)
                 );
                 PruneAuditStatus::Failed
@@ -1027,38 +1341,178 @@ mod tests {
     }
 
     #[test]
-    fn confirmed_keys_require_all_target_peers_present() {
+    fn confirmed_keys_require_quorum_of_target_peers_present() {
         let peer_a = peer_id_from_byte(1);
         let peer_b = peer_id_from_byte(2);
+        let peer_c = peer_id_from_byte(3);
         let key = key_from_byte(0xC);
-        let candidates = vec![candidate(key, vec![peer_a, peer_b])];
+        let candidates = vec![candidate(key, vec![peer_a, peer_b, peer_c])];
         let mut present_by_key = HashMap::new();
         present_by_key.insert(key, HashSet::from([peer_a, peer_b]));
 
-        let confirmed = confirmed_keys_from_presence(&candidates, &present_by_key);
-
+        // Two of three proofs meet a quorum of 2 even though one peer is
+        // missing — unanimity is not required.
+        let confirmed = confirmed_keys_from_presence(&candidates, &present_by_key, 2);
         assert_eq!(confirmed, vec![key]);
+
+        // The same evidence fails a quorum of 3.
+        let confirmed = confirmed_keys_from_presence(&candidates, &present_by_key, 3);
+        assert!(confirmed.is_empty());
     }
 
     #[test]
-    fn confirmed_keys_defer_absent_or_missing_peer_evidence() {
+    fn confirmed_keys_defer_below_quorum_or_missing_peer_evidence() {
         let peer_a = peer_id_from_byte(1);
         let peer_b = peer_id_from_byte(2);
-        let complete_key = key_from_byte(0xD);
-        let absent_key = key_from_byte(0xE);
+        let quorum_key = key_from_byte(0xD);
+        let below_quorum_key = key_from_byte(0xE);
         let missing_key = key_from_byte(0xF);
         let candidates = vec![
-            candidate(complete_key, vec![peer_a, peer_b]),
-            candidate(absent_key, vec![peer_a, peer_b]),
+            candidate(quorum_key, vec![peer_a, peer_b]),
+            candidate(below_quorum_key, vec![peer_a, peer_b]),
             candidate(missing_key, vec![peer_a, peer_b]),
         ];
         let mut present_by_key = HashMap::new();
-        present_by_key.insert(complete_key, HashSet::from([peer_a, peer_b]));
-        present_by_key.insert(absent_key, HashSet::from([peer_a]));
+        present_by_key.insert(quorum_key, HashSet::from([peer_a, peer_b]));
+        present_by_key.insert(below_quorum_key, HashSet::from([peer_a]));
 
-        let confirmed = confirmed_keys_from_presence(&candidates, &present_by_key);
+        let confirmed = confirmed_keys_from_presence(&candidates, &present_by_key, 2);
 
-        assert_eq!(confirmed, vec![complete_key]);
+        assert_eq!(confirmed, vec![quorum_key]);
+    }
+
+    #[test]
+    fn prune_proofs_needed_tolerates_exactly_one_lagging_peer() {
+        assert_eq!(prune_proofs_needed(0), 0);
+        // Tiny groups require every proof.
+        assert_eq!(prune_proofs_needed(1), 1);
+        assert_eq!(prune_proofs_needed(2), 2);
+        assert_eq!(prune_proofs_needed(3), 2);
+        assert_eq!(prune_proofs_needed(5), 4);
+        // Production close group: 6 of 7 proofs required.
+        assert_eq!(prune_proofs_needed(7), 6);
+    }
+
+    #[test]
+    fn paid_prune_confirmations_are_three_quarters_rounded_up() {
+        assert_eq!(paid_prune_confirmations_needed(0), 0);
+        assert_eq!(paid_prune_confirmations_needed(1), 1);
+        assert_eq!(paid_prune_confirmations_needed(2), 2);
+        assert_eq!(paid_prune_confirmations_needed(4), 3);
+        // Production paid close group: 15 of 20 confirmations required.
+        assert_eq!(paid_prune_confirmations_needed(20), 15);
+    }
+
+    #[test]
+    fn paid_confirmations_count_only_confirmed_target_peers() {
+        let confirmed_peer = peer_id_from_byte(1);
+        let not_found_peer = peer_id_from_byte(2);
+        let unresolved_peer = peer_id_from_byte(3);
+        let outsider = peer_id_from_byte(4);
+        let key = key_from_byte(0x21);
+        let candidates = vec![(key, vec![confirmed_peer, not_found_peer, unresolved_peer])];
+
+        let mut evidence = HashMap::new();
+        evidence.insert(
+            key,
+            KeyVerificationEvidence {
+                presence: HashMap::new(),
+                paid_list: HashMap::from([
+                    (confirmed_peer, PaidListEvidence::Confirmed),
+                    (not_found_peer, PaidListEvidence::NotFound),
+                    (unresolved_peer, PaidListEvidence::Unresolved),
+                    // Confirmation from a peer outside the target set.
+                    (outsider, PaidListEvidence::Confirmed),
+                ]),
+            },
+        );
+
+        let confirmed_by_key = paid_confirmations_by_key(&candidates, &evidence);
+
+        assert_eq!(
+            confirmed_by_key.get(&key),
+            Some(&HashSet::from([confirmed_peer])),
+            "only Confirmed answers from target peers may count",
+        );
+    }
+
+    #[test]
+    fn paid_confirmations_skip_keys_without_evidence() {
+        let peer = peer_id_from_byte(1);
+        let key = key_from_byte(0x22);
+        let candidates = vec![(key, vec![peer])];
+
+        let confirmed_by_key = paid_confirmations_by_key(&candidates, &HashMap::new());
+
+        assert!(confirmed_by_key.is_empty());
+    }
+
+    #[tokio::test]
+    async fn paid_prune_cursor_advances_past_selected_window() {
+        let state = Arc::new(RwLock::new(NeighborSyncState::new_cycle(vec![])));
+        state.write().await.paid_prune_cursor = 2;
+
+        let start = paid_prune_scan_start(&state, 10).await;
+        advance_paid_prune_cursor(&state, 10, start, Some(3)).await;
+
+        assert_eq!(state.read().await.paid_prune_cursor, 6);
+    }
+
+    #[tokio::test]
+    async fn paid_prune_cursor_advances_even_when_nothing_selected() {
+        let state = Arc::new(RwLock::new(NeighborSyncState::new_cycle(vec![])));
+        state.write().await.paid_prune_cursor = 9;
+
+        let start = paid_prune_scan_start(&state, 10).await;
+        advance_paid_prune_cursor(&state, 10, start, None).await;
+
+        assert_eq!(state.read().await.paid_prune_cursor, 0);
+    }
+
+    #[test]
+    fn zero_quorum_never_confirms() {
+        let peer_a = peer_id_from_byte(1);
+        let key = key_from_byte(0x10);
+        let mut present_by_key = HashMap::new();
+        present_by_key.insert(key, HashSet::from([peer_a]));
+
+        assert!(!target_peers_reported_present(
+            &key,
+            &[peer_a],
+            &present_by_key,
+            0
+        ));
+    }
+
+    #[test]
+    fn proofs_from_non_target_peers_do_not_count_toward_quorum() {
+        let target = peer_id_from_byte(1);
+        let outsider = peer_id_from_byte(2);
+        let key = key_from_byte(0x11);
+        let mut present_by_key = HashMap::new();
+        present_by_key.insert(key, HashSet::from([outsider]));
+
+        assert!(!target_peers_reported_present(
+            &key,
+            &[target],
+            &present_by_key,
+            1
+        ));
+    }
+
+    #[test]
+    fn duplicated_target_peer_counts_once_toward_quorum() {
+        let peer = peer_id_from_byte(1);
+        let key = key_from_byte(0x12);
+        let mut present_by_key = HashMap::new();
+        present_by_key.insert(key, HashSet::from([peer]));
+
+        assert!(!target_peers_reported_present(
+            &key,
+            &[peer, peer],
+            &present_by_key,
+            2
+        ));
     }
 
     #[test]

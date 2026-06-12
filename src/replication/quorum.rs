@@ -22,7 +22,7 @@ use crate::replication::types::{KeyVerificationEvidence, PaidListEvidence, Prese
 // ---------------------------------------------------------------------------
 
 /// Targets for verifying a set of keys.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct VerificationTargets {
     /// Per-key: closest `CLOSE_GROUP_SIZE` peers (excluding self) for presence
     /// quorum.

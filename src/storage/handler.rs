@@ -41,6 +41,7 @@ use crate::payment::{PaymentVerifier, QuoteGenerator, VerificationContext};
 use crate::replication::fresh::FreshWriteEvent;
 use crate::storage::lmdb::LmdbStorage;
 use bytes::Bytes;
+use parking_lot::RwLock;
 use saorsa_core::P2PNode;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -57,8 +58,13 @@ pub struct AntProtocol {
     /// Quote generator for creating storage quotes.
     /// Also handles merkle candidate quote signing via ML-DSA-65.
     quote_generator: Arc<QuoteGenerator>,
+    /// P2P node handle used for direct PUT receiver responsibility checks.
+    p2p_node: RwLock<Option<Arc<P2PNode>>>,
     /// Channel for notifying the replication engine about newly-stored chunks.
     fresh_write_tx: Option<mpsc::UnboundedSender<FreshWriteEvent>>,
+    /// Test-only override for direct PUT storage responsibility checks.
+    #[cfg(any(test, feature = "test-utils"))]
+    test_store_membership_override: RwLock<Option<bool>>,
 }
 
 impl AntProtocol {
@@ -89,18 +95,29 @@ impl AntProtocol {
             storage,
             payment_verifier,
             quote_generator,
+            p2p_node: RwLock::new(None),
             fresh_write_tx: None,
+            #[cfg(any(test, feature = "test-utils"))]
+            test_store_membership_override: RwLock::new(None),
         }
     }
 
-    /// Attach the node's P2P handle for payment live-DHT checks.
+    /// Attach the node's P2P handle for direct PUT responsibility and payment
+    /// live-DHT checks.
     ///
     /// Also wires the same handle into the payment verifier so payment-proof
-    /// closeness checks and storage-endpoint responsibility checks can use the
-    /// live routing view. Idempotent: calling twice replaces the verifier handle.
+    /// closeness checks can use the live routing view. Idempotent: calling
+    /// twice replaces both handles.
     pub fn attach_p2p_node(&self, node: Arc<P2PNode>) {
+        *self.p2p_node.write() = Some(Arc::clone(&node));
         self.payment_verifier.attach_p2p_node(node);
         debug!("AntProtocol: P2PNode attached for payment live-DHT checks");
+    }
+
+    /// Test-only setter for direct PUT storage responsibility checks.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn set_store_membership_for_tests(&self, is_member: bool) {
+        *self.test_store_membership_override.write() = Some(is_member);
     }
 
     /// Set the channel sender for fresh-write replication events.
@@ -253,7 +270,14 @@ impl AntProtocol {
             Ok(false) => {}
         }
 
-        // 4. Cheap disk-space pre-check — runs BEFORE the expensive payment
+        // 4. Check storage responsibility before payment verification. A node
+        //    should only accept the actual chunk when its local routing table
+        //    places it in the configured close group for the chunk address.
+        if let Err(e) = self.validate_store_membership(&address).await {
+            return ChunkPutResponse::Error(e);
+        }
+
+        // 5. Cheap disk-space pre-check — runs BEFORE the expensive payment
         //    verification path (ML-DSA pool checks, a Kademlia closeness
         //    lookup, and an on-chain Arbitrum RPC). A disk-full node can never
         //    satisfy this PUT, so reject it here rather than burning that work
@@ -272,8 +296,9 @@ impl AntProtocol {
             return ChunkPutResponse::Error(ProtocolError::StorageFailed(e.to_string()));
         }
 
-        // 5. Verify payment. The ClientPut context checks receiver membership,
-        // applies the store-strength payment cache, and verifies live proofs.
+        // 6. Verify payment. The ClientPut context applies the store-strength
+        // payment cache and verifies live proofs. Storage responsibility was
+        // checked above before any proof work.
         let payment_result = self
             .payment_verifier
             .verify_payment(
@@ -297,7 +322,7 @@ impl AntProtocol {
             }
         }
 
-        // 6. Store chunk
+        // 7. Store chunk
         match self.storage.put(&address, &request.content).await {
             Ok(_) => {
                 let content_len = request.content.len();
@@ -309,7 +334,7 @@ impl AntProtocol {
                 // fallback path stays roughly accurate.
                 self.quote_generator.record_store();
 
-                // 7. Notify replication engine for fresh fan-out.
+                // 8. Notify replication engine for fresh fan-out.
                 //    Only emit when a real proof is present — cached-as-verified
                 //    PUTs have no proof to forward, and the chunk would have
                 //    already replicated on the original write that carried one.
@@ -336,6 +361,68 @@ impl AntProtocol {
                 ChunkPutResponse::Error(ProtocolError::StorageFailed(e.to_string()))
             }
         }
+    }
+
+    async fn validate_store_membership(
+        &self,
+        address: &[u8; 32],
+    ) -> std::result::Result<(), ProtocolError> {
+        #[cfg(any(test, feature = "test-utils"))]
+        {
+            let membership_override = *self.test_store_membership_override.read();
+            if let Some(is_member) = membership_override {
+                if is_member {
+                    return Ok(());
+                }
+                return Err(ProtocolError::PaymentFailed(format!(
+                    "ClientPut receiver is not among this node's local {} closest peers for {}",
+                    self.payment_verifier.close_group_size(),
+                    hex::encode(address)
+                )));
+            }
+        }
+
+        let attached = self.p2p_node.read().as_ref().map(Arc::clone);
+        let Some(p2p_node) = attached else {
+            #[cfg(any(test, feature = "test-utils"))]
+            {
+                crate::logging::warn!(
+                    "AntProtocol: no P2PNode attached; ClientPut storage \
+                     responsibility check SKIPPED (test build). Production startup \
+                     MUST call AntProtocol::attach_p2p_node."
+                );
+                return Ok(());
+            }
+            #[cfg(not(any(test, feature = "test-utils")))]
+            {
+                crate::logging::error!(
+                    "AntProtocol: no P2PNode attached; rejecting ClientPut. \
+                     This is a node-startup bug — AntProtocol::attach_p2p_node \
+                     must be called before PUT handling runs."
+                );
+                return Err(ProtocolError::PaymentFailed(
+                    "ClientPut rejected: protocol handler is not wired to the \
+                     P2P layer; cannot verify storage responsibility."
+                        .to_string(),
+                ));
+            }
+        };
+
+        let self_id = *p2p_node.peer_id();
+        let close_group_size = self.payment_verifier.close_group_size();
+        let closest = p2p_node
+            .dht_manager()
+            .find_closest_nodes_local_with_self(address, close_group_size)
+            .await;
+        if closest.iter().any(|node| node.peer_id == self_id) {
+            return Ok(());
+        }
+
+        Err(ProtocolError::PaymentFailed(format!(
+            "ClientPut receiver {} is not among this node's local {close_group_size} closest peers for {}",
+            self_id.to_hex(),
+            hex::encode(address)
+        )))
     }
 
     /// Handle a GET request.
@@ -932,9 +1019,7 @@ mod tests {
         let content = b"out of range receiver cache test";
         let address = LmdbStorage::compute_address(content);
         protocol.payment_verifier().cache_insert(address);
-        protocol
-            .payment_verifier()
-            .set_receiver_membership_for_tests(false);
+        protocol.set_store_membership_for_tests(false);
 
         let put_request = ChunkPutRequest::new(address, Bytes::copy_from_slice(content));
         let put_msg = ChunkMessage {
@@ -954,7 +1039,7 @@ mod tests {
             ProtocolError::PaymentFailed(message),
         )) = response.body
         {
-            assert!(message.contains("required local peer set"));
+            assert!(message.contains("not among this node's local"));
         } else {
             panic!("expected receiver responsibility rejection, got: {response:?}");
         }

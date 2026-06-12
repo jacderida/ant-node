@@ -1221,10 +1221,10 @@ async fn handle_fresh_offer(
     // Gap 1: Validate PoP via PaymentVerifier. Fresh replication is still
     // part of the immediate write fan-out: this receiver is about to store the
     // record as if the client had PUT it here directly. Receiver responsibility
-    // was checked above, and ClientPut verification repeats the configured
-    // close-group membership check before applying store-strength cache
-    // semantics, paid-quote known-peer and local price floor for single-node
-    // proofs, and merkle candidate closeness for merkle proofs.
+    // was checked above before proof work. ClientPut verification applies
+    // store-strength cache semantics, paid-quote issuer close-group and local
+    // price floor checks for single-node proofs, and merkle candidate
+    // closeness for merkle proofs.
     match payment_verifier
         .verify_payment(
             &offer.key,
@@ -1344,10 +1344,9 @@ async fn handle_paid_notify(
     }
 
     // Gap 1: Validate PoP via PaymentVerifier. PaidNotify admits fresh
-    // paid-list metadata, so it runs the same payment checks as ClientPut.
-    // The receiver-membership difference is intentional: paid-list metadata
-    // uses the local K closest peers, while direct/fresh chunk stores use the
-    // close group.
+    // paid-list metadata, so local paid-list close-group membership was checked
+    // above before proof work. The verifier then runs the same payment proof
+    // checks as ClientPut while writing a paid-list-strength cache entry.
     match payment_verifier
         .verify_payment(
             &notify.key,

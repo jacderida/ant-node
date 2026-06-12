@@ -1184,7 +1184,7 @@ impl TestNetwork {
 
         // Start protocol handler that routes incoming P2P messages to AntProtocol
         if let (Some(ref p2p), Some(ref protocol)) = (&node.p2p_node, &node.ant_protocol) {
-            // Wire P2P into AntProtocol for payment receiver-membership and
+            // Wire P2P into AntProtocol for direct PUT responsibility and
             // payment-proof closeness checks.
             protocol.attach_p2p_node(Arc::clone(p2p));
 

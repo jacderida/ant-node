@@ -11,7 +11,6 @@ use crate::payment::pricing::{calculate_price, derive_records_stored_from_price}
 use crate::payment::proof::{
     deserialize_merkle_proof, deserialize_proof, detect_proof_type, ProofType,
 };
-use crate::replication::config::K_BUCKET_SIZE;
 use crate::storage::lmdb::LmdbStorage;
 use ant_protocol::payment::verify::{verify_quote_content, verify_quote_signature};
 use evmlib::common::{Amount, QuoteHash};
@@ -106,7 +105,7 @@ pub struct PaymentVerifierConfig {
     pub evm: EvmVerifierConfig,
     /// Cache capacity (number of `XorName` values to cache).
     pub cache_capacity: usize,
-    /// Close-group width used to check direct client PUT receiver membership.
+    /// Close-group width used to check paid-quote issuer locality.
     pub close_group_size: usize,
     /// Local node's rewards address.
     ///
@@ -117,14 +116,18 @@ pub struct PaymentVerifierConfig {
 
 /// The fresh admission path a payment proof is being verified for.
 ///
-/// - **`ClientPut`** — the node is the storer being paid *right now*. The
-///   verifier checks receiver responsibility using the configured close-group
-///   width, then applies store-strength cache semantics and live payment
-///   checks.
+/// - **`ClientPut`** — the node is admitting a chunk store. The verifier
+///   applies store-strength cache semantics and live payment checks.
 /// - **`PaidListAdmission`** — the node is admitting fresh paid-list metadata.
-///   It runs the same live payment checks as `ClientPut`, but the receiver
-///   membership check uses the local K closest peers because paid-list
-///   tracking spans a wider group than storage.
+///   It runs the same live payment checks as `ClientPut`, but writes a weaker
+///   cache entry that does not authorize future chunk stores.
+///
+/// The caller must check local receiver/admission membership before invoking
+/// the verifier: direct client PUTs and fresh chunk replication require local
+/// close-group responsibility; fresh paid-list replication requires local
+/// paid-list close-group membership. The verifier itself only checks payment
+/// proof validity and that the paid quote's issuer is in the configured close
+/// group for the quoted chunk address.
 ///
 /// Immediate fresh chunk replication is different: the receiver is about to
 /// store the newly written chunk as if the client PUT it there directly, so
@@ -136,21 +139,11 @@ pub struct PaymentVerifierConfig {
 /// membership among the closest K.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerificationContext {
-    /// The node is the storer being paid right now: receiver membership uses
-    /// the configured close-group width.
+    /// The node is admitting a chunk store with store-strength cache semantics.
     ClientPut,
-    /// The node is admitting fresh paid-list metadata: same payment checks as
-    /// `ClientPut`, but receiver membership is local K closest peers.
+    /// The node is admitting fresh paid-list metadata with paid-list-strength
+    /// cache semantics.
     PaidListAdmission,
-}
-
-impl VerificationContext {
-    fn receiver_membership_width(self, close_group_size: usize) -> usize {
-        match self {
-            Self::ClientPut => close_group_size,
-            Self::PaidListAdmission => K_BUCKET_SIZE,
-        }
-    }
 }
 
 /// Status returned by payment verification.
@@ -202,12 +195,11 @@ pub struct PaymentVerifier {
     /// amplification to one lookup per unique `pool_hash` regardless of
     /// concurrency.
     inflight_closeness: Mutex<LruCache<PoolHash, Arc<ClosenessSlot>>>,
-    /// P2P node handle, attached post-construction so client PUT and paid-list
-    /// admission can check receiver membership, paid-quote verification can
-    /// check issuer closeness, and merkle verification can check that candidate
-    /// `pub_keys` map to peers actually close to the pool midpoint in the live
-    /// DHT. `None` in unit tests that don't exercise live-DHT checks;
-    /// production startup MUST call [`attach_p2p_node`].
+    /// P2P node handle, attached post-construction so paid-quote verification
+    /// can check issuer closeness, and merkle verification can check that
+    /// candidate `pub_keys` map to peers actually close to the pool midpoint
+    /// in the live DHT. `None` in unit tests that don't exercise live-DHT
+    /// checks; production startup MUST call [`attach_p2p_node`].
     p2p_node: RwLock<Option<Arc<P2PNode>>>,
     /// LMDB storage handle, attached post-construction so the paid-quote
     /// price-floor check can read the authoritative on-disk record count without
@@ -222,22 +214,17 @@ pub struct PaymentVerifier {
     /// [`Self::set_records_stored_for_tests`] so unit tests that don't wire a
     /// real `LmdbStorage` can still drive the price-floor logic.
     test_records_override: RwLock<Option<u64>>,
-    /// Test-only override for the paid-quote known-peer check.
+    /// Test-only override for the paid-quote issuer close-group check.
     ///
     /// Production code derives closest peers from the attached [`P2PNode`].
     #[cfg(any(test, feature = "test-utils"))]
-    test_paid_quote_known_peers_override: RwLock<Option<Vec<[u8; 32]>>>,
+    test_paid_quote_close_group_override: RwLock<Option<Vec<[u8; 32]>>>,
     /// Test-only override for `completedPayments(quote_hash)`.
     ///
     /// Production always queries the payment vault; unit tests use this to
     /// exercise the full verifier path without starting an EVM chain.
     #[cfg(any(test, feature = "test-utils"))]
     test_completed_payments_override: RwLock<HashMap<QuoteHash, Amount>>,
-    /// Test-only override for receiver-membership checks.
-    ///
-    /// Production derives membership from the attached [`P2PNode`].
-    #[cfg(any(test, feature = "test-utils"))]
-    test_receiver_membership_override: RwLock<Option<bool>>,
     /// Configuration.
     config: PaymentVerifierConfig,
 }
@@ -357,17 +344,14 @@ impl PaymentVerifier {
             storage: RwLock::new(None),
             test_records_override: RwLock::new(None),
             #[cfg(any(test, feature = "test-utils"))]
-            test_paid_quote_known_peers_override: RwLock::new(None),
+            test_paid_quote_close_group_override: RwLock::new(None),
             #[cfg(any(test, feature = "test-utils"))]
             test_completed_payments_override: RwLock::new(HashMap::new()),
-            #[cfg(any(test, feature = "test-utils"))]
-            test_receiver_membership_override: RwLock::new(None),
             config,
         }
     }
 
-    /// Attach the node's [`P2PNode`] handle so client PUT and paid-list
-    /// admission can check receiver membership, paid-quote verification can
+    /// Attach the node's [`P2PNode`] handle so paid-quote verification can
     /// check issuer closeness, and merkle-payment verification can check
     /// candidate `pub_keys` against the DHT's actual closest peers to the pool
     /// midpoint.
@@ -379,6 +363,12 @@ impl PaymentVerifier {
     pub fn attach_p2p_node(&self, node: Arc<P2PNode>) {
         *self.p2p_node.write() = Some(node);
         debug!("PaymentVerifier: P2PNode attached for payment live-DHT checks");
+    }
+
+    /// Configured close-group width used by payment proof admission callers.
+    #[must_use]
+    pub fn close_group_size(&self) -> usize {
+        self.config.close_group_size
     }
 
     /// Attach the node's [`LmdbStorage`] handle so paid-quote price-floor
@@ -403,10 +393,18 @@ impl PaymentVerifier {
     }
 
     /// Test-only setter for local closest peers used by the paid-quote
-    /// known-peer check.
+    /// issuer close-group check.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn set_paid_quote_close_group_for_tests(&self, peer_ids: Vec<[u8; 32]>) {
+        *self.test_paid_quote_close_group_override.write() = Some(peer_ids);
+    }
+
+    /// Compatibility alias for older tests that called this the known-peer
+    /// set. The check is now specifically the configured close group for the
+    /// quoted chunk address.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn set_paid_quote_known_peers_for_tests(&self, peer_ids: Vec<[u8; 32]>) {
-        *self.test_paid_quote_known_peers_override.write() = Some(peer_ids);
+        self.set_paid_quote_close_group_for_tests(peer_ids);
     }
 
     /// Test-only setter for an on-chain completed payment amount.
@@ -415,12 +413,6 @@ impl PaymentVerifier {
         self.test_completed_payments_override
             .write()
             .insert(quote_hash, amount);
-    }
-
-    /// Test-only setter for receiver-membership checks.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn set_receiver_membership_for_tests(&self, is_member: bool) {
-        *self.test_receiver_membership_override.write() = Some(is_member);
     }
 
     /// Snapshot the current record count for paid-quote price-floor checks.
@@ -505,7 +497,7 @@ impl PaymentVerifier {
     /// * `xorname` - The content-addressed name of the data
     /// * `payment_proof` - Optional payment proof (required if not in cache)
     /// * `context` - Which fresh admission path is verifying the proof — see
-    ///   [`VerificationContext`] for receiver-membership width
+    ///   [`VerificationContext`] for cache-strength semantics
     ///
     /// # Returns
     ///
@@ -521,8 +513,6 @@ impl PaymentVerifier {
         payment_proof: Option<&[u8]>,
         context: VerificationContext,
     ) -> Result<PaymentStatus> {
-        self.validate_receiver_membership(xorname, context).await?;
-
         // First check if payment is required
         let status = self.check_payment_required(xorname, context);
 
@@ -604,68 +594,6 @@ impl PaymentVerifier {
         }
     }
 
-    async fn validate_receiver_membership(
-        &self,
-        xorname: &XorName,
-        context: VerificationContext,
-    ) -> Result<()> {
-        let width = context.receiver_membership_width(self.config.close_group_size);
-
-        #[cfg(any(test, feature = "test-utils"))]
-        {
-            let membership_override = *self.test_receiver_membership_override.read();
-            if let Some(is_member) = membership_override {
-                if is_member {
-                    return Ok(());
-                }
-                return Err(Error::Payment(format!(
-                    "{context:?} receiver is not in the required local peer set for key {}",
-                    hex::encode(xorname)
-                )));
-            }
-        }
-
-        let attached = self.p2p_node.read().as_ref().map(Arc::clone);
-        let Some(p2p_node) = attached else {
-            #[cfg(any(test, feature = "test-utils"))]
-            {
-                crate::logging::warn!(
-                    "PaymentVerifier: no P2PNode attached; {context:?} receiver \
-                     membership check SKIPPED (test build). Production startup \
-                     MUST call PaymentVerifier::attach_p2p_node."
-                );
-                return Ok(());
-            }
-            #[cfg(not(any(test, feature = "test-utils")))]
-            {
-                crate::logging::error!(
-                    "PaymentVerifier: no P2PNode attached; rejecting {context:?}. \
-                     This is a node-startup bug — PaymentVerifier::attach_p2p_node \
-                     must be called before payment verification runs."
-                );
-                return Err(Error::Payment(format!(
-                    "{context:?} rejected: verifier is not wired to the P2P \
-                         layer; cannot verify receiver membership."
-                )));
-            }
-        };
-
-        let self_id = *p2p_node.peer_id();
-        let closest = p2p_node
-            .dht_manager()
-            .find_closest_nodes_local_with_self(xorname, width)
-            .await;
-        if closest.iter().any(|node| node.peer_id == self_id) {
-            return Ok(());
-        }
-
-        Err(Error::Payment(format!(
-            "{context:?} receiver {} is not among this node's local {width} closest peers for {}",
-            self_id.to_hex(),
-            hex::encode(xorname)
-        )))
-    }
-
     /// Get cache statistics.
     #[must_use]
     pub fn cache_stats(&self) -> CacheStats {
@@ -705,18 +633,17 @@ impl PaymentVerifier {
     /// 2. Median-priced candidate quotes are derived from the supplied bundle
     /// 3. Each candidate is checked for content binding, peer binding, and a
     ///    valid ML-DSA-65 signature
-    /// 4. Each candidate must also come from a locally known close peer and
+    /// 4. Each candidate must also come from a local close-group peer and
     ///    satisfy the paid-quote price floor
     /// 5. A candidate is accepted only if `completedPayments(quoteHash)` is at
     ///    least 3x the median price
     ///
     /// Non-median quotes are parsed only to locate the median. Their content,
     /// peer bindings, and signatures are deliberately ignored: the paid
-    /// quote's content hash, quote hash, signature, local floor, known-peer
+    /// quote's content hash, quote hash, signature, local floor, issuer
+    /// close-group
     /// check, and on-chain settlement are the authority. A one-quote proof is
     /// valid when that single quote passes these checks and was paid 3x.
-    ///
-    /// See [`VerificationContext`] for receiver-membership widths.
     async fn verify_evm_payment(
         &self,
         xorname: &XorName,
@@ -820,7 +747,7 @@ impl PaymentVerifier {
         let issuer_peer_id =
             Self::validate_paid_quote_peer_binding(candidate.encoded_peer_id, candidate.quote)?;
 
-        self.validate_paid_quote_known_peer(xorname, &issuer_peer_id)
+        self.validate_paid_quote_issuer_close_group(xorname, &issuer_peer_id)
             .await?;
         self.validate_paid_quote_price_floor(candidate.quote)?;
 
@@ -942,21 +869,24 @@ impl PaymentVerifier {
         Ok(())
     }
 
-    async fn validate_paid_quote_known_peer(
+    async fn validate_paid_quote_issuer_close_group(
         &self,
         xorname: &XorName,
         issuer_peer_id: &PeerId,
     ) -> Result<()> {
         #[cfg(any(test, feature = "test-utils"))]
-        if let Some(known_peer_ids) = self.test_paid_quote_known_peers_override.read().as_ref() {
-            if known_peer_ids
+        if let Some(close_group_peer_ids) =
+            self.test_paid_quote_close_group_override.read().as_ref()
+        {
+            if close_group_peer_ids
                 .iter()
                 .any(|peer_id| peer_id == issuer_peer_id.as_bytes())
             {
                 return Ok(());
             }
+            let close_group_size = self.config.close_group_size;
             return Err(Error::Payment(format!(
-                "Paid quote issuer {} is not among this node's local {K_BUCKET_SIZE} closest peers for {}",
+                "Paid quote issuer {} is not among this node's local {close_group_size} closest peers for {}",
                 issuer_peer_id.to_hex(),
                 hex::encode(xorname)
             )));
@@ -967,8 +897,8 @@ impl PaymentVerifier {
             #[cfg(any(test, feature = "test-utils"))]
             {
                 crate::logging::warn!(
-                    "PaymentVerifier: no P2PNode attached; paid-quote known-peer \
-                     check SKIPPED (test build). Production startup MUST call \
+                    "PaymentVerifier: no P2PNode attached; paid-quote issuer \
+                     close-group check SKIPPED (test build). Production startup MUST call \
                      PaymentVerifier::attach_p2p_node."
                 );
                 return Ok(());
@@ -989,16 +919,17 @@ impl PaymentVerifier {
             }
         };
 
+        let close_group_size = self.config.close_group_size;
         let closest = p2p_node
             .dht_manager()
-            .find_closest_nodes_local_with_self(xorname, K_BUCKET_SIZE)
+            .find_closest_nodes_local_with_self(xorname, close_group_size)
             .await;
         if closest.iter().any(|node| node.peer_id == *issuer_peer_id) {
             return Ok(());
         }
 
         Err(Error::Payment(format!(
-            "Paid quote issuer {} is not among this node's local {K_BUCKET_SIZE} closest peers for {}",
+            "Paid quote issuer {} is not among this node's local {close_group_size} closest peers for {}",
             issuer_peer_id.to_hex(),
             hex::encode(xorname)
         )))
@@ -1761,9 +1692,7 @@ mod tests {
             close_group_size: CLOSE_GROUP_SIZE,
             local_rewards_address: RewardsAddress::new([1u8; 20]),
         };
-        let verifier = PaymentVerifier::new(config);
-        verifier.set_receiver_membership_for_tests(true);
-        verifier
+        PaymentVerifier::new(config)
     }
 
     fn make_signed_quote(
@@ -1862,15 +1791,15 @@ mod tests {
         median_price * Amount::from(PAID_QUOTE_PAYMENT_MULTIPLIER)
     }
 
-    fn mark_known_paid_candidates(
+    fn mark_close_group_paid_candidates(
         verifier: &PaymentVerifier,
         peer_quotes: &[(evmlib::EncodedPeerId, PaymentQuote)],
     ) {
-        let known_peers = median_test_candidates(peer_quotes)
+        let close_group_peers = median_test_candidates(peer_quotes)
             .iter()
             .map(|(peer_id, _)| *peer_id.as_bytes())
             .collect();
-        verifier.set_paid_quote_known_peers_for_tests(known_peers);
+        verifier.set_paid_quote_close_group_for_tests(close_group_peers);
     }
 
     fn mark_candidate_paid(verifier: &PaymentVerifier, quote: &PaymentQuote, amount: Amount) {
@@ -1938,42 +1867,6 @@ mod tests {
             .await;
         assert!(result.is_ok());
         assert_eq!(result.expect("cached"), PaymentStatus::CachedAsVerified);
-    }
-
-    #[tokio::test]
-    async fn test_client_put_receiver_membership_runs_before_cache() {
-        let verifier = create_test_verifier();
-        let xorname = [0xB4u8; 32];
-        verifier.cache.insert(xorname);
-        verifier.set_receiver_membership_for_tests(false);
-
-        let err = verifier
-            .verify_payment(&xorname, None, VerificationContext::ClientPut)
-            .await
-            .expect_err("cached client PUT must still reject non-members");
-
-        assert!(
-            format!("{err}").contains("not in the required local peer set"),
-            "Error should mention receiver membership: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_paid_list_receiver_membership_runs_before_cache() {
-        let verifier = create_test_verifier();
-        let xorname = [0xB7u8; 32];
-        verifier.cache.insert_paid_list_verified(xorname);
-        verifier.set_receiver_membership_for_tests(false);
-
-        let err = verifier
-            .verify_payment(&xorname, None, VerificationContext::PaidListAdmission)
-            .await
-            .expect_err("cached paid-list admission must still reject non-members");
-
-        assert!(
-            format!("{err}").contains("not in the required local peer set"),
-            "Error should mention receiver membership: {err}"
-        );
     }
 
     #[tokio::test]
@@ -2143,7 +2036,7 @@ mod tests {
         verifier.set_records_stored_for_tests(0);
         let xorname = [0xA1u8; 32];
         let peer_quotes = make_signed_legacy_bundle(xorname, unique_test_prices());
-        mark_known_paid_candidates(&verifier, &peer_quotes);
+        mark_close_group_paid_candidates(&verifier, &peer_quotes);
         let expected_amount = expected_median_payment(&peer_quotes);
         let paid_quote = median_test_candidates(&peer_quotes)
             .first()
@@ -2170,7 +2063,7 @@ mod tests {
         let xorname = [0xB1u8; 32];
         let (peer_id, quote) = make_signed_quote(xorname, price_at_records(0), 1);
         let peer_quotes = vec![(peer_id, quote.clone())];
-        mark_known_paid_candidates(&verifier, &peer_quotes);
+        mark_close_group_paid_candidates(&verifier, &peer_quotes);
         mark_candidate_paid(&verifier, &quote, expected_median_payment(&peer_quotes));
 
         let proof_bytes = serialize_proof(peer_quotes);
@@ -2191,7 +2084,7 @@ mod tests {
         let xorname = [0xB2u8; 32];
         let (peer_id, quote) = make_signed_quote(xorname, price_at_records(0), 1);
         let peer_quotes = vec![(peer_id, quote.clone())];
-        mark_known_paid_candidates(&verifier, &peer_quotes);
+        mark_close_group_paid_candidates(&verifier, &peer_quotes);
         mark_candidate_paid(&verifier, &quote, quote.price);
 
         let proof_bytes = serialize_proof(peer_quotes);
@@ -2243,7 +2136,7 @@ mod tests {
                 crate::payment::pricing::calculate_price(6000),
             ],
         );
-        mark_known_paid_candidates(&verifier, &peer_quotes);
+        mark_close_group_paid_candidates(&verifier, &peer_quotes);
         let expected_amount = expected_median_payment(&peer_quotes);
         let paid_quote = median_test_candidates(&peer_quotes)
             .first()
@@ -2280,7 +2173,7 @@ mod tests {
                 crate::payment::pricing::calculate_price(6000),
             ],
         );
-        mark_known_paid_candidates(&verifier, &peer_quotes);
+        mark_close_group_paid_candidates(&verifier, &peer_quotes);
         let expected_amount = expected_median_payment(&peer_quotes);
         let paid_quote = median_test_candidates(&peer_quotes)
             .first()
@@ -2302,10 +2195,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_legacy_paid_median_known_peer_rejection() {
+    async fn test_legacy_paid_median_issuer_close_group_rejection() {
         let verifier = create_test_verifier();
         verifier.set_records_stored_for_tests(0);
-        verifier.set_paid_quote_known_peers_for_tests(vec![rand::random()]);
+        verifier.set_paid_quote_close_group_for_tests(vec![rand::random()]);
         let xorname = [0xA4u8; 32];
         let peer_quotes = make_signed_legacy_bundle(xorname, unique_test_prices());
         let expected_amount = expected_median_payment(&peer_quotes);
@@ -2320,11 +2213,11 @@ mod tests {
         let err = verifier
             .verify_payment(&xorname, Some(&proof_bytes), VerificationContext::ClientPut)
             .await
-            .expect_err("unknown paid issuer should be rejected");
+            .expect_err("out-of-close-group paid issuer should be rejected");
 
         assert!(
             format!("{err}").contains("not among this node's local"),
-            "Error should mention local closest peers: {err}"
+            "Error should mention local close-group peers: {err}"
         );
     }
 
@@ -2345,7 +2238,7 @@ mod tests {
                 crate::payment::pricing::calculate_price(0),
             ],
         );
-        mark_known_paid_candidates(&verifier, &peer_quotes);
+        mark_close_group_paid_candidates(&verifier, &peer_quotes);
         let expected_amount = expected_median_payment(&peer_quotes);
         let paid_quote = median_test_candidates(&peer_quotes)
             .first()
@@ -2404,7 +2297,7 @@ mod tests {
         let mut peer_quotes = make_signed_legacy_bundle(xorname, unique_test_prices());
         let median_index = median_quote_index(peer_quotes.len());
         peer_quotes[median_index].1.content = xor_name::XorName([0xE7u8; 32]);
-        mark_known_paid_candidates(&verifier, &peer_quotes);
+        mark_close_group_paid_candidates(&verifier, &peer_quotes);
 
         let proof_bytes = serialize_proof(peer_quotes);
         let err = verifier
@@ -2425,7 +2318,7 @@ mod tests {
         let xorname = [0xA8u8; 32];
         let mut peer_quotes = make_signed_legacy_bundle(xorname, unique_test_prices());
         peer_quotes[0].1.content = xor_name::XorName([0xE8u8; 32]);
-        mark_known_paid_candidates(&verifier, &peer_quotes);
+        mark_close_group_paid_candidates(&verifier, &peer_quotes);
         let expected_amount = expected_median_payment(&peer_quotes);
         let paid_quote = median_test_candidates(&peer_quotes)
             .first()
@@ -2453,7 +2346,7 @@ mod tests {
         let mut peer_quotes = make_signed_legacy_bundle(xorname, unique_test_prices());
         let median_index = median_quote_index(peer_quotes.len());
         peer_quotes[median_index].1.signature.push(0xFF);
-        mark_known_paid_candidates(&verifier, &peer_quotes);
+        mark_close_group_paid_candidates(&verifier, &peer_quotes);
         let expected_amount = expected_median_payment(&peer_quotes);
         let paid_quote = median_test_candidates(&peer_quotes)
             .first()
@@ -2481,7 +2374,7 @@ mod tests {
         let xorname = [0xAAu8; 32];
         let mut peer_quotes = make_signed_legacy_bundle(xorname, unique_test_prices());
         peer_quotes[0].1.signature.push(0xFF);
-        mark_known_paid_candidates(&verifier, &peer_quotes);
+        mark_close_group_paid_candidates(&verifier, &peer_quotes);
         let expected_amount = expected_median_payment(&peer_quotes);
         let paid_quote = median_test_candidates(&peer_quotes)
             .first()
@@ -2508,7 +2401,7 @@ mod tests {
         let xorname = [0xABu8; 32];
         let mut peer_quotes = make_signed_legacy_bundle(xorname, unique_test_prices());
         peer_quotes[0].0 = evmlib::EncodedPeerId::new(rand::random());
-        mark_known_paid_candidates(&verifier, &peer_quotes);
+        mark_close_group_paid_candidates(&verifier, &peer_quotes);
         let expected_amount = expected_median_payment(&peer_quotes);
         let paid_quote = median_test_candidates(&peer_quotes)
             .first()
@@ -2534,7 +2427,7 @@ mod tests {
         verifier.set_records_stored_for_tests(0);
         let xorname = [0xACu8; 32];
         let peer_quotes = make_signed_legacy_bundle(xorname, tied_median_test_prices());
-        mark_known_paid_candidates(&verifier, &peer_quotes);
+        mark_close_group_paid_candidates(&verifier, &peer_quotes);
         mark_all_median_candidates_unpaid(&verifier, &peer_quotes);
         let expected_amount = expected_median_payment(&peer_quotes);
         let paid_quote = median_test_candidates(&peer_quotes)
@@ -2556,10 +2449,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_legacy_paid_list_admission_enforces_known_peer() {
+    async fn test_legacy_paid_list_admission_enforces_issuer_close_group() {
         let verifier = create_test_verifier();
         verifier.set_records_stored_for_tests(0);
-        verifier.set_paid_quote_known_peers_for_tests(Vec::new());
+        verifier.set_paid_quote_close_group_for_tests(Vec::new());
         let xorname = [0xB5u8; 32];
         let peer_quotes = make_signed_legacy_bundle(xorname, unique_test_prices());
         let expected_amount = expected_median_payment(&peer_quotes);
@@ -2578,11 +2471,11 @@ mod tests {
                 VerificationContext::PaidListAdmission,
             )
             .await
-            .expect_err("paid-list admission must enforce the paid issuer known-peer check");
+            .expect_err("paid-list admission must enforce the paid issuer close-group check");
 
         assert!(
             format!("{err}").contains("not among this node's local"),
-            "Error should mention local closest peers: {err}"
+            "Error should mention local close-group peers: {err}"
         );
     }
 
@@ -2603,7 +2496,7 @@ mod tests {
                 crate::payment::pricing::calculate_price(0),
             ],
         );
-        mark_known_paid_candidates(&verifier, &peer_quotes);
+        mark_close_group_paid_candidates(&verifier, &peer_quotes);
         let expected_amount = expected_median_payment(&peer_quotes);
         let paid_quote = median_test_candidates(&peer_quotes)
             .first()

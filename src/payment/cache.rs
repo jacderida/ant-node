@@ -21,8 +21,8 @@ const DEFAULT_CACHE_CAPACITY: usize = 100_000;
 ///
 /// Each entry records which fresh proof verification level inserted it. A
 /// paid-list entry must not satisfy a later client-PUT fast-path because
-/// paid-list membership checks K closest peers while client PUTs require the
-/// close group. Stronger entries satisfy weaker lookups.
+/// paid-list admission does not authorize storing the actual chunk. Stronger
+/// entries satisfy weaker lookups.
 #[derive(Clone)]
 pub struct VerifiedCache {
     inner: Arc<Mutex<LruCache<XorName, VerificationLevel>>>,
@@ -117,7 +117,7 @@ impl VerifiedCache {
     /// paid-list admission check set.
     ///
     /// A client-PUT entry returns `true` here because it passed the stricter
-    /// closest-7 receiver membership check.
+    /// store-admission path at the caller.
     #[must_use]
     pub fn contains_paid_list_verified(&self, xorname: &XorName) -> bool {
         let found = self
@@ -137,10 +137,10 @@ impl VerifiedCache {
     }
 
     /// Check if a `XorName` is cached AND its verification ran the full
-    /// client-PUT close-group check set.
+    /// client-PUT store-admission check set.
     ///
     /// Paid-list entries return `false` here because they did not pass the
-    /// client-PUT close-group membership check.
+    /// client-PUT store-admission path.
     #[must_use]
     pub fn contains_client_put_verified(&self, xorname: &XorName) -> bool {
         let found = self

@@ -107,11 +107,15 @@ impl NodeBuilder {
             Some(Self::build_upgrade_monitor(&self.config, node_id_seed))
         };
 
+        let repl_config = ReplicationConfig::default();
+
         // Initialize ANT protocol handler for chunk storage and
         // wire the fresh-write channel so PUTs trigger replication.
         let (ant_protocol, fresh_write_rx) = if self.config.storage.enabled {
             let (fresh_write_tx, fresh_write_rx) = tokio::sync::mpsc::unbounded_channel();
-            let mut protocol = Self::build_ant_protocol(&self.config, &identity).await?;
+            let mut protocol =
+                Self::build_ant_protocol(&self.config, &identity, repl_config.close_group_size)
+                    .await?;
             protocol.set_fresh_write_sender(fresh_write_tx);
             (Some(Arc::new(protocol)), Some(fresh_write_rx))
         } else {
@@ -121,19 +125,16 @@ impl NodeBuilder {
 
         let p2p_arc = Arc::new(p2p_node);
 
-        // Wire the P2PNode handle into the payment verifier so merkle-payment
-        // checks can query the live DHT for peers actually closest to a pool
-        // midpoint (pay-yourself defence).
+        // Wire the P2PNode handle into AntProtocol so direct PUTs can verify
+        // close-group responsibility and payment proofs can query live-DHT
+        // closeness.
         if let Some(ref protocol) = ant_protocol {
-            protocol
-                .payment_verifier_arc()
-                .attach_p2p_node(Arc::clone(&p2p_arc));
+            protocol.attach_p2p_node(Arc::clone(&p2p_arc));
         }
 
         // Initialize replication engine (if storage is enabled)
         let replication_engine =
             if let (Some(ref protocol), Some(fresh_rx)) = (&ant_protocol, fresh_write_rx) {
-                let repl_config = ReplicationConfig::default();
                 let storage_arc = protocol.storage();
                 let payment_verifier_arc = protocol.payment_verifier_arc();
                 match ReplicationEngine::new(
@@ -349,6 +350,7 @@ impl NodeBuilder {
     async fn build_ant_protocol(
         config: &NodeConfig,
         identity: &NodeIdentity,
+        close_group_size: usize,
     ) -> Result<AntProtocol> {
         // Create LMDB storage
         let storage_config = LmdbStorageConfig {
@@ -378,6 +380,7 @@ impl NodeBuilder {
                 network: evm_network,
             },
             cache_capacity: config.payment.cache_capacity,
+            close_group_size,
             local_rewards_address: rewards_address,
         };
         let payment_verifier = PaymentVerifier::new(payment_config);

@@ -41,6 +41,7 @@ use crate::payment::{PaymentVerifier, QuoteGenerator, VerificationContext};
 use crate::replication::fresh::FreshWriteEvent;
 use crate::storage::lmdb::LmdbStorage;
 use bytes::Bytes;
+use saorsa_core::P2PNode;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -90,6 +91,16 @@ impl AntProtocol {
             quote_generator,
             fresh_write_tx: None,
         }
+    }
+
+    /// Attach the node's P2P handle for payment live-DHT checks.
+    ///
+    /// Also wires the same handle into the payment verifier so payment-proof
+    /// closeness checks and storage-endpoint responsibility checks can use the
+    /// live routing view. Idempotent: calling twice replaces the verifier handle.
+    pub fn attach_p2p_node(&self, node: Arc<P2PNode>) {
+        self.payment_verifier.attach_p2p_node(node);
+        debug!("AntProtocol: P2PNode attached for payment live-DHT checks");
     }
 
     /// Set the channel sender for fresh-write replication events.
@@ -261,10 +272,8 @@ impl AntProtocol {
             return ChunkPutResponse::Error(ProtocolError::StorageFailed(e.to_string()));
         }
 
-        // 5. Verify payment. This node is the storer being paid right now, so
-        // the full ClientPut check set applies (receiver membership,
-        // paid-quote known-peer and local price floor for single-node proofs,
-        // merkle candidate closeness).
+        // 5. Verify payment. The ClientPut context checks receiver membership,
+        // applies the store-strength payment cache, and verifies live proofs.
         let payment_result = self
             .payment_verifier
             .verify_payment(
@@ -575,6 +584,7 @@ mod tests {
         let payment_config = PaymentVerifierConfig {
             evm: EvmVerifierConfig::default(),
             cache_capacity: 100_000,
+            close_group_size: crate::ant_protocol::CLOSE_GROUP_SIZE,
             local_rewards_address: rewards_address,
         };
         let payment_verifier = Arc::new(PaymentVerifier::new(payment_config));
@@ -914,6 +924,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_put_rejects_out_of_range_receiver_before_payment_cache() {
+        const REQUEST_ID: u64 = 105;
+
+        let (protocol, _temp) = create_test_protocol().await;
+
+        let content = b"out of range receiver cache test";
+        let address = LmdbStorage::compute_address(content);
+        protocol.payment_verifier().cache_insert(address);
+        protocol
+            .payment_verifier()
+            .set_receiver_membership_for_tests(false);
+
+        let put_request = ChunkPutRequest::new(address, Bytes::copy_from_slice(content));
+        let put_msg = ChunkMessage {
+            request_id: REQUEST_ID,
+            body: ChunkMessageBody::PutRequest(put_request),
+        };
+        let put_bytes = put_msg.encode().expect("encode put");
+        let response_bytes = protocol
+            .try_handle_request(&put_bytes)
+            .await
+            .expect("handle put")
+            .expect("expected response");
+        let response = ChunkMessage::decode(&response_bytes).expect("decode");
+
+        assert_eq!(response.request_id, REQUEST_ID);
+        if let ChunkMessageBody::PutResponse(ChunkPutResponse::Error(
+            ProtocolError::PaymentFailed(message),
+        )) = response.body
+        {
+            assert!(message.contains("required local peer set"));
+        } else {
+            panic!("expected receiver responsibility rejection, got: {response:?}");
+        }
+        assert!(!protocol.exists(&address).expect("exists check"));
+    }
+
+    #[tokio::test]
     async fn test_put_same_chunk_twice_hits_cache() {
         let (protocol, _temp) = create_test_protocol().await;
 
@@ -935,7 +983,7 @@ mod tests {
             .await
             .expect("handle put 1");
 
-        // Second PUT — should return AlreadyExists (checked in storage before payment)
+        // Second PUT should return AlreadyExists from the storage idempotency check.
         let response_bytes = protocol
             .try_handle_request(&put_bytes)
             .await
@@ -945,7 +993,7 @@ mod tests {
 
         if let ChunkMessageBody::PutResponse(ChunkPutResponse::AlreadyExists { .. }) = response.body
         {
-            // expected — storage check comes before payment check
+            // expected
         } else {
             panic!("expected AlreadyExists, got: {response:?}");
         }

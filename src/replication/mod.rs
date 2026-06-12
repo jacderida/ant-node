@@ -1220,10 +1220,11 @@ async fn handle_fresh_offer(
 
     // Gap 1: Validate PoP via PaymentVerifier. Fresh replication is still
     // part of the immediate write fan-out: this receiver is about to store the
-    // record as if the client had PUT it here directly, so it must run the same
-    // ClientPut checks as the storage handler (receiver membership,
-    // paid-quote known-peer and local price floor for single-node proofs,
-    // merkle candidate closeness for merkle proofs).
+    // record as if the client had PUT it here directly. Receiver responsibility
+    // was checked above, and ClientPut verification repeats the configured
+    // close-group membership check before applying store-strength cache
+    // semantics, paid-quote known-peer and local price floor for single-node
+    // proofs, and merkle candidate closeness for merkle proofs.
     match payment_verifier
         .verify_payment(
             &offer.key,

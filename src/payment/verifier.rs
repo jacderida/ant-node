@@ -106,6 +106,8 @@ pub struct PaymentVerifierConfig {
     pub evm: EvmVerifierConfig,
     /// Cache capacity (number of `XorName` values to cache).
     pub cache_capacity: usize,
+    /// Close-group width used to check direct client PUT receiver membership.
+    pub close_group_size: usize,
     /// Local node's rewards address.
     ///
     /// Kept in the verifier config for payment policies that bind receipts to
@@ -116,8 +118,9 @@ pub struct PaymentVerifierConfig {
 /// The fresh admission path a payment proof is being verified for.
 ///
 /// - **`ClientPut`** — the node is the storer being paid *right now*. The
-///   node must be in the local close group (`CLOSE_GROUP_SIZE`) for the
-///   address, and every live payment check applies.
+///   verifier checks receiver responsibility using the configured close-group
+///   width, then applies store-strength cache semantics and live payment
+///   checks.
 /// - **`PaidListAdmission`** — the node is admitting fresh paid-list metadata.
 ///   It runs the same live payment checks as `ClientPut`, but the receiver
 ///   membership check uses the local K closest peers because paid-list
@@ -129,12 +132,12 @@ pub struct PaymentVerifierConfig {
 ///
 /// Later neighbour-sync repair does not include proof-of-payment bytes and
 /// does not call this verifier. It authorizes repair from network evidence:
-/// majority storage among the closest 7, or majority paid-list membership
-/// among the closest K.
+/// majority storage among the configured close group, or majority paid-list
+/// membership among the closest K.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerificationContext {
-    /// The node is the storer being paid right now: all checks apply,
-    /// including receiver membership in the local close group.
+    /// The node is the storer being paid right now: receiver membership uses
+    /// the configured close-group width.
     ClientPut,
     /// The node is admitting fresh paid-list metadata: same payment checks as
     /// `ClientPut`, but receiver membership is local K closest peers.
@@ -142,9 +145,9 @@ pub enum VerificationContext {
 }
 
 impl VerificationContext {
-    fn receiver_membership_width(self) -> usize {
+    fn receiver_membership_width(self, close_group_size: usize) -> usize {
         match self {
-            Self::ClientPut => CLOSE_GROUP_SIZE,
+            Self::ClientPut => close_group_size,
             Self::PaidListAdmission => K_BUCKET_SIZE,
         }
     }
@@ -199,12 +202,12 @@ pub struct PaymentVerifier {
     /// amplification to one lookup per unique `pool_hash` regardless of
     /// concurrency.
     inflight_closeness: Mutex<LruCache<PoolHash, Arc<ClosenessSlot>>>,
-    /// P2P node handle, attached post-construction so client PUT verification
-    /// can check receiver membership and paid-quote issuer closeness, and
-    /// merkle verification can check that candidate `pub_keys` map to peers
-    /// actually close to the pool midpoint in the live DHT. `None` in unit
-    /// tests that don't exercise live-DHT checks; production startup MUST call
-    /// [`attach_p2p_node`].
+    /// P2P node handle, attached post-construction so client PUT and paid-list
+    /// admission can check receiver membership, paid-quote verification can
+    /// check issuer closeness, and merkle verification can check that candidate
+    /// `pub_keys` map to peers actually close to the pool midpoint in the live
+    /// DHT. `None` in unit tests that don't exercise live-DHT checks;
+    /// production startup MUST call [`attach_p2p_node`].
     p2p_node: RwLock<Option<Arc<P2PNode>>>,
     /// LMDB storage handle, attached post-construction so the paid-quote
     /// price-floor check can read the authoritative on-disk record count without
@@ -363,15 +366,16 @@ impl PaymentVerifier {
         }
     }
 
-    /// Attach the node's [`P2PNode`] handle so client-PUT verification can
-    /// check receiver membership and paid-quote issuer closeness, and
-    /// merkle-payment verification can check candidate `pub_keys` against the
-    /// DHT's actual closest peers to the pool midpoint.
+    /// Attach the node's [`P2PNode`] handle so client PUT and paid-list
+    /// admission can check receiver membership, paid-quote verification can
+    /// check issuer closeness, and merkle-payment verification can check
+    /// candidate `pub_keys` against the DHT's actual closest peers to the pool
+    /// midpoint.
     ///
     /// Production startup MUST call this once the `P2PNode` exists. Without
-    /// it, live-DHT payment checks fail CLOSED in release builds (reject the
-    /// PUT with a visible error) and fail open in test builds. Idempotent:
-    /// calling twice replaces the handle.
+    /// it, live-DHT payment checks fail CLOSED in release builds with a visible
+    /// error and fail open in test builds. Idempotent: calling twice replaces
+    /// the handle.
     pub fn attach_p2p_node(&self, node: Arc<P2PNode>) {
         *self.p2p_node.write() = Some(node);
         debug!("PaymentVerifier: P2PNode attached for payment live-DHT checks");
@@ -605,7 +609,7 @@ impl PaymentVerifier {
         xorname: &XorName,
         context: VerificationContext,
     ) -> Result<()> {
-        let width = context.receiver_membership_width();
+        let width = context.receiver_membership_width(self.config.close_group_size);
 
         #[cfg(any(test, feature = "test-utils"))]
         {
@@ -637,7 +641,7 @@ impl PaymentVerifier {
                 crate::logging::error!(
                     "PaymentVerifier: no P2PNode attached; rejecting {context:?}. \
                      This is a node-startup bug — PaymentVerifier::attach_p2p_node \
-                     must be called before any PUT handler runs."
+                     must be called before payment verification runs."
                 );
                 return Err(Error::Payment(format!(
                     "{context:?} rejected: verifier is not wired to the P2P \
@@ -712,8 +716,7 @@ impl PaymentVerifier {
     /// check, and on-chain settlement are the authority. A one-quote proof is
     /// valid when that single quote passes these checks and was paid 3x.
     ///
-    /// See [`VerificationContext`] for the receiver-membership difference
-    /// between fresh chunk stores and fresh paid-list admission.
+    /// See [`VerificationContext`] for receiver-membership widths.
     async fn verify_evm_payment(
         &self,
         xorname: &XorName,
@@ -1755,6 +1758,7 @@ mod tests {
         let config = PaymentVerifierConfig {
             evm: EvmVerifierConfig::default(),
             cache_capacity: 100,
+            close_group_size: CLOSE_GROUP_SIZE,
             local_rewards_address: RewardsAddress::new([1u8; 20]),
         };
         let verifier = PaymentVerifier::new(config);
@@ -1946,7 +1950,7 @@ mod tests {
         let err = verifier
             .verify_payment(&xorname, None, VerificationContext::ClientPut)
             .await
-            .expect_err("cached client PUT must still reject non-responsible receivers");
+            .expect_err("cached client PUT must still reject non-members");
 
         assert!(
             format!("{err}").contains("not in the required local peer set"),
@@ -3597,6 +3601,7 @@ mod tests {
         let config = PaymentVerifierConfig {
             evm: EvmVerifierConfig::default(),
             cache_capacity: 100,
+            close_group_size: CLOSE_GROUP_SIZE,
             local_rewards_address: RewardsAddress::new([1u8; 20]),
         };
         let verifier = PaymentVerifier::new(config);

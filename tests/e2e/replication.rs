@@ -641,6 +641,263 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
     harness.teardown().await.expect("teardown");
 }
 
+/// The prune proof gate tolerates exactly one lagging close-group peer, at
+/// production parameters (close group 7, 6 proofs required).
+///
+/// Fresh replication is fire-and-forget and uploads/repair succeed at
+/// `QUORUM_THRESHOLD` (4 of 7), so a record's placement routinely sits below
+/// full unanimity. When the prune gate demanded unanimous proofs, such
+/// records were audited every pass, failed (absent peers answer
+/// `ABSENT_KEY_DIGEST`), and were never deleted — the production "pruning is
+/// hardly taking place" incident. The all-but-one threshold keeps a single
+/// absent peer from vetoing deletion while still demanding near-full
+/// placement before the local copy is dropped.
+///
+/// This test pins both sides of the gate:
+/// - below the threshold (5 of 7 proofs) the record must never be deleted,
+///   no matter how many passes run;
+/// - at the threshold (6 of 7 proofs) the record prunes even though one
+///   peer still lacks the bytes.
+///
+/// Repair proofs are recorded only for the eventual holders: the
+/// never-hinted peer must reduce the audit pool rather than veto the prune
+/// at the repair-proof gate.
+#[tokio::test]
+#[serial]
+async fn prune_deletes_at_proof_threshold_and_retains_below_it() {
+    const HINT_EPOCH: u64 = 7;
+    const CURRENT_EPOCH: u64 = HINT_EPOCH + 1;
+    /// Production close-group size (`CLOSE_GROUP_SIZE` in ant-protocol).
+    const PROD_CLOSE_GROUP_SIZE: usize = 7;
+    /// Prune proof threshold at production parameters: all but one, 6 of 7.
+    const PRUNE_PROOFS_NEEDED: usize = 6;
+
+    let harness = TestHarness::setup_small().await.expect("setup");
+    harness.warmup_dht().await.expect("warmup");
+
+    let pruner_idx = 3;
+    let config = ReplicationConfig {
+        close_group_size: PROD_CLOSE_GROUP_SIZE,
+        paid_list_close_group_size: 1,
+        prune_hysteresis_duration: Duration::ZERO,
+        ..ReplicationConfig::default()
+    };
+    let sync_state = Arc::new(RwLock::new(NeighborSyncState::new_cycle(vec![])));
+    let repair_proofs = Arc::new(RwLock::new(RepairProofs::new()));
+
+    let pruner = harness.test_node(pruner_idx).expect("pruner");
+    let pruner_p2p = Arc::clone(pruner.p2p_node.as_ref().expect("pruner p2p"));
+    let pruner_protocol = pruner.ant_protocol.as_ref().expect("pruner protocol");
+    let pruner_storage = pruner_protocol.storage();
+    let pruner_paid_list = Arc::clone(
+        pruner
+            .replication_engine
+            .as_ref()
+            .expect("pruner replication engine")
+            .paid_list(),
+    );
+    let pruner_peer = *pruner_p2p.peer_id();
+
+    let (content, address, targets) =
+        find_remote_prune_candidate(&harness, pruner_idx, PROD_CLOSE_GROUP_SIZE, "quorum-stored")
+            .await;
+    pruner_storage
+        .put(&address, &content)
+        .await
+        .expect("put record on pruner");
+
+    // Replicate below the threshold: only 5 of 7 peers hold the bytes.
+    // Repair proofs cover only the eventual holders; the remaining
+    // close-group peer was never hinted and stays outside the audit pool.
+    store_record_on_peers(
+        &harness,
+        &targets[..PRUNE_PROOFS_NEEDED - 1],
+        &address,
+        &content,
+    )
+    .await;
+    let repair_proof_now = record_repair_proofs_for_peers(
+        &repair_proofs,
+        &pruner_p2p,
+        &config,
+        &targets[..PRUNE_PROOFS_NEEDED],
+        &address,
+        HINT_EPOCH,
+    )
+    .await;
+
+    // Below the threshold the local copy is load-bearing: deleting it would
+    // shrink the proven replica set past the prune safety bar, so every
+    // pass must retain it.
+    for pass in 0..3 {
+        let result = pruning::run_prune_pass_with_context(pruning::PrunePassContext {
+            self_id: &pruner_peer,
+            storage: &pruner_storage,
+            paid_list: &pruner_paid_list,
+            p2p_node: &pruner_p2p,
+            config: &config,
+            sync_state: &sync_state,
+            repair_proofs: &repair_proofs,
+            current_sync_epoch: CURRENT_EPOCH,
+            allow_remote_prune_audits: true,
+            repair_proof_now: Some(repair_proof_now),
+        })
+        .await;
+        assert_eq!(
+            result.records_pruned, 0,
+            "pass {pass}: a record below the proof threshold must never prune",
+        );
+        assert!(
+            pruner_storage.exists(&address).expect("exists"),
+            "pass {pass}: record should remain on the out-of-range node",
+        );
+    }
+
+    // One more holder reaches the threshold (6 of 7). The prune must now
+    // proceed even though one close-group peer still lacks the bytes:
+    // demanding unanimity left prod fleets unable to prune at all.
+    store_record_on_peer(
+        &harness,
+        targets
+            .get(PRUNE_PROOFS_NEEDED - 1)
+            .expect("threshold target"),
+        &address,
+        &content,
+    )
+    .await;
+    let at_threshold = pruning::run_prune_pass_with_context(pruning::PrunePassContext {
+        self_id: &pruner_peer,
+        storage: &pruner_storage,
+        paid_list: &pruner_paid_list,
+        p2p_node: &pruner_p2p,
+        config: &config,
+        sync_state: &sync_state,
+        repair_proofs: &repair_proofs,
+        current_sync_epoch: CURRENT_EPOCH,
+        allow_remote_prune_audits: true,
+        repair_proof_now: Some(repair_proof_now),
+    })
+    .await;
+    assert_eq!(
+        at_threshold.records_pruned, 1,
+        "a record proven on all but one of the close group must prune",
+    );
+    assert!(!pruner_storage.exists(&address).expect("exists"));
+
+    harness.teardown().await.expect("teardown");
+}
+
+/// Paid-list entry pruning requires confirmations from the current paid
+/// close group (three quarters rounded up, 15 of 20 at production
+/// parameters), independent of chunk possession.
+///
+/// An out-of-range `PaidForList` entry used to be removed on local state
+/// alone once the hysteresis elapsed. It is now retained until enough of
+/// the current paid close group confirm they track the key in their own
+/// paid lists, so a node never forgets an authorization the group has not
+/// already absorbed. Chunk pruning and paid pruning check their own gates
+/// only: this test stores no chunk anywhere.
+///
+/// Run with a 2-peer paid close group, where the threshold is both peers.
+#[tokio::test]
+#[serial]
+async fn paid_prune_requires_paid_close_group_confirmations() {
+    const PAID_GROUP: usize = 2;
+
+    let harness = TestHarness::setup_minimal().await.expect("setup");
+    harness.warmup_dht().await.expect("warmup");
+
+    let pruner_idx = 3;
+    let config = ReplicationConfig {
+        close_group_size: 2,
+        quorum_threshold: 1,
+        paid_list_close_group_size: PAID_GROUP,
+        prune_hysteresis_duration: Duration::ZERO,
+        ..ReplicationConfig::default()
+    };
+    let sync_state = Arc::new(RwLock::new(NeighborSyncState::new_cycle(vec![])));
+    let repair_proofs = Arc::new(RwLock::new(RepairProofs::new()));
+
+    let pruner = harness.test_node(pruner_idx).expect("pruner");
+    let pruner_p2p = Arc::clone(pruner.p2p_node.as_ref().expect("pruner p2p"));
+    let pruner_protocol = pruner.ant_protocol.as_ref().expect("pruner protocol");
+    let pruner_storage = pruner_protocol.storage();
+    let pruner_peer = *pruner_p2p.peer_id();
+
+    // Standalone paid list so the engine's own paid state stays untouched.
+    let paid_dir = tempfile::tempdir().expect("tempdir");
+    let paid_list = Arc::new(
+        ant_node::replication::paid_list::PaidList::new(paid_dir.path())
+            .await
+            .expect("paid list"),
+    );
+
+    let (_content, address, targets) =
+        find_remote_prune_candidate(&harness, pruner_idx, PAID_GROUP, "paid-prune").await;
+    paid_list.insert(&address).await.expect("insert paid key");
+
+    // The paid close group does not track the key yet: the entry must be
+    // retained even though it is out of range and past hysteresis.
+    let unconfirmed = pruning::run_prune_pass_with_context(pruning::PrunePassContext {
+        self_id: &pruner_peer,
+        storage: &pruner_storage,
+        paid_list: &paid_list,
+        p2p_node: &pruner_p2p,
+        config: &config,
+        sync_state: &sync_state,
+        repair_proofs: &repair_proofs,
+        current_sync_epoch: 1,
+        allow_remote_prune_audits: true,
+        repair_proof_now: None,
+    })
+    .await;
+    assert_eq!(
+        unconfirmed.paid_entries_pruned, 0,
+        "a paid entry without paid close-group confirmations must never prune",
+    );
+    assert!(
+        paid_list.contains(&address).expect("contains"),
+        "unconfirmed paid entry should remain tracked",
+    );
+
+    // Once the whole paid close group confirms the key in their paid lists,
+    // the entry prunes.
+    for peer in &targets {
+        let idx = node_index_for_peer(&harness, peer).expect("target in harness");
+        let engine = harness
+            .test_node(idx)
+            .expect("target node")
+            .replication_engine
+            .as_ref()
+            .expect("target engine");
+        engine.paid_list().insert(&address).await.expect("insert");
+    }
+
+    let confirmed = pruning::run_prune_pass_with_context(pruning::PrunePassContext {
+        self_id: &pruner_peer,
+        storage: &pruner_storage,
+        paid_list: &paid_list,
+        p2p_node: &pruner_p2p,
+        config: &config,
+        sync_state: &sync_state,
+        repair_proofs: &repair_proofs,
+        current_sync_epoch: 1,
+        allow_remote_prune_audits: true,
+        repair_proof_now: None,
+    })
+    .await;
+    assert_eq!(
+        confirmed.paid_entries_pruned, 1,
+        "a paid entry confirmed by the paid close group must prune",
+    );
+    assert!(
+        !paid_list.contains(&address).expect("contains"),
+        "confirmed paid entry should be removed",
+    );
+
+    harness.teardown().await.expect("teardown");
+}
+
 /// Fetch not-found returns `NotFound`.
 ///
 /// Request a key that does not exist on the target node and verify

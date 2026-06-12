@@ -413,9 +413,17 @@ impl AntProtocol {
 
         let self_id = *p2p_node.peer_id();
         let admission_width = storage_admission_width(self.payment_verifier.close_group_size());
+        // Storage-responsibility *verification* must mirror the uploader's pure
+        // XOR-distance peer selection. `find_closest_nodes_local_with_self`
+        // reranks the local routing table by reachability (preferring
+        // directly-reachable peers, XOR only as a tiebreaker), which demotes
+        // this node out of the compared window when it is an XOR-close
+        // relay-only / NAT'd peer and falsely rejects an honest PUT it is
+        // legitimately responsible for. Use the XOR-only sibling so the local
+        // admission check matches how the client chose the close group.
         let closest = p2p_node
             .dht_manager()
-            .find_closest_nodes_local_with_self(address, admission_width)
+            .find_closest_nodes_local_by_distance_with_self(address, admission_width)
             .await;
         if closest.iter().any(|node| node.peer_id == self_id) {
             return Ok(());

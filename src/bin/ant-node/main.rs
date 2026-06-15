@@ -2,8 +2,13 @@
 
 #![cfg_attr(not(feature = "logging"), allow(unused_variables))]
 
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+// Ad-hoc memory-profiling branch: the mimalloc global allocator is intentionally
+// removed so ant-node uses the system (libc) allocator. mimalloc routes Rust
+// allocations through its own mmap-backed arenas, which heaptrack's malloc
+// interception (LD_PRELOAD) cannot see, producing empty traces. With the system
+// allocator, heaptrack captures full allocation backtraces. DO NOT MERGE —
+// mimalloc is needed for musl release perf; this is for leak debugging only.
+// (ant-devnet still uses mimalloc, so the dependency stays valid.)
 
 mod cli;
 mod platform;

@@ -578,10 +578,32 @@ impl NeighborSyncState {
         queued
     }
 
-    /// Drop queued priority peers that are no longer in the close-peer set.
-    pub fn retain_priority_peers(&mut self, close_peers: &HashSet<PeerId>) {
+    /// Drop pending sync peers that are no longer in the close-peer set.
+    ///
+    /// Peers still in `close_peers` keep their relative position. The cursor is
+    /// adjusted so already-scanned retained peers are not selected again.
+    pub fn retain_sync_peers(&mut self, close_peers: &HashSet<PeerId>) -> usize {
+        let old_priority_len = self.priority_order.len();
         self.priority_order
             .retain(|peer| close_peers.contains(peer));
+
+        let old_order_len = self.order.len();
+        let old_cursor = self.cursor;
+        let mut retained_before_cursor = 0;
+        let mut retained_order = Vec::with_capacity(old_order_len);
+        for (idx, peer) in self.order.drain(..).enumerate() {
+            if close_peers.contains(&peer) {
+                if idx < old_cursor {
+                    retained_before_cursor += 1;
+                }
+                retained_order.push(peer);
+            }
+        }
+
+        self.order = retained_order;
+        self.cursor = retained_before_cursor;
+
+        (old_priority_len - self.priority_order.len()) + (old_order_len - self.order.len())
     }
 
     /// Remove a peer from any pending neighbor-sync state.
@@ -1213,6 +1235,40 @@ mod tests {
         assert!(!state.priority_order.contains(&peer));
         assert_eq!(state.order, vec![retained]);
         assert_eq!(state.cursor, 0);
+    }
+
+    #[test]
+    fn neighbor_sync_retain_sync_peers_prunes_only_departed_peers() {
+        let already_scanned = peer_id_from_byte(1);
+        let stable_scanned = peer_id_from_byte(2);
+        let departed_priority = peer_id_from_byte(3);
+        let stable_unscanned = peer_id_from_byte(4);
+        let stable_priority = peer_id_from_byte(5);
+        let mut state = NeighborSyncState::new_cycle(vec![
+            already_scanned,
+            stable_scanned,
+            departed_priority,
+            stable_unscanned,
+        ]);
+        assert_eq!(
+            state.queue_priority_peers([departed_priority, stable_priority]),
+            2
+        );
+        state.cursor = 2;
+        let close_peers = HashSet::from([stable_scanned, stable_unscanned, stable_priority]);
+
+        let removed = state.retain_sync_peers(&close_peers);
+
+        assert_eq!(removed, 3);
+        assert_eq!(state.order, vec![stable_scanned, stable_unscanned]);
+        assert_eq!(
+            state.priority_order.iter().copied().collect::<Vec<_>>(),
+            vec![stable_priority]
+        );
+        assert_eq!(
+            state.cursor, 1,
+            "stable peer scanned before churn must not be selected again"
+        );
     }
 
     #[test]

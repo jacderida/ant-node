@@ -132,12 +132,12 @@ Rules:
 Triggers:
 
 - Periodic randomized timer (`NEIGHBOR_SYNC_INTERVAL`).
-- `KClosestPeersChanged(old, new)`: peers in `new - old` are queued for priority neighbor sync and the sync loop is triggered immediately.
+- `KClosestPeersChanged(old, new)`: peers in `new - old` are queued for priority neighbor sync, peers no longer in `new` are removed from pending neighbor-sync state, and the sync loop is triggered immediately.
 
 Rules:
 
-1. At the start of each round-robin cycle, node computes `CloseNeighbors(self)` as the `NEIGHBOR_SYNC_SCOPE` nearest peers to self in `LocalRT(self)`, then snapshots `NeighborSyncOrder(self)` as a deterministic ordering of those peers and resets `NeighborSyncCursor(self)` to `0`. The snapshot is fixed for the normal round-robin walk.
-2. When a `KClosestPeersChanged(old, new)` event reports peers that entered the close-neighbor set (`new - old`), node appends those peers to `PriorityNeighborSyncOrder(self)` unless already queued. Priority peers remain outside `NeighborSyncOrder(self)` but are selected before the normal cursor. If a priority peer is also present in the current snapshot, selecting it removes it from the snapshot so the same peer is not synced twice in one round.
+1. At the start of each round-robin cycle, node computes `CloseNeighbors(self)` as the `NEIGHBOR_SYNC_SCOPE` nearest peers to self in `LocalRT(self)`, then snapshots `NeighborSyncOrder(self)` as a deterministic ordering of those peers and resets `NeighborSyncCursor(self)` to `0`. The snapshot preserves the normal round-robin walk for peers that remain close.
+2. When a `KClosestPeersChanged(old, new)` event reports close-neighborhood churn, node removes peers that are no longer in the scoped `new` set from both `PriorityNeighborSyncOrder(self)` and `NeighborSyncOrder(self)`, preserving the relative order and cursor position of peers that remain close. Peers that entered the close-neighbor set (`new - old`) are appended to `PriorityNeighborSyncOrder(self)` unless already queued. Priority peers remain outside `NeighborSyncOrder(self)` but are selected before the normal cursor. If a priority peer is also present in the current snapshot, selecting it removes it from the snapshot so the same peer is not synced twice in one round.
 3. Node selects `NeighborSyncSet(self)` by first draining `PriorityNeighborSyncOrder(self)` and then scanning `NeighborSyncOrder(self)` forward from `NeighborSyncCursor(self)`:
    a. If a candidate peer is on per-peer cooldown (`NEIGHBOR_SYNC_COOLDOWN` not elapsed since last successful sync with that peer), remove the peer from `NeighborSyncOrder(self)` and continue scanning.
    b. Otherwise, add the peer to `NeighborSyncSet(self)`.
@@ -615,7 +615,7 @@ Each scenario should assert exact expected outcomes and state transitions.
 37. Non-`LocalRT` inbound sync behavior:
 - If a peer opens sync while not in receiver `LocalRT(self)`, receiver may still send hints to that peer, but receiver drops all inbound replica/paid hints from that peer.
 38. Neighbor-sync priority under peer join:
-- Peer `P` joins `CloseNeighbors(self)` mid-cycle. `P` does not appear in the current `NeighborSyncOrder(self)` snapshot, but `KClosestPeersChanged(old, new)` queues `P` in `PriorityNeighborSyncOrder(self)`. The next sync round selects `P` before the normal cursor, removes `P` from the snapshot if already present, and does not sync `P` twice in the same round.
+- Peer `P` joins `CloseNeighbors(self)` mid-cycle. `P` does not appear in the current `NeighborSyncOrder(self)` snapshot, but `KClosestPeersChanged(old, new)` queues `P` in `PriorityNeighborSyncOrder(self)`. Peers that remain close keep their normal round-robin position, while peers no longer in `new` are removed from pending sync state. The next sync round selects `P` before the normal cursor, removes `P` from the snapshot if already present, and does not sync `P` twice in the same round.
 39. Neighbor-sync unreachable peer removal and slot fill:
 - Peer `P` is in the snapshot. Sync attempt with `P` fails (unreachable). `P` is removed from `NeighborSyncOrder(self)`. Node resumes scanning from where batch selection left off and picks the next available peer `Q` to fill the slot. `P` is not in the next cycle's snapshot (unless it has rejoined `CloseNeighbors`).
 40. Neighbor-sync per-peer cooldown skip:

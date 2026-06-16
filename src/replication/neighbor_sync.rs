@@ -152,20 +152,31 @@ pub fn select_sync_batch(
     let now = Instant::now();
 
     while batch.len() < peer_count {
-        let Some(peer) = state.priority_order.pop_front() else {
+        let Some(peer) = select_next_sync_peer(state, now, cooldown) else {
             break;
         };
+        batch.push(peer);
+    }
 
+    batch
+}
+
+fn select_next_sync_peer(
+    state: &mut NeighborSyncState,
+    now: Instant,
+    cooldown: Duration,
+) -> Option<PeerId> {
+    while let Some(peer) = state.priority_order.pop_front() {
         if peer_on_cooldown(state, &peer, now, cooldown) {
             state.remove_peer(&peer);
             continue;
         }
 
         state.remove_peer(&peer);
-        batch.push(peer);
+        return Some(peer);
     }
 
-    while batch.len() < peer_count && state.cursor < state.order.len() {
+    while state.cursor < state.order.len() {
         let peer = state.order[state.cursor];
 
         // Check cooldown (Rule 2a): if the peer was synced recently, remove
@@ -176,11 +187,11 @@ pub fn select_sync_batch(
             continue;
         }
 
-        batch.push(peer);
         state.cursor += 1;
+        return Some(peer);
     }
 
-    batch
+    None
 }
 
 fn peer_on_cooldown(
@@ -293,10 +304,9 @@ pub(crate) async fn sync_with_peer_with_outcome(
 /// Handle a failed sync attempt: remove peer from snapshot and try to fill
 /// the vacated slot.
 ///
-/// Rule 3: Remove unreachable peer from `NeighborSyncOrder`, attempt to fill
-/// by resuming scan from where rule 2 left off. Applies the same cooldown
-/// filtering as [`select_sync_batch`] to avoid selecting a peer that was
-/// recently synced.
+/// Rule 3: Remove unreachable peer from pending sync state, attempt to fill
+/// by using the same priority-first scan as [`select_sync_batch`]. Applies the
+/// same cooldown filtering to avoid selecting a peer that was recently synced.
 pub fn handle_sync_failure(
     state: &mut NeighborSyncState,
     failed_peer: &PeerId,
@@ -305,22 +315,10 @@ pub fn handle_sync_failure(
     // Find and remove the failed peer from the ordering.
     state.remove_peer(failed_peer);
 
-    // Try to fill the vacated slot, applying cooldown filtering (same as
-    // select_sync_batch Rule 2a).
+    // Try to fill the vacated slot, applying the same priority and cooldown
+    // filtering used by select_sync_batch.
     let now = Instant::now();
-    while state.cursor < state.order.len() {
-        let candidate = state.order[state.cursor];
-
-        if peer_on_cooldown(state, &candidate, now, cooldown) {
-            state.order.remove(state.cursor);
-            continue;
-        }
-
-        state.cursor += 1;
-        return Some(candidate);
-    }
-
-    None
+    select_next_sync_peer(state, now, cooldown)
 }
 
 /// Record a successful sync with a peer.
@@ -923,6 +921,28 @@ mod tests {
         assert_eq!(batch, vec![peer_id_from_byte(1)]);
         assert!(state.priority_order.is_empty());
         assert!(!state.order.contains(&priority_peer));
+    }
+
+    #[test]
+    fn failure_replacement_prefers_remaining_priority_peer() {
+        let peers = vec![peer_id_from_byte(1), peer_id_from_byte(2)];
+        let mut state = NeighborSyncState::new_cycle(peers);
+        let first_priority_peer = peer_id_from_byte(3);
+        let second_priority_peer = peer_id_from_byte(4);
+        assert_eq!(
+            state.queue_priority_peers([first_priority_peer, second_priority_peer]),
+            2
+        );
+
+        let batch = select_sync_batch(&mut state, 1, Duration::from_secs(0));
+        assert_eq!(batch, vec![first_priority_peer]);
+
+        let replacement =
+            handle_sync_failure(&mut state, &first_priority_peer, Duration::from_secs(0));
+
+        assert_eq!(replacement, Some(second_priority_peer));
+        assert!(state.priority_order.is_empty());
+        assert_eq!(state.cursor, 0);
     }
 
     #[test]

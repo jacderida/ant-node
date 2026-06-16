@@ -459,18 +459,19 @@ impl ReplicationEngine {
                                     .filter(|peer| !old_peers.contains(peer))
                                     .collect::<Vec<_>>();
                                 let entrant_count = entrants.len();
-                                let priority_insertions = {
+                                let (priority_insertions, sync_removals) = {
                                     let mut state = sync_state.write().await;
-                                    state.retain_priority_peers(&new_peers);
-                                    state.queue_priority_peers(entrants)
+                                    let sync_removals = state.retain_sync_peers(&new_peers);
+                                    let priority_insertions = state.queue_priority_peers(entrants);
+                                    (priority_insertions, sync_removals)
                                 };
                                 if priority_insertions > 0 {
                                     debug!(
-                                        "K-closest peers changed, queued {priority_insertions}/{entrant_count} new close peers for priority neighbor sync"
+                                        "K-closest peers changed, queued {priority_insertions}/{entrant_count} new close peers for priority neighbor sync and pruned {sync_removals} departed pending sync entries"
                                     );
                                 } else {
                                     debug!(
-                                        "K-closest peers changed, no additional close peers queued, triggering early neighbor sync"
+                                        "K-closest peers changed, no additional close peers queued, pruned {sync_removals} departed pending sync entries, triggering early neighbor sync"
                                     );
                                 }
                                 sync_trigger.notify_one();

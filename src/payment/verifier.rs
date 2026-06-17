@@ -559,8 +559,14 @@ impl PaymentVerifier {
                     "Payment verification: context={context:?}, proof_type={proof_type}, proof_bytes={proof_bytes}, status={status:?}, elapsed_ms={elapsed_ms}",
                 );
             }
-            Err(e) => {
+            Err(e) if elapsed_ms >= PAYMENT_VERIFY_SLOW_LOG_MS => {
                 warn!(
+                    target: "ant_node::payment::verify",
+                    "Slow payment verification failed: context={context:?}, proof_type={proof_type}, proof_bytes={proof_bytes}, elapsed_ms={elapsed_ms}: {e}",
+                );
+            }
+            Err(e) => {
+                debug!(
                     target: "ant_node::payment::verify",
                     "Payment verification failed: context={context:?}, proof_type={proof_type}, proof_bytes={proof_bytes}, elapsed_ms={elapsed_ms}: {e}",
                 );

@@ -3,11 +3,11 @@
 //! Round-robin cycle management: snapshot close neighbors, iterate through
 //! them in batches of `NEIGHBOR_SYNC_PEER_COUNT`, exchanging hint sets.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::logging::{debug, warn};
+use crate::logging::{debug, info, warn};
 use rand::Rng;
 use saorsa_core::identity::PeerId;
 use saorsa_core::P2PNode;
@@ -20,6 +20,9 @@ use crate::replication::protocol::{
 };
 use crate::replication::types::NeighborSyncState;
 use crate::storage::LmdbStorage;
+
+/// Hint-build duration that is worth surfacing at info level.
+const HINT_BUILD_SLOW_LOG_MS: u128 = 250;
 
 /// Replica hint sent to a peer, with the close-group snapshot used to decide
 /// that hint.
@@ -38,6 +41,16 @@ pub(crate) struct NeighborSyncOutcome {
     pub(crate) response: NeighborSyncResponse,
     /// Replica hints sent to the peer in our request.
     pub(crate) sent_replica_hints: Vec<SentReplicaHint>,
+}
+
+/// Prebuilt hint sets for one outbound neighbor-sync exchange.
+#[derive(Debug, Default)]
+pub(crate) struct PeerSyncHints {
+    /// Replica hints, including the close-group snapshot needed for repair
+    /// proof recording after the request is successfully sent.
+    pub(crate) sent_replica_hints: Vec<SentReplicaHint>,
+    /// Paid-list-only hints for this peer.
+    paid_hints: Vec<XorName>,
 }
 
 /// Build replica hints for a specific peer.
@@ -88,6 +101,110 @@ pub(crate) async fn build_replica_hints_for_peer_with_close_groups(
         }
     }
     hints
+}
+
+/// Build outbound hint sets for a batch of peers with one scan over local
+/// storage and one scan over the paid list.
+pub(crate) async fn build_sync_hints_for_peers(
+    peers: &[PeerId],
+    storage: &Arc<LmdbStorage>,
+    paid_list: &Arc<PaidList>,
+    p2p_node: &Arc<P2PNode>,
+    close_group_size: usize,
+    paid_list_close_group_size: usize,
+) -> HashMap<PeerId, PeerSyncHints> {
+    let started = Instant::now();
+    let target_peers = peers.iter().copied().collect::<HashSet<_>>();
+    let mut hints_by_peer = peers
+        .iter()
+        .copied()
+        .map(|peer| (peer, PeerSyncHints::default()))
+        .collect::<HashMap<_, _>>();
+
+    if peers.is_empty() {
+        return hints_by_peer;
+    }
+
+    let all_keys = match storage.all_keys().await {
+        Ok(keys) => keys,
+        Err(e) => {
+            warn!("Failed to read stored keys for batch hint construction: {e}");
+            Vec::new()
+        }
+    };
+    let stored_key_count = all_keys.len();
+
+    let dht = p2p_node.dht_manager();
+    for key in all_keys {
+        let closest = dht
+            .find_closest_nodes_local_with_self(&key, close_group_size)
+            .await;
+        let close_peers = closest.iter().map(|n| n.peer_id).collect::<HashSet<_>>();
+        for peer in close_peers.intersection(&target_peers) {
+            if let Some(peer_hints) = hints_by_peer.get_mut(peer) {
+                peer_hints.sent_replica_hints.push(SentReplicaHint {
+                    key,
+                    close_peers: close_peers.clone(),
+                });
+            }
+        }
+    }
+
+    let all_paid_keys = match paid_list.all_keys() {
+        Ok(keys) => keys,
+        Err(e) => {
+            warn!("Failed to read PaidForList for batch hint construction: {e}");
+            Vec::new()
+        }
+    };
+    let paid_key_count = all_paid_keys.len();
+
+    for key in all_paid_keys {
+        let closest = dht
+            .find_closest_nodes_local_with_self(&key, paid_list_close_group_size)
+            .await;
+        for node in closest {
+            if target_peers.contains(&node.peer_id) {
+                if let Some(peer_hints) = hints_by_peer.get_mut(&node.peer_id) {
+                    peer_hints.paid_hints.push(key);
+                }
+            }
+        }
+    }
+
+    let replica_hint_count = hints_by_peer
+        .values()
+        .map(|hints| hints.sent_replica_hints.len())
+        .sum::<usize>();
+    let paid_hint_count = hints_by_peer
+        .values()
+        .map(|hints| hints.paid_hints.len())
+        .sum::<usize>();
+    let elapsed_ms = started.elapsed().as_millis();
+
+    if elapsed_ms >= HINT_BUILD_SLOW_LOG_MS {
+        info!(
+            target: "ant_node::replication::neighbor_sync",
+            "Slow neighbor-sync hint build: peers={}, stored_keys={}, paid_keys={}, replica_hints={}, paid_hints={}, elapsed_ms={elapsed_ms}",
+            peers.len(),
+            stored_key_count,
+            paid_key_count,
+            replica_hint_count,
+            paid_hint_count,
+        );
+    } else {
+        debug!(
+            target: "ant_node::replication::neighbor_sync",
+            "Neighbor-sync hint build: peers={}, stored_keys={}, paid_keys={}, replica_hints={}, paid_hints={}, elapsed_ms={elapsed_ms}",
+            peers.len(),
+            stored_key_count,
+            paid_key_count,
+            replica_hint_count,
+            paid_hint_count,
+        );
+    }
+
+    hints_by_peer
 }
 
 /// Build paid hints for a specific peer.
@@ -232,24 +349,36 @@ pub(crate) async fn sync_with_peer_with_outcome(
     is_bootstrapping: bool,
 ) -> Option<NeighborSyncOutcome> {
     // Build peer-targeted hint sets (Rule 7).
-    let sent_replica_hints = build_replica_hints_for_peer_with_close_groups(
-        peer,
+    let mut hints_by_peer = build_sync_hints_for_peers(
+        std::slice::from_ref(peer),
         storage,
+        paid_list,
         p2p_node,
         config.close_group_size,
+        config.paid_list_close_group_size,
     )
     .await;
-    let replica_hints = sent_replica_hints
+    let hints = hints_by_peer.remove(peer).unwrap_or_default();
+    sync_with_peer_with_hints(peer, p2p_node, config, is_bootstrapping, hints).await
+}
+
+pub(crate) async fn sync_with_peer_with_hints(
+    peer: &PeerId,
+    p2p_node: &Arc<P2PNode>,
+    config: &ReplicationConfig,
+    is_bootstrapping: bool,
+    hints: PeerSyncHints,
+) -> Option<NeighborSyncOutcome> {
+    let replica_hints = hints
+        .sent_replica_hints
         .iter()
         .map(|hint| hint.key)
         .collect::<Vec<_>>();
-    let paid_hints =
-        build_paid_hints_for_peer(peer, paid_list, p2p_node, config.paid_list_close_group_size)
-            .await;
+    let sent_replica_hints = hints.sent_replica_hints;
 
     let request = NeighborSyncRequest {
         replica_hints,
-        paid_hints,
+        paid_hints: hints.paid_hints,
         bootstrapping: is_bootstrapping,
     };
     let request_id = rand::thread_rng().gen::<u64>();

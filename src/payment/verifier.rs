@@ -30,6 +30,7 @@ use saorsa_core::P2PNode;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Minimum allowed size for a payment proof in bytes.
 ///
@@ -60,6 +61,7 @@ const PAID_QUOTE_PRICE_FLOOR_TOLERANCE_PCT: u64 = 20;
 
 const PERCENT_DENOMINATOR: u64 = 100;
 const PAID_QUOTE_PAYMENT_MULTIPLIER: u64 = 3;
+const PAYMENT_VERIFY_SLOW_LOG_MS: u128 = 500;
 
 /// Number of nearest DHT peers accepted for paid-quote issuer locality.
 ///
@@ -81,6 +83,16 @@ fn price_floor(current_price: Amount, tolerance_pct: u64) -> Amount {
 
 fn median_quote_index(quote_count: usize) -> usize {
     quote_count / 2
+}
+
+fn payment_proof_type_label(payment_proof: Option<&[u8]>) -> &'static str {
+    match payment_proof.and_then(detect_proof_type) {
+        Some(ProofType::Merkle) => "merkle",
+        Some(ProofType::SingleNode) => "single_node",
+        Some(_) => "unsupported",
+        None if payment_proof.is_some() => "unknown",
+        None => "none",
+    }
 }
 
 /// Configuration for EVM payment verification.
@@ -521,6 +533,50 @@ impl PaymentVerifier {
     ///
     /// Returns an error if payment is required but not provided, or if payment is invalid.
     pub async fn verify_payment(
+        &self,
+        xorname: &XorName,
+        payment_proof: Option<&[u8]>,
+        context: VerificationContext,
+    ) -> Result<PaymentStatus> {
+        let started = Instant::now();
+        let proof_type = payment_proof_type_label(payment_proof);
+        let proof_bytes = payment_proof.map_or(0, <[u8]>::len);
+        let result = self
+            .verify_payment_inner(xorname, payment_proof, context)
+            .await;
+        let elapsed_ms = started.elapsed().as_millis();
+
+        match &result {
+            Ok(status) if elapsed_ms >= PAYMENT_VERIFY_SLOW_LOG_MS => {
+                info!(
+                    target: "ant_node::payment::verify",
+                    "Slow payment verification: context={context:?}, proof_type={proof_type}, proof_bytes={proof_bytes}, status={status:?}, elapsed_ms={elapsed_ms}",
+                );
+            }
+            Ok(status) => {
+                debug!(
+                    target: "ant_node::payment::verify",
+                    "Payment verification: context={context:?}, proof_type={proof_type}, proof_bytes={proof_bytes}, status={status:?}, elapsed_ms={elapsed_ms}",
+                );
+            }
+            Err(e) if elapsed_ms >= PAYMENT_VERIFY_SLOW_LOG_MS => {
+                warn!(
+                    target: "ant_node::payment::verify",
+                    "Slow payment verification failed: context={context:?}, proof_type={proof_type}, proof_bytes={proof_bytes}, elapsed_ms={elapsed_ms}: {e}",
+                );
+            }
+            Err(e) => {
+                debug!(
+                    target: "ant_node::payment::verify",
+                    "Payment verification failed: context={context:?}, proof_type={proof_type}, proof_bytes={proof_bytes}, elapsed_ms={elapsed_ms}: {e}",
+                );
+            }
+        }
+
+        result
+    }
+
+    async fn verify_payment_inner(
         &self,
         xorname: &XorName,
         payment_proof: Option<&[u8]>,

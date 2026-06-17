@@ -101,6 +101,9 @@ const FETCH_WORKER_POLL_MS: u64 = 100;
 /// Verification worker polling interval in milliseconds.
 const VERIFICATION_WORKER_POLL_MS: u64 = 250;
 
+/// Verification cycle duration that is worth surfacing at info level.
+const VERIFICATION_CYCLE_SLOW_LOG_MS: u128 = 500;
+
 /// Bootstrap drain check interval in seconds.
 const BOOTSTRAP_DRAIN_CHECK_SECS: u64 = 5;
 
@@ -905,6 +908,16 @@ impl ReplicationEngine {
                     break;
                 }
 
+                let mut hints_by_peer = neighbor_sync::build_sync_hints_for_peers(
+                    batch,
+                    &storage,
+                    &paid_list,
+                    &p2p,
+                    config.close_group_size,
+                    config.paid_list_close_group_size,
+                )
+                .await;
+
                 for peer in batch {
                     if shutdown.is_cancelled() {
                         break;
@@ -915,13 +928,13 @@ impl ReplicationEngine {
 
                     bootstrap::increment_pending_requests(&bootstrap_state, 1).await;
 
-                    let outcome = neighbor_sync::sync_with_peer_with_outcome(
+                    let hints = hints_by_peer.remove(peer).unwrap_or_default();
+                    let outcome = neighbor_sync::sync_with_peer_with_hints(
                         peer,
                         &p2p,
-                        &storage,
-                        &paid_list,
                         &config,
                         bootstrapping,
+                        hints,
                     )
                     .await;
 
@@ -1832,17 +1845,22 @@ async fn run_neighbor_sync_round(
 
     debug!("Neighbor sync: syncing with {} peers", batch.len());
 
+    let mut hints_by_peer = neighbor_sync::build_sync_hints_for_peers(
+        &batch,
+        storage,
+        paid_list,
+        p2p_node,
+        config.close_group_size,
+        config.paid_list_close_group_size,
+    )
+    .await;
+
     // Sync with each peer in the batch.
     for peer in &batch {
-        let outcome = neighbor_sync::sync_with_peer_with_outcome(
-            peer,
-            p2p_node,
-            storage,
-            paid_list,
-            config,
-            bootstrapping,
-        )
-        .await;
+        let hints = hints_by_peer.remove(peer).unwrap_or_default();
+        let outcome =
+            neighbor_sync::sync_with_peer_with_hints(peer, p2p_node, config, bootstrapping, hints)
+                .await;
 
         if let Some(outcome) = outcome {
             handle_sync_response(
@@ -1872,13 +1890,24 @@ async fn run_neighbor_sync_round(
 
             // Attempt sync with the replacement peer (if one was found).
             if let Some(replacement_peer) = replacement {
-                let replacement_outcome = neighbor_sync::sync_with_peer_with_outcome(
-                    &replacement_peer,
-                    p2p_node,
+                let mut replacement_hints = neighbor_sync::build_sync_hints_for_peers(
+                    std::slice::from_ref(&replacement_peer),
                     storage,
                     paid_list,
+                    p2p_node,
+                    config.close_group_size,
+                    config.paid_list_close_group_size,
+                )
+                .await;
+                let hints = replacement_hints
+                    .remove(&replacement_peer)
+                    .unwrap_or_default();
+                let replacement_outcome = neighbor_sync::sync_with_peer_with_hints(
+                    &replacement_peer,
+                    p2p_node,
                     config,
                     bootstrapping,
+                    hints,
                 )
                 .await;
 
@@ -2136,6 +2165,7 @@ async fn admit_and_queue_hints(
 /// Run one verification cycle: process pending keys through quorum checks.
 #[allow(clippy::too_many_lines)]
 async fn run_verification_cycle(ctx: VerificationCycleContext<'_>) {
+    let cycle_started = Instant::now();
     let VerificationCycleContext {
         p2p_node,
         paid_list,
@@ -2162,6 +2192,7 @@ async fn run_verification_cycle(ctx: VerificationCycleContext<'_>) {
     if pending_keys.is_empty() {
         return;
     }
+    let initial_pending_count = pending_keys.len();
 
     let self_id = *p2p_node.peer_id();
 
@@ -2228,6 +2259,9 @@ async fn run_verification_cycle(ctx: VerificationCycleContext<'_>) {
             }
         }
     }
+
+    let local_paid_probe_count = local_paid_presence_probe_keys.len();
+    let keys_needing_network_count = keys_needing_network.len();
 
     // Step 1b: Local paid-list hit for fetch-eligible keys. Per Section 9
     // step 4, authorization succeeds immediately; run a presence-only probe
@@ -2393,6 +2427,29 @@ async fn run_verification_cycle(ctx: VerificationCycleContext<'_>) {
         bootstrap_complete_notify,
     )
     .await;
+
+    let (pending_after, fetch_after, in_flight_after) = {
+        let q = queues.read().await;
+        (
+            q.pending_count(),
+            q.fetch_queue_count(),
+            q.in_flight_count(),
+        )
+    };
+    let terminal_key_count = terminal_keys.len();
+    let elapsed_ms = cycle_started.elapsed().as_millis();
+
+    if elapsed_ms >= VERIFICATION_CYCLE_SLOW_LOG_MS {
+        info!(
+            target: "ant_node::replication::verification",
+            "Slow replication verification cycle: pending_start={initial_pending_count}, local_paid_probe={local_paid_probe_count}, network_verify={keys_needing_network_count}, terminal={terminal_key_count}, pending_after={pending_after}, fetch_after={fetch_after}, in_flight_after={in_flight_after}, elapsed_ms={elapsed_ms}",
+        );
+    } else {
+        debug!(
+            target: "ant_node::replication::verification",
+            "Replication verification cycle: pending_start={initial_pending_count}, local_paid_probe={local_paid_probe_count}, network_verify={keys_needing_network_count}, terminal={terminal_key_count}, pending_after={pending_after}, fetch_after={fetch_after}, in_flight_after={in_flight_after}, elapsed_ms={elapsed_ms}",
+        );
+    }
 }
 
 /// Post-verification bootstrap bookkeeping: remove terminal keys from the

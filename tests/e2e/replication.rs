@@ -711,7 +711,10 @@ async fn test_prune_veto_for_committed_out_of_range_key() {
         .await
         .expect("put record on pruner");
     store_record_on_peers(&harness, &targets, &address, &content).await;
-    record_repair_proofs_for_peers(
+    // Mature repair proofs (hinted_at + REPAIR_HINT_MIN_AGE) so main's prune-proof
+    // gate treats the record as fully prunable — leaving the retention veto as the
+    // ONLY thing that can keep it. Same pattern as the prune-threshold tests below.
+    let repair_proof_now = record_repair_proofs_for_peers(
         &repair_proofs,
         &pruner_p2p,
         &config,
@@ -753,7 +756,7 @@ async fn test_prune_veto_for_committed_out_of_range_key() {
         repair_proofs: &repair_proofs,
         current_sync_epoch: CURRENT_EPOCH,
         allow_remote_prune_audits: true,
-        repair_proof_now: None,
+        repair_proof_now: Some(repair_proof_now),
         commitment_state: Some(&committed),
     })
     .await;
@@ -778,7 +781,7 @@ async fn test_prune_veto_for_committed_out_of_range_key() {
         repair_proofs: &repair_proofs,
         current_sync_epoch: CURRENT_EPOCH,
         allow_remote_prune_audits: true,
-        repair_proof_now: None,
+        repair_proof_now: Some(repair_proof_now),
         commitment_state: None,
     })
     .await;

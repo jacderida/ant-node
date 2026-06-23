@@ -196,3 +196,8 @@ unused_async = "allow"
 cognitive_complexity = "allow"
 # Allow non-const functions during initial development (may need runtime features later)
 missing_const_for_fn = "allow"
+
+[patch.crates-io]
+saorsa-transport = { git = "https://github.com/jacderida/saorsa-transport.git", rev = "18fda355e76fb9f145b42b644187601440ab4073" }  # branch: experiment/relay-drop-instrumentation
+saorsa-core = { git = "https://github.com/jacderida/saorsa-core.git", rev = "87f5b397ccd68446d797c544db8ce23be8350e37" }  # branch: experiment/relay-drop-instrumentation
+ant-protocol = { git = "https://github.com/jacderida/ant-protocol.git", rev = "4a2a1ed91dfbc8c63c32af882341d4f86a6ba7de" }  # branch: experiment/relay-drop-instrumentation

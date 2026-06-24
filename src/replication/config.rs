@@ -103,17 +103,18 @@ pub const MAX_CONCURRENT_REPLICATION_SENDS: usize = 3;
 
 /// Maximum number of concurrent in-flight audit-responder tasks.
 ///
-/// Subtree (round 1) and byte (round 2) challenge handlers are spawned off the
-/// serial replication message loop so their disk reads don't stall replication.
-/// This caps how many run at once across the engine, restoring backpressure: a
-/// peer flooding audit challenges cannot fan out unbounded `get_raw` reads or
-/// multi-MiB byte serves. When the cap is hit, the challenge is dropped — the
-/// auditor graces a non-response as a timeout, so honest auditors are
-/// unaffected and only a flooder is throttled. Sized to cover a handful of
-/// concurrent honest auditors (the per-peer gossip-audit cooldown is 30 min, so
-/// genuine concurrent audits are few) while bounding the byte round's worst-case
-/// resident bytes (`N × MAX_BYTE_CHALLENGE_KEYS × MAX_CHUNK_SIZE`).
-pub const MAX_CONCURRENT_AUDIT_RESPONSES: usize = 8;
+/// The responsible-chunk (audit #2), subtree (round 1), and byte (round 2)
+/// challenge handlers are all spawned off the serial replication message loop so
+/// their disk reads don't stall replication. This caps how many run at once
+/// across the engine, restoring backpressure: a peer flooding audit challenges
+/// cannot fan out unbounded `get_raw` reads or multi-MiB byte serves. When the
+/// cap is hit, the challenge is dropped — the auditor graces a non-response as a
+/// timeout, so honest auditors are unaffected and only a flooder is throttled.
+/// Sized to cover a handful of concurrent honest auditors (the per-peer
+/// gossip-audit cooldown is 30 min, so genuine concurrent audits are few) while
+/// bounding the byte round's worst-case resident bytes
+/// (`N × MAX_BYTE_CHALLENGE_KEYS × MAX_CHUNK_SIZE`).
+pub const MAX_CONCURRENT_AUDIT_RESPONSES: usize = 16;
 
 /// Maximum concurrent in-flight audit-responder tasks from any SINGLE peer.
 ///

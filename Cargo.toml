@@ -200,6 +200,6 @@ missing_const_for_fn = "allow"
 # Testnet build: ADR-011 authenticated leased relay-port reservations.
 # Pin every fork in the chain above this binary so the override takes effect.
 [patch.crates-io]
-saorsa-transport = { git = "https://github.com/jacderida/saorsa-transport.git", rev = "9da15c80bae6eb2e52d20ff4f3e0e2e89fe4eb83" }  # branch: feat-consistent_relay_port
+saorsa-transport = { git = "https://github.com/jacderida/saorsa-transport.git", rev = "acfd003442ec6d7a2ba8ae0933c37d2f9cbff90f" }  # branch: feat-consistent_relay_port
 saorsa-core = { git = "https://github.com/jacderida/saorsa-core.git", rev = "3cf7e872877e4503662f9a5696bf76e42afbde31" }  # branch: feat-consistent_relay_port
-ant-protocol = { git = "https://github.com/jacderida/ant-protocol.git", rev = "1e8fa4d677aa63ba623802c1c0e2ebff2d3dcf70" }  # branch: feat-consistent_relay_port
+ant-protocol = { git = "https://github.com/jacderida/ant-protocol.git", rev = "fe37cd675b423dea15b7db9844c5a119db28e34b" }  # branch: feat-consistent_relay_port

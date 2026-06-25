@@ -201,5 +201,5 @@ missing_const_for_fn = "allow"
 # Pin every fork in the chain above this binary so the override takes effect.
 [patch.crates-io]
 saorsa-transport = { git = "https://github.com/jacderida/saorsa-transport.git", rev = "9da15c80bae6eb2e52d20ff4f3e0e2e89fe4eb83" }  # branch: feat-consistent_relay_port
-saorsa-core = { git = "https://github.com/jacderida/saorsa-core.git", rev = "e940bf596bb33ca221457f7117c37964cf6fd73b" }  # branch: feat-consistent_relay_port
-ant-protocol = { git = "https://github.com/jacderida/ant-protocol.git", rev = "2796bb13b0f2e62931069336fe4862c1ef6bf8f3" }  # branch: feat-consistent_relay_port
+saorsa-core = { git = "https://github.com/jacderida/saorsa-core.git", rev = "3cf7e872877e4503662f9a5696bf76e42afbde31" }  # branch: feat-consistent_relay_port
+ant-protocol = { git = "https://github.com/jacderida/ant-protocol.git", rev = "1e8fa4d677aa63ba623802c1c0e2ebff2d3dcf70" }  # branch: feat-consistent_relay_port

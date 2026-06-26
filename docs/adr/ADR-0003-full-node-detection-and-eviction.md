@@ -141,6 +141,46 @@ mis-attributing the resulting replication failures to honest nodes.
   strangles the fallback it is meant to coexist with. Express both against the same
   width and choose them together.
 
+### Fresh-replication admission during convergence
+
+A healthy node that *should* hold a chunk can transiently fail to recognise its own
+responsibility: while full nodes closer to the key still sit in its routing table
+(not yet detected and evicted), they push it past the narrow
+`storage_admission_width` (close group + small margin) in its *own* view. With that
+narrow window it would then **reject** a fresh-replication offer it ought to accept —
+so the replication path that is meant to heal coverage instead refuses it, stalling
+convergence. This is also inconsistent: the same node already accepts a **client
+PUT** for that key within the wider `K_BUCKET_SIZE` window (both the payment
+issuer-closeness check and the self-closeness gate above use it), so a key could land
+on the node directly from a client but not via replication.
+
+**Decision:** widen the **fresh-replication accept** admission to the K-wide
+paid-close-group neighbourhood (`paid_list_close_group_size`, equal to
+`K_BUCKET_SIZE` = 20) — the same window client PUTs use — so transient view-skew
+from un-evicted full nodes no longer causes spurious rejection. A node accepts a
+fresh offer when it is within its own local `paid_list_close_group_size`-closest to
+the key. Two properties keep this safe:
+
+- **No extra storage from the accept side.** The sender still fans out only to its
+  `close_group_size` targets, so widening the *receiver's* accept window adds no
+  stores — it only stops those targets from rejecting due to view-skew.
+- **Retention stays narrow.** Long-term retention/pruning keeps using
+  `storage_admission_width`, so steady-state replication is still ≈ K. Any transient
+  over-coverage is reclaimed once the close group converges (full nodes evicted → the
+  node's view tightens → it sits correctly inside or outside the narrow window), and
+  the multi-day prune hysteresis comfortably spans the minutes-long eviction window,
+  so a legitimate replica is never pruned mid-convergence.
+
+**Sender side (deliberately not widened).** The mirror case — the *sender's* own
+close group being mostly full, so its `close_group_size` offers never reach the
+healthy nodes ranked beyond the full ones — is left to the existing convergence loop:
+the possession check evicts the full nodes, the close group tightens to healthy
+members, and the responsible-chunk repair (neighbour sync) fetches the chunk to the
+nodes that become responsible. Widening the sender fan-out to `K_BUCKET_SIZE` was
+considered and rejected — it would triple fresh-replication fan-out on *every* write
+and hold large transient over-replication for the full prune-hysteresis window, for a
+case the repair path already heals.
+
 ## Consequences
 
 ### Positive
@@ -205,7 +245,11 @@ How we will know this decision remains correct:
   present/absent; the adaptive timeout grace tracks widespread timeouts but never
   deterministic failures; the node emits into saorsa-core such that an
   evicted-for-fullness node can re-enter after it frees capacity (integration); the
-  self-closeness gate width is ≥ the fallback ceiling.
+  self-closeness gate width is ≥ the fallback ceiling; a healthy node with un-evicted
+  full nodes ahead of it in its routing table (so it ranks outside
+  `storage_admission_width` but within `K_BUCKET_SIZE`) still **accepts** a
+  fresh-replication offer for the key, while retention/pruning stays scoped to
+  `storage_admission_width`.
 - **Re-open triggers:** revisit thresholds if false positives appear; revisit the
   near-capacity degradation if the network approaches global capacity.
 

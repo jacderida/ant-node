@@ -2074,13 +2074,19 @@ async fn handle_fresh_offer(
         return Ok(());
     }
 
-    // Rule 7: check storage admission. Fresh chunk receivers accept the close
-    // group plus a small margin to absorb local routing-table disagreement.
+    // Rule 7: check storage admission. Fresh chunk receivers accept across the
+    // paid-close-group neighbourhood (`paid_list_close_group_size`, = K_BUCKET_SIZE,
+    // the same width client PUTs use), not just the close group plus a small
+    // margin (ADR-0003). During full-node shunning a healthy replica's routing
+    // table may still list closer full nodes it hasn't evicted yet, ranking it
+    // outside the narrow window in its own view; the wider accept window absorbs
+    // that transient skew so the chunk still lands. Retention (pruning) stays at
+    // `storage_admission_width`, so steady-state replication is unchanged.
     if !admission::is_responsible(
         &self_id,
         &offer.key,
         p2p_node,
-        storage_admission_width(config.close_group_size),
+        config.paid_list_close_group_size,
     )
     .await
     {

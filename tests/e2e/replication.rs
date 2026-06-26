@@ -10,7 +10,7 @@ use super::TestHarness;
 use ant_node::client::compute_address;
 use ant_node::replication::commitment_state::{BuiltCommitment, ResponderCommitmentState};
 use ant_node::replication::config::{
-    storage_admission_width, REPAIR_HINT_MIN_AGE, REPLICATION_PROTOCOL_ID,
+    storage_admission_width, K_BUCKET_SIZE, REPAIR_HINT_MIN_AGE, REPLICATION_PROTOCOL_ID,
 };
 use ant_node::replication::protocol::{
     compute_audit_digest, AuditChallenge, AuditResponse, FetchRequest, FetchResponse,
@@ -401,6 +401,101 @@ async fn possession_scheduler_penalises_absent_close_peer_after_delay() {
     assert!(
         penalised,
         "the scheduled possession check should have penalised an absent close peer"
+    );
+
+    harness.teardown().await.expect("teardown");
+}
+
+/// ADR-0003 self-closeness gate: a node accepts a client PUT only when it is
+/// within its own local `K_BUCKET_SIZE`-closest to the address.
+///
+/// Needs more than `K_BUCKET_SIZE` nodes so a far node falls outside its own
+/// closest view. The responsible (closest) node accepts and stores; the
+/// non-responsible (farthest) node rejects before payment with a closeness
+/// error. Guards both the regression risk (gate must not reject responsible
+/// puts) and the intended reject behaviour.
+#[tokio::test]
+#[serial]
+async fn self_closeness_gate_accepts_responsible_rejects_far_node() {
+    let harness = TestHarness::setup().await.expect("setup");
+    harness.warmup_dht().await.expect("warmup");
+
+    let content = b"adr-0003 self-closeness gate payload";
+    let address = compute_address(content);
+
+    // Rank all peers by XOR distance to the address (identical from any node's
+    // view once routing tables are warm).
+    let ranker_p2p = harness
+        .test_node(3)
+        .expect("ranker")
+        .p2p_node
+        .as_ref()
+        .expect("p2p");
+    let ranked: Vec<PeerId> = ranker_p2p
+        .dht_manager()
+        .find_closest_nodes_local_with_self(&address, harness.node_count())
+        .await
+        .iter()
+        .map(|n| n.peer_id)
+        .collect();
+    assert!(
+        ranked.len() > K_BUCKET_SIZE,
+        "need > K_BUCKET_SIZE nodes to exercise the reject path; got {}",
+        ranked.len()
+    );
+
+    // Only nodes that actually run a protocol handler can serve a client PUT.
+    let has_protocol = |peer: &PeerId| {
+        node_index_for_peer(&harness, peer)
+            .and_then(|idx| harness.test_node(idx))
+            .is_some_and(|n| n.ant_protocol.is_some())
+    };
+
+    // Closest node with a handler -> within its own K-closest -> gate accepts.
+    let close_peer = ranked
+        .iter()
+        .copied()
+        .find(|p| has_protocol(p))
+        .expect("a close node with a handler");
+    // Farthest node beyond the gate width with a handler -> gate rejects.
+    let far_peer = ranked
+        .iter()
+        .copied()
+        .enumerate()
+        .rev()
+        .find(|(rank, p)| *rank >= K_BUCKET_SIZE && has_protocol(p))
+        .map(|(_, p)| p)
+        .expect("a far node (rank >= K_BUCKET_SIZE) with a handler");
+
+    let close_idx = node_index_for_peer(&harness, &close_peer).expect("close idx");
+    let far_idx = node_index_for_peer(&harness, &far_peer).expect("far idx");
+
+    // Accept path: a responsible node stores the chunk (gate passes).
+    let close_result = harness
+        .test_node(close_idx)
+        .expect("close node")
+        .store_chunk(content)
+        .await;
+    assert!(
+        close_result.is_ok(),
+        "responsible (closest) node must accept the PUT, got {close_result:?}"
+    );
+
+    // Reject path: a non-responsible node rejects before payment with a
+    // closeness error.
+    let far_result = harness
+        .test_node(far_idx)
+        .expect("far node")
+        .store_chunk(content)
+        .await;
+    assert!(
+        far_result.is_err(),
+        "non-responsible (farthest) node must reject the PUT"
+    );
+    let err = format!("{}", far_result.expect_err("far rejection"));
+    assert!(
+        err.contains("closest"),
+        "rejection should cite closeness, got: {err}"
     );
 
     harness.teardown().await.expect("teardown");

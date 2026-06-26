@@ -47,6 +47,15 @@ pub const NEIGHBOR_SYNC_SCOPE: usize = 20;
 /// round.
 pub const NEIGHBOR_SYNC_PEER_COUNT: usize = 4;
 
+/// Best-effort delivery retries for a fresh-replication push, per peer.
+///
+/// ADR-0003: on a transport/send failure the offer is retried up to this many
+/// times so a transient hiccup does not silently drop it. This is delivery
+/// assurance only — possession is judged separately by the delayed possession
+/// check, which still penalises a close peer that lacks the chunk even if the
+/// push never reached it.
+pub const FRESH_REPLICATION_DELIVERY_MAX_RETRIES: u32 = 2;
+
 /// Width used when deciding whether this node may locally store or retain a
 /// chunk.
 #[must_use]

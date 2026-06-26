@@ -14,7 +14,9 @@ use saorsa_core::P2PNode;
 use tokio::sync::Semaphore;
 
 use crate::ant_protocol::XorName;
-use crate::replication::config::{ReplicationConfig, REPLICATION_PROTOCOL_ID};
+use crate::replication::config::{
+    ReplicationConfig, FRESH_REPLICATION_DELIVERY_MAX_RETRIES, REPLICATION_PROTOCOL_ID,
+};
 use crate::replication::paid_list::PaidList;
 use crate::replication::protocol::{
     FreshReplicationOffer, PaidNotify, ReplicationMessage, ReplicationMessageBody,
@@ -90,9 +92,13 @@ pub async fn replicate_fresh(
         );
         return;
     };
+    // Share one encoded copy across the per-peer send tasks so a retry only
+    // re-materialises the buffer for the (consuming) send call, keeping the
+    // common single-attempt path at one clone per peer.
+    let encoded = Arc::new(encoded);
     for peer in &target_peers {
         let p2p = Arc::clone(p2p_node);
-        let data = encoded.clone();
+        let data = Arc::clone(&encoded);
         let peer_id = *peer;
         let sem = Arc::clone(send_semaphore);
         tokio::spawn(async move {
@@ -103,11 +109,37 @@ pub async fn replicate_fresh(
                 "Replication send permit acquired for peer {peer_id} ({} available)",
                 sem.available_permits()
             );
-            if let Err(e) = p2p
-                .send_message(&peer_id, REPLICATION_PROTOCOL_ID, data, &[])
-                .await
-            {
-                debug!("Failed to send fresh offer to {peer_id}: {e}");
+            // ADR-0003: best-effort delivery. Retry the push up to
+            // FRESH_REPLICATION_DELIVERY_MAX_RETRIES times on a transport
+            // failure so a transient hiccup doesn't silently drop the offer.
+            // Possession is judged separately by the delayed possession check.
+            let mut attempt = 0u32;
+            loop {
+                match p2p
+                    .send_message(
+                        &peer_id,
+                        REPLICATION_PROTOCOL_ID,
+                        data.as_ref().clone(),
+                        &[],
+                    )
+                    .await
+                {
+                    Ok(()) => break,
+                    Err(e) => {
+                        if attempt >= FRESH_REPLICATION_DELIVERY_MAX_RETRIES {
+                            debug!(
+                                "Failed to send fresh offer to {peer_id} after {} attempts: {e}",
+                                attempt + 1
+                            );
+                            break;
+                        }
+                        attempt += 1;
+                        debug!(
+                            "Retrying fresh offer to {peer_id} (attempt {}): {e}",
+                            attempt + 1
+                        );
+                    }
+                }
             }
         });
     }

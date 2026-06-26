@@ -42,7 +42,7 @@ mimalloc = "0.1"
 ant-protocol = "2.2.0"
 
 # Core (provides EVERYTHING: networking, DHT, security, trust, storage)
-saorsa-core = "0.26.1-rc.1" # testnet: matches the rc-2026.6.3 fork; revert when 0.26.x publishes
+saorsa-core = "0.26.0"
 saorsa-pqc = "0.5"
 
 # Payment verification - autonomi network lookup + EVM payment
@@ -198,9 +198,10 @@ cognitive_complexity = "allow"
 missing_const_for_fn = "allow"
 
 # Testnet build: ADR-011 authenticated leased relay-port reservations.
-# saorsa-transport is pulled transitively via saorsa-core, whose rc branch pins it
-# to saorsa-labs/saorsa-transport rc-2026.6.3 (the merged relay PR #99), so only
-# the saorsa-core and ant-protocol forks are patched here.
+# Pin every fork in the chain above this binary. saorsa-core is the testnet branch
+# (0.26.0 + crates.io transport req) so published deps resolve; transport is
+# redirected to the tested relay fork (jacderida acfd0034).
 [patch.crates-io]
-saorsa-core = { git = "https://github.com/jacderida/saorsa-core.git", rev = "523740269911185fba22afeddc5877869d50a97c" }  # branch: feat-consistent_relay_port
-ant-protocol = { git = "https://github.com/jacderida/ant-protocol.git", rev = "c4048244882c8c87b43387474e445004377c540c" }  # branch: feat-consistent_relay_port
+saorsa-transport = { git = "https://github.com/jacderida/saorsa-transport.git", rev = "acfd003442ec6d7a2ba8ae0933c37d2f9cbff90f" }  # branch: feat-consistent_relay_port
+saorsa-core = { git = "https://github.com/jacderida/saorsa-core.git", rev = "923bf7855ecbf5f0723b1355fa3702254e8bf7f0" }  # branch: testnet-2026.6.3
+ant-protocol = { git = "https://github.com/jacderida/ant-protocol.git", rev = "08484b782a1aafb6fef934b8966939f0d3326a6e" }  # branch: feat-consistent_relay_port

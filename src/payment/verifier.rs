@@ -5446,12 +5446,19 @@ mod tests {
 
         // Stale: received older than the TTL -> treated as unknown (None), the
         // ADR-0004 false-positive guard against an aged cache entry.
-        let stale_at = now
-            .checked_sub(ttl + std::time::Duration::from_secs(1))
+        //
+        // Advance the comparison clock PAST the TTL rather than subtracting the
+        // TTL from `now`: on Windows the monotonic `Instant` epoch can be
+        // younger than a multi-hour TTL, so `now.checked_sub(ttl + 1s)`
+        // underflows to `None` and panics. `checked_add` from the receipt time
+        // is always in range and is equivalent for the age comparison.
+        let received_at = now;
+        let now_after_ttl = received_at
+            .checked_add(ttl + std::time::Duration::from_secs(1))
             .expect("instant in range");
-        let stale = PeerCommitmentRecord::from_verified(commitment, stale_at);
+        let stale = PeerCommitmentRecord::from_verified(commitment, received_at);
         assert!(
-            PaymentVerifier::fresh_cached_commitment(&stale, pin, now, ttl).is_none(),
+            PaymentVerifier::fresh_cached_commitment(&stale, pin, now_after_ttl, ttl).is_none(),
             "a cache entry older than the answerability TTL must be treated as unknown"
         );
     }

@@ -234,20 +234,6 @@ const AUDIT_HONEST_READ_BPS: u64 = 50 * 1024 * 1024;
 /// time (see the §7 note on `audit_response_timeout`).
 const AUDIT_RESPONSE_HONEST_MULTIPLIER: u64 = 5;
 
-/// Single-key prune audit response deadline.
-///
-/// Prune audits ask a peer whether they still hold one specific key
-/// they previously claimed. The relay-defence rationale that motivates
-/// the tight commitment-bound timeout does NOT apply here: the
-/// auditor's own out-of-range hysteresis (`PRUNE_HYSTERESIS_DURATION`,
-/// 3 days) already makes "fetch on demand" infeasible as a sustained
-/// strategy.
-///
-/// Sized to comfortably accommodate cold cross-continent QUIC
-/// handshake plus scheduling jitter on a busy honest peer answering
-/// a single-key challenge: 10 s.
-const PRUNE_AUDIT_RESPONSE_SECS: u64 = 10;
-
 /// Maximum duration a peer may claim bootstrap status before penalties apply.
 const BOOTSTRAP_CLAIM_GRACE_PERIOD_SECS: u64 = 24 * 60 * 60; // 24 h
 /// Maximum duration a peer may claim bootstrap status before penalties apply.
@@ -404,11 +390,6 @@ pub struct ReplicationConfig {
     /// Slack multiplier on the honest-read estimate before
     /// declaring an audit timed out.
     pub audit_response_honest_multiplier: u64,
-    /// Single-key prune-audit response deadline. Has its own constant
-    /// because the relay-defence rationale that motivates the tight
-    /// commitment-bound budget does not apply to a single-key prune
-    /// challenge.
-    pub prune_audit_response_timeout: Duration,
     /// Maximum duration a peer may claim bootstrap status.
     pub bootstrap_claim_grace_period: Duration,
     /// Minimum continuous out-of-range duration before pruning a key.
@@ -447,7 +428,6 @@ impl Default for ReplicationConfig {
             audit_response_floor: Duration::from_secs(AUDIT_RESPONSE_FLOOR_SECS),
             audit_honest_read_bps: AUDIT_HONEST_READ_BPS,
             audit_response_honest_multiplier: AUDIT_RESPONSE_HONEST_MULTIPLIER,
-            prune_audit_response_timeout: Duration::from_secs(PRUNE_AUDIT_RESPONSE_SECS),
             bootstrap_claim_grace_period: BOOTSTRAP_CLAIM_GRACE_PERIOD,
             prune_hysteresis_duration: PRUNE_HYSTERESIS_DURATION,
             verification_request_timeout: VERIFICATION_REQUEST_TIMEOUT,

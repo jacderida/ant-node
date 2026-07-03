@@ -886,10 +886,10 @@ fn subtree_failure_summary(reason: &AuditFailureReason) -> AuditFailureSummary {
 /// Handle an incoming subtree audit challenge (responder side).
 ///
 /// Validates the challenge targets this node, looks up the pinned commitment in
-/// the retained (last-two-gossiped) set, and builds the subtree proof for the
+/// the retained (in-window) set, and builds the subtree proof for the
 /// nonce-selected branch. If this node is bootstrapping it says so; if it
-/// genuinely does not retain the pinned commitment it rejects (which the
-/// auditor treats as a confirmed failure for a recently gossiped root).
+/// genuinely does not retain the pinned commitment it rejects (which, with audit
+/// grace removed, the auditor treats as a confirmed failure for an in-window pin).
 pub async fn handle_subtree_challenge(
     challenge: &SubtreeAuditChallenge,
     storage: &LmdbStorage,
@@ -924,10 +924,12 @@ pub async fn handle_subtree_challenge(
         };
     };
 
-    // Look up the pinned commitment among the last-two-gossiped retained set.
-    // A miss is `UnknownCommitment` — the auditor GRACES it (the peer may have
-    // legitimately rotated past a root the auditor still had cached), rather
-    // than treating legitimate rotation as a confirmed repudiation (§6).
+    // Look up the pinned commitment among the in-window retained set (TTL-bounded
+    // answerability with a MAX_RETAINED_GOSSIPED_SLOTS backstop).
+    // A miss is `UnknownCommitment`. With audit grace removed (ADR-0004 A1) the
+    // auditor treats a responsive miss on an in-window pin as a CONFIRMED failure:
+    // answerability is restart-durable and pins are challenged only while in
+    // window, so failing to answer is a real repudiation, not benign rotation.
     let Some(built) = state.lookup_by_hash(&challenge.expected_commitment_hash) else {
         return SubtreeAuditResponse::Rejected {
             challenge_id: challenge.challenge_id,
@@ -1063,10 +1065,11 @@ pub async fn handle_subtree_byte_challenge(
         };
     };
     // Resolve the SAME commitment the auditor pinned in round 1. If we no longer
-    // retain it (rotated past it), reject as `UnknownCommitment` — the auditor
-    // GRACES that (legitimate rotation it may not have observed, §6), rather
-    // than confirming a failure. We serve bytes only for keys committed under
-    // this pin.
+    // retain it (rotated past it), reject as `UnknownCommitment`. With audit
+    // grace removed (ADR-0004 A1) the auditor treats a responsive miss on an
+    // in-window pin as a confirmed failure — answerability is restart-durable and
+    // pins are challenged only in-window. We serve bytes only for keys committed
+    // under this pin.
     let Some(built) = state.lookup_by_hash(&challenge.expected_commitment_hash) else {
         return SubtreeByteResponse::Rejected {
             challenge_id: challenge.challenge_id,

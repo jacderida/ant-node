@@ -139,8 +139,8 @@ const BOOTSTRAP_DRAIN_CHECK_SECS: u64 = 5;
 /// Each rebuild scans LMDB to compute leaf hashes; for ~10k keys this is
 /// sub-100ms (BLAKE3 + tree build). Retention is gossip-anchored, NOT
 /// rotation-anchored: the responder stays answerable for the current
-/// commitment plus the last `RETAINED_GOSSIPED_COMMITMENTS` (= 2) it
-/// actually gossiped, each kept for `GOSSIP_ANSWERABILITY_TTL` (3 h) after
+/// commitment plus every root it recently gossiped that is still in-window
+/// (~2 in steady state), each kept for `GOSSIP_ANSWERABILITY_TTL` (3 h) after
 /// its last emission (see `commitment_state`). So the rotation cadence does
 /// not by itself bound answerability — a gossiped commitment stays
 /// answerable across rotations until its gossip TTL lapses.
@@ -4917,9 +4917,9 @@ async fn rebuild_and_rotate_commitment(
     // Commit only to keys we are still RESPONSIBLE for ("want-to-hold"), not
     // everything currently on disk ("hold"). This is the half of the retention
     // contract that lets out-of-range chunks age out: a key that has left our
-    // close group is excluded from the NEXT commitment, so within at most
-    // RETAINED_GOSSIPED_COMMITMENTS gossip rotations it falls out of the
-    // last-2-gossiped window, `ResponderCommitmentState::is_held` goes false,
+    // close group is excluded from the NEXT commitment, so once its last gossip
+    // ages past GOSSIP_ANSWERABILITY_TTL it falls out of the in-window retained
+    // set, `ResponderCommitmentState::is_held` goes false,
     // and the pruner (which until then vetoes its deletion) reclaims it. Without
     // this filter the pruner's reprieve would keep re-committing stale keys
     // forever (the rebuild reads all_keys, so a retained-on-disk key would be

@@ -318,11 +318,12 @@ impl QuoteGenerator {
 
     /// Resync the quoting metric to an authoritative count of held records.
     ///
-    /// The quote price is driven by `records_stored()`. A monotonic store
-    /// counter would let a node delete chunks it was paid to hold yet keep
-    /// quoting as if it still held everything. Callers pass the authoritative
-    /// count of records the node ACTUALLY HOLDS (from the storage layer) so the
-    /// price reflects current holdings, including deletions and pruning.
+    /// ADR-0004: `records_stored()` is NO LONGER a pricing input — the quote
+    /// price is a function of the node's committed key count (see
+    /// `resolve_quote_pricing`), not this counter. This resync just keeps the
+    /// accounting/telemetry metric honest against what the node ACTUALLY HOLDS
+    /// (from the storage layer), including deletions and pruning, so a monotonic
+    /// store counter can't drift from reality.
     pub fn resync_records(&self, count: usize) {
         self.metrics_tracker.set_records(count);
     }

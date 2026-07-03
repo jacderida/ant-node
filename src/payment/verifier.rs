@@ -1256,27 +1256,6 @@ impl PaymentVerifier {
         }
     }
 
-    /// ADR-0004 "peers cross-check the original": for each non-baseline quote in
-    /// a client-put bundle, resolve its `commitment_pin` against the gossip
-    /// commitment cache and report a count/pin contradiction.
-    ///
-    /// Resolution today is the gossip cache only, and only if the neighbour's
-    /// commitment was seen within `GOSSIP_ANSWERABILITY_TTL` — a staler cache
-    /// entry is treated as unknown (the ADR's "cached commitment older than the
-    /// answerability TTL is treated as unknown"). An unresolved pin is never a
-    /// penalty: it is skipped here (the sidecar and `GetCommitmentByPin` fetch
-    /// fallbacks resolve more pins and are layered on next, but a pin that
-    /// resolves nowhere is simply skipped at cross-check time — an unresolved pin
-    /// is never a penalty here).
-    ///
-    /// A genuine [`CrossCheck::Mismatch`] is a deterministic, first-occurrence
-    /// contradiction between two same-key-signed artifacts: when enforcing, it
-    /// emits [`FailureEvidence::QuoteCommitmentMismatch`] to the trust engine
-    /// (same lane as a confirmed deterministic audit failure — NOT the timeout
-    /// silence lane); when observe-only, it only logs. Always best-effort: a
-    /// missing cache or absent `P2PNode` degrades to "resolve nothing", never an
-    /// error on the payment path — the synchronous arithmetic gate and the
-    /// later audit remain the load-bearing checks.
     /// Resolve a cached peer commitment record to its commitment *only if* it
     /// was seen within the answerability TTL; a staler entry is treated as
     /// unknown (ADR-0004: "a cached commitment older than the answerability TTL
@@ -1362,6 +1341,27 @@ impl PaymentVerifier {
         map
     }
 
+    /// ADR-0004 "peers cross-check the original": for each non-baseline quote in
+    /// a client-put bundle, resolve its `commitment_pin` and report a count/pin
+    /// contradiction.
+    ///
+    /// Resolution order: the sidecar first (the commitment arrived with the
+    /// quote, validated synchronously — no state, no network), then the gossip
+    /// cache (only if the neighbour's commitment was seen within
+    /// `GOSSIP_ANSWERABILITY_TTL`; a staler entry is treated as unknown, per the
+    /// ADR's "cached commitment older than the answerability TTL is treated as
+    /// unknown"), then an off-hot-path `GetCommitmentByPin` fetch for pins still
+    /// unresolved. A pin that resolves nowhere is simply skipped — an unresolved
+    /// pin is never a penalty.
+    ///
+    /// A genuine [`CrossCheck::Mismatch`] is a deterministic, first-occurrence
+    /// contradiction between two same-key-signed artifacts: when enforcing, it
+    /// emits [`FailureEvidence::QuoteCommitmentMismatch`] to the trust engine
+    /// (same lane as a confirmed deterministic audit failure — NOT the timeout
+    /// silence lane); when observe-only, it only logs. Always best-effort: a
+    /// missing cache or absent `P2PNode` degrades to "resolve nothing", never an
+    /// error on the payment path — the synchronous arithmetic gate and the
+    /// later audit remain the load-bearing checks.
     async fn cross_check_quotes(&self, payment: &ProofOfPayment, commitment_sidecars: &[Vec<u8>]) {
         let now = std::time::Instant::now();
         let ttl = crate::replication::commitment_state::GOSSIP_ANSWERABILITY_TTL;
@@ -5279,10 +5279,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn emit_mismatch_evidence_is_observe_only_safe_without_p2p() {
-        // The evidence variant is constructed and routed; in observe-only mode
-        // (and with no P2P handle) it must log without panicking and take no
-        // trust action. This exercises the evidence->action mapping directly.
+    async fn emit_mismatch_evidence_without_p2p_does_not_panic() {
+        // Guards the "always best-effort" degrade path: with no P2P handle there
+        // is no trust engine to act on, so `emit_mismatch_evidence` must be a
+        // no-op that never panics or errors on the payment path. This is a
+        // no-panic guard on the degraded path — it does NOT exercise the
+        // evidence->action mapping (that needs a live trust engine).
         let built = test_built_commitment(12);
         let evidence = crate::replication::types::FailureEvidence::QuoteCommitmentMismatch {
             peer: PeerId::from_bytes([1u8; 32]),

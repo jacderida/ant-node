@@ -394,19 +394,14 @@ impl PersistedRetention {
         let this: Self = postcard::from_bytes(bytes).ok()?;
         (this.version == RETENTION_FORMAT_VERSION).then_some(this)
     }
-
-    /// Whether the snapshot holds no slots.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.slots.is_empty()
-    }
 }
 
 /// Responder retention state (ADR-0002).
 ///
-/// Keeps the current (latest-rotated) commitment plus every commitment whose
-/// hash is among the last `RETAINED_GOSSIPED_COMMITMENTS` *gossiped* hashes.
-/// A built-but-never-gossiped commitment is dropped on the next rotation unless
+/// Keeps the current (latest-rotated) commitment plus every commitment that was
+/// recently gossiped and is still in-window (its `GOSSIP_ANSWERABILITY_TTL` has
+/// not expired) — retention is TTL-based, not a fixed count. A
+/// built-but-never-gossiped commitment is dropped on the next rotation unless
 /// it gets gossiped. Rotation and gossip are the only paths that mutate this.
 pub struct ResponderCommitmentState {
     inner: RwLock<Inner>,
@@ -440,10 +435,10 @@ struct Inner {
     /// decouples ADVERTISE (gossiped as current, refreshes the TTL) from ANSWER
     /// (still resolvable during the TTL window).
     has_current: bool,
-    /// The last `RETAINED_GOSSIPED_COMMITMENTS` commitments actually emitted on
-    /// the wire, newest-first, each stamped with when it was last gossiped. A
-    /// commitment is retained iff it is the live current one or its hash appears
-    /// here with an unexpired stamp.
+    /// Commitments recently emitted on the wire, newest-first, each stamped with
+    /// when it was last gossiped (in steady state the last ~two, but bounded by
+    /// the answerability TTL, not a fixed count). A commitment is retained iff it
+    /// is the live current one or its hash appears here with an unexpired stamp.
     recently_gossiped: Vec<GossipedAt>,
 }
 
@@ -495,9 +490,9 @@ impl ResponderCommitmentState {
         prune_slots(&mut guard, Instant::now());
     }
 
-    /// Record that `hash` was emitted on the wire (gossiped). Keeps the last
-    /// `RETAINED_GOSSIPED_COMMITMENTS` gossiped hashes so the matching
-    /// commitments stay answerable (ADR-0002). Call at every gossip-emit site.
+    /// Record that `hash` was emitted on the wire (gossiped). Keeps every
+    /// in-window gossiped hash (unexpired `GOSSIP_ANSWERABILITY_TTL`) so the
+    /// matching commitments stay answerable (ADR-0002). Call at every gossip-emit site.
     ///
     /// Re-gossiping a hash already present **refreshes** its answerability
     /// deadline to now and moves it to the front: every time the node actually
@@ -592,8 +587,8 @@ impl ResponderCommitmentState {
     }
 
     /// Whether `key` is committed under any retained slot (the current
-    /// commitment plus the last-2-gossiped ones) — i.e. whether a peer could
-    /// still pin a recently gossiped root and demand this key's bytes in a
+    /// commitment plus any still-in-window gossiped ones) — i.e. whether a peer
+    /// could still pin a recently gossiped root and demand this key's bytes in a
     /// round-2 byte challenge.
     ///
     /// This is the SAME predicate the round-2 responder uses to decide a key is
@@ -1096,7 +1091,7 @@ mod tests {
         state.rotate(c1);
         state.mark_gossiped(h1); // we put c1 on the wire
 
-        // Rotate to c2 and gossip it. c1 is still within the last-2-gossiped.
+        // Rotate to c2 and gossip it. c1's gossip is still in-window (unexpired TTL).
         let c2 = BuiltCommitment::build(vec![(key(2), bh(2))], &[0; 32], &sk, &pk_bytes).unwrap();
         let h2 = c2.hash();
         state.rotate(c2);
@@ -1151,7 +1146,7 @@ mod tests {
         state.rotate(c2);
         state.mark_gossiped(h2);
 
-        // At this moment: current = c2, last-2-gossiped = {h2, h1}. Both the
+        // At this moment: current = c2, in-window gossiped = {h2, h1}. Both the
         // current AND the previously-gossiped c1 must be answerable — the "two,
         // not one" race window. c1 is the commitment "published just before the
         // newest one" and an auditor may still pin it.
@@ -1517,7 +1512,7 @@ mod tests {
                 BuiltCommitment::build(vec![(key(i), bh(i))], &[0; 32], &sk, &pk_bytes).unwrap();
             state.rotate(c);
         }
-        // h1 was gossiped and is still within the last-2-gossiped window
+        // h1 was gossiped and is still in-window (unexpired TTL)
         // (nothing else was gossiped), so it must still be answerable.
         assert!(
             state.lookup_by_hash(&h1).is_some(),

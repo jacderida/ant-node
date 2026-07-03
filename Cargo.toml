@@ -196,3 +196,12 @@ unused_async = "allow"
 cognitive_complexity = "allow"
 # Allow non-const functions during initial development (may need runtime features later)
 missing_const_for_fn = "allow"
+
+# V2-568 debug measurement campaign: build ant-node against the debug-only
+# logging additions in saorsa-core and saorsa-transport. These branches add
+# reservation-lifecycle client/full-fingerprint fields (transport) and the
+# relay-affinity reacquire decision line (core). Pinned to the exact commits.
+# Remove this block to return to the crates.io releases (see /fork-unpropagate).
+[patch.crates-io]
+saorsa-core = { git = "https://github.com/jacderida/saorsa-core", rev = "71bc0febd33b8acbb38f32de504e7d3150ed429e" }
+saorsa-transport = { git = "https://github.com/jacderida/saorsa-transport", rev = "01421c745faefa19663cc2f0fc150be43e79e735" }

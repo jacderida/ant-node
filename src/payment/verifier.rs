@@ -37,13 +37,20 @@ use std::time::Instant;
 /// Proofs smaller than this are rejected as they cannot contain sufficient payment information.
 pub const MIN_PAYMENT_PROOF_SIZE_BYTES: usize = 32;
 
-/// Maximum allowed size for a payment proof in bytes (256 KB).
+/// Maximum allowed size for a payment proof in bytes (512 KB).
 ///
-/// Single-node proofs with 7 ML-DSA-65 quotes reach ~40 KB.
-/// Merkle proofs include 16 candidate nodes (each with ~1,952-byte ML-DSA pub key
-/// and ~3,309-byte signature) plus merkle branch hashes, totaling ~130 KB.
-/// 256 KB provides headroom while still capping memory during verification.
-pub const MAX_PAYMENT_PROOF_SIZE_BYTES: usize = 262_144;
+/// Single-node proofs with 7 ML-DSA-65 quotes reach ~40 KB; with ADR-0004
+/// commitment sidecars (one ~5.3 KB commitment per bound quote, ~13 KB each
+/// after rmp encoding) they reach ~150 KB.
+/// Merkle proofs include 16 candidate nodes (each with ~1,952-byte ML-DSA pub
+/// key and ~3,309-byte signature) plus merkle branch hashes, totaling ~130 KB.
+/// A merkle proof that ALSO ships all 16 commitment sidecars (clients built
+/// before the sidecars were dropped from the per-chunk bundle) reaches
+/// ~342 KB — the previous 256 KB cap rejected every such PUT the moment nodes
+/// carried live commitments, which is exactly how it was discovered.
+/// 512 KB accepts every shape above with headroom while still capping memory
+/// during verification.
+pub const MAX_PAYMENT_PROOF_SIZE_BYTES: usize = 524_288;
 
 const PAID_QUOTE_PAYMENT_MULTIPLIER: u64 = 3;
 const PAYMENT_VERIFY_SLOW_LOG_MS: u128 = 500;
@@ -2894,6 +2901,35 @@ mod tests {
         assert!(
             err_msg.contains("Unknown payment proof type tag"),
             "Error should mention unknown tag: {err_msg}"
+        );
+    }
+
+    /// Regression pin for the DEV-01 (2026-07-06) outage: a merkle proof that
+    /// ships all 16 ADR-0004 commitment sidecars serializes to ~342 KB, and the
+    /// old 256 KB cap size-rejected every merkle PUT as soon as nodes carried
+    /// live commitments. The cap must keep accepting that legacy client shape;
+    /// a proof of that size must fail on content, never on size.
+    #[tokio::test]
+    async fn test_sidecar_bearing_merkle_proof_size_is_accepted() {
+        const LEGACY_SIDECAR_PROOF_BYTES: usize = 342_171;
+
+        let verifier = create_test_verifier();
+        let xorname = [6u8; 32];
+
+        let legacy_sized_proof = vec![0xFFu8; LEGACY_SIDECAR_PROOF_BYTES];
+        let result = verifier
+            .verify_payment(
+                &xorname,
+                Some(&legacy_sized_proof),
+                VerificationContext::ClientPut,
+            )
+            .await;
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.expect_err("should fail"));
+        assert!(
+            !err_msg.contains("too large"),
+            "A {LEGACY_SIDECAR_PROOF_BYTES}-byte proof must not be size-rejected \
+             (sidecar-bearing merkle proofs from pre-fix clients): {err_msg}"
         );
     }
 

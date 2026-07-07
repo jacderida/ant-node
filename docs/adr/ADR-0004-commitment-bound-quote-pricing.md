@@ -128,10 +128,19 @@ afterwards by everyone else.
 
 - **Peers cross-check the original and route monetized commitments into
   audit.** The client forwards each quote's commitment sidecar with the
-  client-put bundle; storers ingest it exactly like a gossiped commitment
-  (signature and binding checks) and then drop it from the receipt they
-  persist — so the cross-check is synchronous and the audit never depends on
-  a post-payment fetch from the accused. On fresh client-put bundles only (a
+  single-node client-put bundle; storers ingest it exactly like a gossiped
+  commitment (signature and binding checks) and then drop it from the receipt
+  they persist — so the cross-check is synchronous and the audit never depends
+  on a post-payment fetch from the accused. Merkle client-put bundles carry NO
+  sidecars: sixteen per-candidate commitments (~13 KB each serialized) would
+  exceed the payment-proof size budget — and did, rejecting every merkle PUT in
+  production the moment nodes carried live commitments. The forced-disclosure
+  invariant still holds on the merkle path because the client's
+  resolve-before-pay gate makes every candidate serve its commitment BEFORE it
+  can enter a paid pool; the storer-side cross-check resolves merkle pins from
+  gossip or the rate-limited fetch instead, and an unanswerable pin remains
+  timeout-class while the deterministic first-audit queue closes the funnel.
+  On fresh client-put bundles only (a
   replication receipt's pin has legitimately aged out and is skipped), each
   storer compares every neighbour quote's claimed count to the pinned
   original — from the sidecar, from gossip if seen within the answerability
@@ -231,9 +240,12 @@ afterwards by everyone else.
 
 - A quote grows by roughly forty bytes; the quote *response* additionally
   carries the pinned signed commitment (a few kilobytes next to an
-  already-kilobytes quote), with no extra round trip. The client-put bundle
-  forwards the sidecars; persisted and replicated receipts keep only the pin
-  and count, so stored proofs do not grow.
+  already-kilobytes quote), with no extra round trip. Single-node client-put
+  bundles forward the sidecars; merkle bundles omit them (the client already
+  resolved every candidate's commitment before paying, and sixteen sidecars
+  per chunk proof exceeded the payment-proof size budget in production);
+  persisted and replicated receipts keep only the pin and count, so stored
+  proofs do not grow.
 - One new request type (fetch a commitment by pin), rate-limited and
   negatively cached like other replication requests.
 - One new deterministic evidence variant carrying the two conflicting signed

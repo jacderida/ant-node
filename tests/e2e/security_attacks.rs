@@ -14,7 +14,7 @@ use ant_node::ant_protocol::{
     ChunkMessage, ChunkMessageBody, ChunkPutRequest, ChunkPutResponse, ProtocolError,
 };
 use ant_node::compute_address;
-use ant_node::payment::PaymentProof;
+use ant_node::payment::{PaymentProof, MAX_PAYMENT_PROOF_SIZE_BYTES};
 use bytes::Bytes;
 use evmlib::testnet::Testnet;
 use evmlib::ProofOfPayment;
@@ -214,18 +214,18 @@ async fn test_attack_valid_msgpack_empty_quotes() -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-/// Attack: Send 200KB of garbage as payment proof (exceeds 100KB max).
-/// Node MUST reject (proof too large).
+/// Attack: Send garbage one byte past `MAX_PAYMENT_PROOF_SIZE_BYTES` as the
+/// payment proof. Node MUST reject (proof too large).
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn test_attack_proof_too_large() -> Result<(), Box<dyn std::error::Error>> {
-    info!("ATTACK TEST: proof too large (200KB)");
+    info!("ATTACK TEST: proof too large ({MAX_PAYMENT_PROOF_SIZE_BYTES} bytes + 1)");
 
     let (harness, _testnet) = setup_enforcement_env().await?;
 
     let test_data = b"Attack: oversized proof bytes";
     let address = compute_address(test_data);
-    let oversized: Vec<u8> = vec![0xAA; 200 * 1024]; // 200KB of junk
+    let oversized: Vec<u8> = vec![0xAA; MAX_PAYMENT_PROOF_SIZE_BYTES + 1];
     let request =
         ChunkPutRequest::with_payment(address, Bytes::copy_from_slice(test_data), oversized);
 
@@ -236,6 +236,12 @@ async fn test_attack_proof_too_large() -> Result<(), Box<dyn std::error::Error>>
     assert!(
         is_payment_rejection(&response.body),
         "Attack MUST be rejected with payment error, got: {response:?}"
+    );
+    // The rejection must be the SIZE gate specifically, not a downstream
+    // tag/deserialization failure — that is what caps pre-parse work.
+    assert!(
+        format!("{:?}", response.body).contains("too large"),
+        "Rejection must name the size gate, got: {response:?}"
     );
     info!("Correctly rejected: proof too large");
 

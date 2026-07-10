@@ -165,6 +165,11 @@ const COMMITMENT_ROTATION_INTERVAL_SECS: u64 = 3600;
 /// guard keeps idle nodes from needless disk writes.
 const RETENTION_PERSIST_INTERVAL_SECS: u64 = 30;
 
+/// Cadence of the `replication traffic summary (cumulative)` INFO lines
+/// (V2-623). A `const` so testnets can drop it to 60s; 300s is the production
+/// default that keeps log volume negligible.
+const TRAFFIC_SUMMARY_INTERVAL_SECS: u64 = 300;
+
 /// Maximum tolerated auditor↔responder wall-clock skew for the first-audit
 /// in-window screen (ADR-0004 A1 guardrail A). The screen accepts a monetized pin
 /// for first audit only if its SIGNED `quote_ts` lands in
@@ -597,6 +602,8 @@ impl ReplicationEngine {
         // ADR-0004: deterministic first audit of commitments that backed a
         // payment (surfaced by the verifier cross-check).
         self.start_first_audit_drainer();
+        // V2-623: periodic cumulative per-variant traffic accounting.
+        self.start_traffic_summary_loop();
 
         info!(
             "Replication engine started with {} background tasks",
@@ -1422,6 +1429,27 @@ impl ReplicationEngine {
                 }
             }
             debug!("Commitment retention persist loop shut down");
+        });
+        self.task_handles.push(handle);
+    }
+
+    /// Periodically emit the cumulative per-variant replication traffic
+    /// summary (V2-623). Reads the process-global counter table maintained by
+    /// [`protocol::ReplicationMessage::encode`]/`decode`; needs no engine state.
+    fn start_traffic_summary_loop(&mut self) {
+        let shutdown = self.shutdown.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    () = shutdown.cancelled() => break,
+                    () = tokio::time::sleep(std::time::Duration::from_secs(
+                        TRAFFIC_SUMMARY_INTERVAL_SECS,
+                    )) => {
+                        protocol::log_traffic_summary();
+                    }
+                }
+            }
+            debug!("Replication traffic summary loop shut down");
         });
         self.task_handles.push(handle);
     }

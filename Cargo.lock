@@ -862,8 +862,7 @@ dependencies = [
 [[package]]
 name = "ant-protocol"
 version = "2.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b665880152b4e124094acc1faaff5f20a275594e6364b8a729b50f3bc326674"
+source = "git+https://github.com/jacderida/ant-protocol?branch=feat/trust-quarantine-thresholds#468d2c74a21e0de9ff860768d768ac74b92a203e"
 dependencies = [
  "blake3",
  "bytes",
@@ -4962,8 +4961,7 @@ dependencies = [
 [[package]]
 name = "saorsa-core"
 version = "0.26.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d9c05644c46b8de670aa5c8eea037b90731f1f204e8aa5d8a2f03496d740401"
+source = "git+https://github.com/WithAutonomi/saorsa-core?branch=feat/trust-quarantine-thresholds#13cf6993cd1649c82be3ca7da7b5375d39761fd9"
 dependencies = [
  "anyhow",
  "async-trait",

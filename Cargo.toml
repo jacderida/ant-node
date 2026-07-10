@@ -39,10 +39,10 @@ mimalloc = "0.1"
 # Until then, the git pin tracks the matching saorsa-core lineage
 # (the rc-2026.4.2 branch) so Cargo can unify the wire types here
 # with ant-protocol's re-exports.
-ant-protocol = "2.3.0"
+ant-protocol = { git = "https://github.com/jacderida/ant-protocol", branch = "feat/trust-quarantine-thresholds" }
 
 # Core (provides EVERYTHING: networking, DHT, security, trust, storage)
-saorsa-core = "0.26.2"
+saorsa-core = { git = "https://github.com/WithAutonomi/saorsa-core", branch = "feat/trust-quarantine-thresholds" }
 saorsa-pqc = "0.5"
 
 # Payment verification - autonomi network lookup + EVM payment

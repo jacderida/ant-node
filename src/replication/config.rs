@@ -390,6 +390,12 @@ pub const AUDIT_ON_GOSSIP_COOLDOWN_SECS: u64 = 30 * 60;
 /// re-checks a small per-peer map, so the tick is cheap.
 pub const FIRST_AUDIT_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Interval for the cumulative first-audit scheduler observability summary.
+///
+/// Deliberately low frequency: this is intended for fleet-level Elasticsearch
+/// aggregation without recreating the high-volume logging load it measures.
+pub const FIRST_AUDIT_SUMMARY_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
 /// ADR-0004: max monetized-pin events the first-audit drainer drains from its
 /// channel per wake before it must run the audit-launch phase.
 ///

@@ -85,12 +85,16 @@ struct FirstAuditObservability {
     queued: AtomicU64,
     coalesced: AtomicU64,
     duplicates: AtomicU64,
-    cooldown_deferred: AtomicU64,
+    capacity_evicted: AtomicU64,
+    cooldown_deferred_attempts: AtomicU64,
     launched: AtomicU64,
     passed: AtomicU64,
     timed_out: AtomicU64,
     failed: AtomicU64,
-    expired: AtomicU64,
+    bootstrap_claims: AtomicU64,
+    idle: AtomicU64,
+    insufficient_keys: AtomicU64,
+    outside_answerability_window: AtomicU64,
     inflight: AtomicU64,
 }
 
@@ -99,6 +103,9 @@ enum FirstAuditTerminalOutcome {
     Passed,
     Timeout,
     Failed,
+    BootstrapClaim,
+    Idle,
+    InsufficientKeys,
 }
 
 impl FirstAuditTerminalOutcome {
@@ -107,6 +114,9 @@ impl FirstAuditTerminalOutcome {
             Self::Passed => "passed",
             Self::Timeout => "timeout",
             Self::Failed => "failed",
+            Self::BootstrapClaim => "bootstrap_claim",
+            Self::Idle => "idle",
+            Self::InsufficientKeys => "insufficient_keys",
         }
     }
 }
@@ -121,10 +131,35 @@ fn first_audit_terminal_outcome(result: &AuditTickResult) -> FirstAuditTerminalO
                     ..
                 },
         } => FirstAuditTerminalOutcome::Timeout,
-        AuditTickResult::Failed { .. }
-        | AuditTickResult::BootstrapClaim { .. }
-        | AuditTickResult::Idle
-        | AuditTickResult::InsufficientKeys => FirstAuditTerminalOutcome::Failed,
+        AuditTickResult::Failed { .. } => FirstAuditTerminalOutcome::Failed,
+        AuditTickResult::BootstrapClaim { .. } => FirstAuditTerminalOutcome::BootstrapClaim,
+        AuditTickResult::Idle => FirstAuditTerminalOutcome::Idle,
+        AuditTickResult::InsufficientKeys => FirstAuditTerminalOutcome::InsufficientKeys,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FirstAuditQueueOutcome {
+    Queued,
+    Coalesced,
+    CapacityEvicted { peer: PeerId, pin: [u8; 32] },
+}
+
+/// Insert newest-per-peer work while exposing the bounded LRU's otherwise
+/// silent capacity eviction. This preserves `LruCache::put` semantics exactly.
+fn queue_first_audit_event(
+    pending: &mut LruCache<PeerId, MonetizedPinEvent>,
+    event: MonetizedPinEvent,
+) -> FirstAuditQueueOutcome {
+    match pending.push(event.peer, event) {
+        None => FirstAuditQueueOutcome::Queued,
+        Some((replaced_peer, _)) if replaced_peer == event.peer => {
+            FirstAuditQueueOutcome::Coalesced
+        }
+        Some((evicted_peer, evicted)) => FirstAuditQueueOutcome::CapacityEvicted {
+            peer: evicted_peer,
+            pin: evicted.pin,
+        },
     }
 }
 
@@ -912,18 +947,37 @@ impl ReplicationEngine {
                             // sustained flood can't starve the audit-launch phase.
                             if first_audited.contains(&e.pin) {
                                 observability.duplicates.fetch_add(1, Ordering::Relaxed);
-                            } else if pending.put(e.peer, e).is_some() {
-                                observability.coalesced.fetch_add(1, Ordering::Relaxed);
                                 debug!(
-                                    "First-audit scheduler: audit_trigger=first_monetized outcome=coalesced peer={} pin={} key_count={} pending={}",
+                                    "First-audit scheduler: audit_trigger=first_monetized outcome=duplicate peer={} pin={} key_count={} pending={}",
                                     e.peer, hex::encode(e.pin), e.key_count, pending.len()
                                 );
                             } else {
-                                observability.queued.fetch_add(1, Ordering::Relaxed);
-                                debug!(
-                                    "First-audit scheduler: audit_trigger=first_monetized outcome=queued peer={} pin={} key_count={} pending={}",
-                                    e.peer, hex::encode(e.pin), e.key_count, pending.len()
-                                );
+                                match queue_first_audit_event(&mut pending, e) {
+                                    FirstAuditQueueOutcome::Queued => {
+                                        observability.queued.fetch_add(1, Ordering::Relaxed);
+                                        debug!(
+                                            "First-audit scheduler: audit_trigger=first_monetized outcome=queued peer={} pin={} key_count={} pending={}",
+                                            e.peer, hex::encode(e.pin), e.key_count, pending.len()
+                                        );
+                                    }
+                                    FirstAuditQueueOutcome::Coalesced => {
+                                        observability.coalesced.fetch_add(1, Ordering::Relaxed);
+                                        debug!(
+                                            "First-audit scheduler: audit_trigger=first_monetized outcome=coalesced peer={} pin={} key_count={} pending={}",
+                                            e.peer, hex::encode(e.pin), e.key_count, pending.len()
+                                        );
+                                    }
+                                    FirstAuditQueueOutcome::CapacityEvicted { peer, pin } => {
+                                        observability.queued.fetch_add(1, Ordering::Relaxed);
+                                        observability
+                                            .capacity_evicted
+                                            .fetch_add(1, Ordering::Relaxed);
+                                        debug!(
+                                            "First-audit scheduler: audit_trigger=first_monetized outcome=capacity_evicted evicted_peer={peer} evicted_pin={} replacement_peer={} replacement_pin={} pending={}",
+                                            hex::encode(pin), e.peer, hex::encode(e.pin), pending.len()
+                                        );
+                                    }
+                                }
                             }
                             let mut drained = 1usize;
                             while drained < config::FIRST_AUDIT_DRAIN_BATCH {
@@ -934,14 +988,27 @@ impl ReplicationEngine {
                                             observability
                                                 .duplicates
                                                 .fetch_add(1, Ordering::Relaxed);
-                                        } else if pending.put(e.peer, e).is_some() {
-                                            observability
-                                                .coalesced
-                                                .fetch_add(1, Ordering::Relaxed);
                                         } else {
-                                            observability
-                                                .queued
-                                                .fetch_add(1, Ordering::Relaxed);
+                                            match queue_first_audit_event(&mut pending, e) {
+                                                FirstAuditQueueOutcome::Queued => {
+                                                    observability
+                                                        .queued
+                                                        .fetch_add(1, Ordering::Relaxed);
+                                                }
+                                                FirstAuditQueueOutcome::Coalesced => {
+                                                    observability
+                                                        .coalesced
+                                                        .fetch_add(1, Ordering::Relaxed);
+                                                }
+                                                FirstAuditQueueOutcome::CapacityEvicted { .. } => {
+                                                    observability
+                                                        .queued
+                                                        .fetch_add(1, Ordering::Relaxed);
+                                                    observability
+                                                        .capacity_evicted
+                                                        .fetch_add(1, Ordering::Relaxed);
+                                                }
+                                            }
                                         }
                                         drained += 1;
                                     }
@@ -958,17 +1025,21 @@ impl ReplicationEngine {
 
                 if last_summary.elapsed() >= config::FIRST_AUDIT_SUMMARY_INTERVAL {
                     info!(
-                        "First-audit scheduler summary: audit_trigger=first_monetized received={} queued={} coalesced={} duplicates={} cooldown_deferred={} launched={} passed={} timed_out={} failed={} expired={} pending={} inflight={}",
+                        "First-audit scheduler summary: audit_trigger=first_monetized received={} queued={} coalesced={} duplicates={} capacity_evicted={} cooldown_deferred_attempts={} launched={} passed={} timed_out={} failed={} bootstrap_claims={} idle={} insufficient_keys={} outside_answerability_window={} pending={} inflight={}",
                         observability.received.load(Ordering::Relaxed),
                         observability.queued.load(Ordering::Relaxed),
                         observability.coalesced.load(Ordering::Relaxed),
                         observability.duplicates.load(Ordering::Relaxed),
-                        observability.cooldown_deferred.load(Ordering::Relaxed),
+                        observability.capacity_evicted.load(Ordering::Relaxed),
+                        observability.cooldown_deferred_attempts.load(Ordering::Relaxed),
                         observability.launched.load(Ordering::Relaxed),
                         observability.passed.load(Ordering::Relaxed),
                         observability.timed_out.load(Ordering::Relaxed),
                         observability.failed.load(Ordering::Relaxed),
-                        observability.expired.load(Ordering::Relaxed),
+                        observability.bootstrap_claims.load(Ordering::Relaxed),
+                        observability.idle.load(Ordering::Relaxed),
+                        observability.insufficient_keys.load(Ordering::Relaxed),
+                        observability.outside_answerability_window.load(Ordering::Relaxed),
                         pending.len(),
                         observability.inflight.load(Ordering::Relaxed),
                     );
@@ -1003,9 +1074,11 @@ impl ReplicationEngine {
                     // payment (quote_ts ≈ now); a skipped pin can still be
                     // gossip-lottery audited.
                     if !quote_within_audit_window(event.quote_ts, SystemTime::now()) {
-                        observability.expired.fetch_add(1, Ordering::Relaxed);
+                        observability
+                            .outside_answerability_window
+                            .fetch_add(1, Ordering::Relaxed);
                         debug!(
-                            "First-audit scheduler: audit_trigger=first_monetized outcome=expired peer={peer} pin={} key_count={} pending={}",
+                            "First-audit scheduler: audit_trigger=first_monetized outcome=outside_answerability_window peer={peer} pin={} key_count={} pending={}",
                             hex::encode(event.pin), event.key_count, pending.len()
                         );
                         continue;
@@ -1023,7 +1096,7 @@ impl ReplicationEngine {
                         if !cooldown_allows_audit(&mut map, &peer, now) {
                             pending.put(peer, event);
                             observability
-                                .cooldown_deferred
+                                .cooldown_deferred_attempts
                                 .fetch_add(1, Ordering::Relaxed);
                             debug!(
                                 "First-audit scheduler: audit_trigger=first_monetized outcome=cooldown_deferred peer={peer} pin={} key_count={} pending={}",
@@ -1069,6 +1142,19 @@ impl ReplicationEngine {
                             }
                             FirstAuditTerminalOutcome::Failed => {
                                 audit_observability.failed.fetch_add(1, Ordering::Relaxed);
+                            }
+                            FirstAuditTerminalOutcome::BootstrapClaim => {
+                                audit_observability
+                                    .bootstrap_claims
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            FirstAuditTerminalOutcome::Idle => {
+                                audit_observability.idle.fetch_add(1, Ordering::Relaxed);
+                            }
+                            FirstAuditTerminalOutcome::InsufficientKeys => {
+                                audit_observability
+                                    .insufficient_keys
+                                    .fetch_add(1, Ordering::Relaxed);
                             }
                         }
                         audit_observability.inflight.fetch_sub(1, Ordering::Relaxed);
@@ -5194,15 +5280,18 @@ mod tests {
         apply_audit_failure_credit_revocation, audit_failure_clears_bootstrap_claim,
         audit_failure_revokes_holder_credit, audit_launch_decision, config, cooldown_allows_audit,
         first_audit_terminal_outcome, first_failed_key_label, fresh_offer_payment_context,
-        paid_notify_payment_context, quote_within_audit_window, FirstAuditTerminalOutcome,
+        paid_notify_payment_context, queue_first_audit_event, quote_within_audit_window,
+        FirstAuditQueueOutcome, FirstAuditTerminalOutcome, MonetizedPinEvent,
         MONETIZED_AUDIT_SKEW_MARGIN,
     };
     use crate::payment::VerificationContext;
     use crate::replication::audit::AuditTickResult;
     use crate::replication::recent_provers::RecentProvers;
     use crate::replication::types::{AuditFailureReason, AuditFailureSummary, FailureEvidence};
+    use lru::LruCache;
     use saorsa_core::identity::PeerId;
     use std::collections::HashMap;
+    use std::num::NonZeroUsize;
     use std::time::Duration;
     use std::time::Instant;
     use std::time::SystemTime;
@@ -5246,11 +5335,61 @@ mod tests {
         );
         assert_eq!(
             first_audit_terminal_outcome(&AuditTickResult::Idle),
-            FirstAuditTerminalOutcome::Failed
+            FirstAuditTerminalOutcome::Idle
         );
         assert_eq!(FirstAuditTerminalOutcome::Passed.as_str(), "passed");
         assert_eq!(FirstAuditTerminalOutcome::Timeout.as_str(), "timeout");
         assert_eq!(FirstAuditTerminalOutcome::Failed.as_str(), "failed");
+        assert_eq!(FirstAuditTerminalOutcome::Idle.as_str(), "idle");
+        assert_eq!(
+            FirstAuditTerminalOutcome::InsufficientKeys.as_str(),
+            "insufficient_keys"
+        );
+        assert_eq!(
+            FirstAuditTerminalOutcome::BootstrapClaim.as_str(),
+            "bootstrap_claim"
+        );
+    }
+
+    #[test]
+    fn first_audit_queue_exposes_coalescing_and_capacity_eviction() {
+        let mut pending = LruCache::new(NonZeroUsize::new(1).unwrap());
+        let first = MonetizedPinEvent {
+            peer: test_peer(1),
+            pin: [1; 32],
+            key_count: 1,
+            quote_ts: SystemTime::now(),
+        };
+        let replacement = MonetizedPinEvent {
+            pin: [2; 32],
+            ..first
+        };
+        let other_peer = MonetizedPinEvent {
+            peer: test_peer(2),
+            pin: [3; 32],
+            ..first
+        };
+
+        assert_eq!(
+            queue_first_audit_event(&mut pending, first),
+            FirstAuditQueueOutcome::Queued
+        );
+        assert_eq!(
+            queue_first_audit_event(&mut pending, replacement),
+            FirstAuditQueueOutcome::Coalesced
+        );
+        assert_eq!(
+            queue_first_audit_event(&mut pending, other_peer),
+            FirstAuditQueueOutcome::CapacityEvicted {
+                peer: first.peer,
+                pin: replacement.pin,
+            }
+        );
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending.peek(&other_peer.peer).map(|event| event.pin),
+            Some([3; 32])
+        );
     }
 
     #[test]

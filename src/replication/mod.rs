@@ -109,6 +109,7 @@ enum FirstAuditTerminalOutcome {
 }
 
 impl FirstAuditTerminalOutcome {
+    #[cfg(any(feature = "logging", test))]
     const fn as_str(self) -> &'static str {
         match self {
             Self::Passed => "passed",

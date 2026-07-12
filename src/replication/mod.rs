@@ -973,7 +973,7 @@ impl ReplicationEngine {
                                             .capacity_evicted
                                             .fetch_add(1, Ordering::Relaxed);
                                         debug!(
-                                            "First-audit scheduler: audit_trigger=first_monetized outcome=capacity_evicted evicted_peer={peer} evicted_pin={} replacement_peer={} replacement_pin={} pending={}",
+                                            "First-audit scheduler: audit_trigger=first_monetized outcome=queued capacity_evicted=true evicted_peer={peer} evicted_pin={} replacement_peer={} replacement_pin={} pending={}",
                                             hex::encode(pin), e.peer, hex::encode(e.pin), pending.len()
                                         );
                                     }
@@ -1025,7 +1025,7 @@ impl ReplicationEngine {
 
                 if last_summary.elapsed() >= config::FIRST_AUDIT_SUMMARY_INTERVAL {
                     info!(
-                        "First-audit scheduler summary: audit_trigger=first_monetized received={} queued={} coalesced={} duplicates={} capacity_evicted={} cooldown_deferred_attempts={} launched={} passed={} timed_out={} failed={} bootstrap_claims={} idle={} insufficient_keys={} outside_answerability_window={} pending={} inflight={}",
+                        "First-audit scheduler summary: audit_trigger=first_monetized received={} queued={} coalesced={} duplicates={} capacity_evicted={} cooldown_deferred_attempts={} launched={} passed={} timeout={} failed={} bootstrap_claims={} idle={} insufficient_keys={} outside_answerability_window={} pending={} inflight={}",
                         observability.received.load(Ordering::Relaxed),
                         observability.queued.load(Ordering::Relaxed),
                         observability.coalesced.load(Ordering::Relaxed),

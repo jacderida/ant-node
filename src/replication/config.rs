@@ -404,6 +404,69 @@ pub const FIRST_AUDIT_SUMMARY_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// events the drainer processes audits, then loops back to drain more.
 pub const FIRST_AUDIT_DRAIN_BATCH: usize = 64;
 
+// ---------------------------------------------------------------------------
+// V2-624: bounded, coalescing first-audit scheduler budgets
+//
+// PR #149 added deterministic first audits; a DEV-01/DEV-02 comparison showed
+// the unbounded pathway contended with client transfers and ordinary audits.
+// These defaults turn first audits into BOUNDED, best-effort supplementary
+// coverage (the gossip-lottery + periodic paths remain the ongoing coverage):
+// hard global rate + concurrency budgets, a bounded ingest channel, and bounded
+// pending residence/retry. All are `ReplicationConfig` fields so a testnet can
+// tune them without a rebuild.
+// ---------------------------------------------------------------------------
+
+/// Capacity of the bounded verifier -> first-audit-drainer ingest channel.
+///
+/// The drainer empties this promptly into the newest-per-peer pending state
+/// (the authoritative keep-newest layer), so in steady state the channel stays
+/// near-empty. It is a hard backstop that makes the ingest path bounded rather
+/// than an unbounded queue: if the drainer ever stalls, the verifier's
+/// best-effort `try_send` drops (with a debug log) instead of growing forever.
+pub const FIRST_AUDIT_INGEST_CAPACITY: usize = 1024;
+
+/// Hard cap on the newest-per-peer pending first-audit state.
+///
+/// Each entry needs a SETTLED on-chain payment, so the realistic count is tiny;
+/// this LRU is a `DoS` backstop that, only under an absurd flood, evicts the
+/// LEAST-RECENTLY-MONETIZED peer (`capacity_evicted`). Never evicts the newest.
+pub const FIRST_AUDIT_PENDING_CAPACITY: usize = 4096;
+
+/// Global limit on concurrently in-flight first audits (round-one proof AND
+/// round-two byte challenges — one permit is held for the whole audit).
+///
+/// Distinct from per-peer cooldown: this is the fleet-wide launch bound that
+/// stops a large paid-upload workload from consuming all audit/transport
+/// capacity. Sized well below what a 997-node fleet generated in the regression.
+pub const FIRST_AUDIT_MAX_CONCURRENCY: usize = 8;
+
+/// Token-bucket burst for the global first-audit launch-rate budget.
+pub const FIRST_AUDIT_LAUNCH_BURST: u32 = 8;
+
+/// Token-bucket refill interval: one launch token is restored per interval.
+///
+/// With [`FIRST_AUDIT_LAUNCH_BURST`] this bounds the sustained launch rate
+/// independently of enqueue rate, so a settlement burst cannot dictate the
+/// task-creation rate.
+pub const FIRST_AUDIT_LAUNCH_REFILL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Maximum number of deferred retries (cooldown / rate / concurrency blocked)
+/// before a pending first audit is expired rather than retried indefinitely.
+pub const FIRST_AUDIT_MAX_RETRIES: u32 = 3;
+
+/// Maximum total time a pin may reside in pending before it is expired.
+///
+/// A second bound alongside the retry count: a pin that never becomes launchable
+/// (its peer stays busy) leaves pending as `expired` rather than lingering. Sized
+/// to the first-audit answerability margin so it never outlives its usefulness.
+pub const FIRST_AUDIT_MAX_RESIDENCE: Duration = Duration::from_secs(30 * 60);
+
+/// Maximum random jitter added when scheduling a deferred pin's next retry.
+///
+/// De-synchronises retries so that many peers whose cooldown windows expire at
+/// once do not release a single synchronized launch burst.
+pub const FIRST_AUDIT_RETRY_JITTER: Duration = Duration::from_secs(30);
+
 /// Number of subtree leaves spot-checked against real chunk bytes per audit
 /// (ADR-0002 real-bytes layer).
 ///
@@ -491,6 +554,31 @@ pub struct ReplicationConfig {
     /// Upper bound of the possession-check delay window (ADR-0003). Defaults
     /// to [`POSSESSION_CHECK_DELAY_MAX`].
     pub possession_check_delay_max: Duration,
+    /// V2-624: capacity of the bounded verifier -> first-audit ingest channel.
+    /// Defaults to [`FIRST_AUDIT_INGEST_CAPACITY`].
+    pub first_audit_ingest_capacity: usize,
+    /// V2-624: hard cap on the newest-per-peer pending first-audit state.
+    /// Defaults to [`FIRST_AUDIT_PENDING_CAPACITY`].
+    pub first_audit_pending_capacity: usize,
+    /// V2-624: global concurrency limit for in-flight first audits (covers
+    /// round-one proof and round-two byte challenges). Defaults to
+    /// [`FIRST_AUDIT_MAX_CONCURRENCY`].
+    pub first_audit_max_concurrency: usize,
+    /// V2-624: token-bucket burst for the global first-audit launch-rate budget.
+    /// Defaults to [`FIRST_AUDIT_LAUNCH_BURST`].
+    pub first_audit_launch_burst: u32,
+    /// V2-624: token-bucket refill interval (one launch token per interval).
+    /// Defaults to [`FIRST_AUDIT_LAUNCH_REFILL_INTERVAL`].
+    pub first_audit_launch_refill_interval: Duration,
+    /// V2-624: max deferred retries before a pending first audit is expired.
+    /// Defaults to [`FIRST_AUDIT_MAX_RETRIES`].
+    pub first_audit_max_retries: u32,
+    /// V2-624: max total residence in pending before a first audit is expired.
+    /// Defaults to [`FIRST_AUDIT_MAX_RESIDENCE`].
+    pub first_audit_max_residence: Duration,
+    /// V2-624: max random jitter added to a deferred pin's next retry time.
+    /// Defaults to [`FIRST_AUDIT_RETRY_JITTER`].
+    pub first_audit_retry_jitter: Duration,
 }
 
 impl Default for ReplicationConfig {
@@ -518,6 +606,14 @@ impl Default for ReplicationConfig {
             bootstrap_complete_timeout_secs: BOOTSTRAP_COMPLETE_TIMEOUT_SECS,
             possession_check_delay_min: POSSESSION_CHECK_DELAY_MIN,
             possession_check_delay_max: POSSESSION_CHECK_DELAY_MAX,
+            first_audit_ingest_capacity: FIRST_AUDIT_INGEST_CAPACITY,
+            first_audit_pending_capacity: FIRST_AUDIT_PENDING_CAPACITY,
+            first_audit_max_concurrency: FIRST_AUDIT_MAX_CONCURRENCY,
+            first_audit_launch_burst: FIRST_AUDIT_LAUNCH_BURST,
+            first_audit_launch_refill_interval: FIRST_AUDIT_LAUNCH_REFILL_INTERVAL,
+            first_audit_max_retries: FIRST_AUDIT_MAX_RETRIES,
+            first_audit_max_residence: FIRST_AUDIT_MAX_RESIDENCE,
+            first_audit_retry_jitter: FIRST_AUDIT_RETRY_JITTER,
         }
     }
 }
@@ -578,6 +674,24 @@ impl ReplicationConfig {
                 "neighbor_sync_scope ({}) must be <= K_BUCKET_SIZE ({})",
                 self.neighbor_sync_scope, K_BUCKET_SIZE,
             ));
+        }
+        // V2-624: the first-audit budgets must be non-degenerate, otherwise the
+        // bounded scheduler would either deadlock (zero capacity/permits) or
+        // spin (zero refill interval).
+        if self.first_audit_ingest_capacity == 0 {
+            return Err("first_audit_ingest_capacity must be >= 1".to_string());
+        }
+        if self.first_audit_pending_capacity == 0 {
+            return Err("first_audit_pending_capacity must be >= 1".to_string());
+        }
+        if self.first_audit_max_concurrency == 0 {
+            return Err("first_audit_max_concurrency must be >= 1".to_string());
+        }
+        if self.first_audit_launch_burst == 0 {
+            return Err("first_audit_launch_burst must be >= 1".to_string());
+        }
+        if self.first_audit_launch_refill_interval.is_zero() {
+            return Err("first_audit_launch_refill_interval must be > 0".to_string());
         }
         Ok(())
     }

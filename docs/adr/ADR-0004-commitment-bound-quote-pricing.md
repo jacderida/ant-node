@@ -334,3 +334,127 @@ attributing malicious silence/transient conditions network-wide is the
 (out-of-scope) distributed non-response problem. This supersedes the "unanswerable
 quoted pin is graced, never confirmed" rule and deletes `RejectKind::is_graced`;
 the regression tests are updated accordingly.
+
+---
+
+## Amendment 2 (2026-07-12): first audits are bounded, coalescing, best-effort supplementary coverage (V2-624)
+
+### Why
+
+PR #149 added a **deterministic** first audit: after payment verification the
+verifier emits a `MonetizedPinEvent` and the replication engine's first-audit
+drainer bypasses the gossip-lottery to attempt a storage-commitment audit for
+that pin. A sequential, same-configuration DEV-01 vs DEV-02 comparison (997
+service nodes, 73 hosts, identical topology/workload, 100% upload/download
+success on both) detached the verifier's monetised-pin sender on DEV-02 and
+measured the effect of the first-audit pathway in isolation:
+
+| Signal (normalised by workload) | Enabled | Disabled | Change |
+|---|---:|---:|---:|
+| Generic one-key timeout failures | 217,605/h | 97.8/h | −99.955% |
+| Storage-commitment target logs | 109,463/h | 2,557/h | −97.7% |
+| Responsible-audit passes | 351.2/h | 337.2/h | **−4.0%** |
+| Mean host peak CPU / peak memory | — | — | −21.3% / −31.7% |
+| Mean service peak RSS | — | — | −40.4% |
+| Node send/receive bytes/hour | — | — | ≈−23% |
+
+Upload/download median improved at all seven sizes (2.0–38.4% / 2.3–20.1%) and
+p90 at every size (9.5–39.1%). Crucially, disabling deterministic first audits
+cost only **−4.0%** of responsible-audit passes: the ongoing gossip-lottery and
+periodic audits already provide almost all coverage. The deterministic
+first-audit pathway was contending with client transfers and ordinary audits for
+a marginal coverage gain, because it had **no fleet-wide bounds**: an unbounded
+event channel, no global launch-rate or concurrency budget, indefinite retry of
+cooldown-blocked pins, and audits that progress to full-byte challenges.
+
+### Revised coverage guarantee
+
+First audits are **best-effort supplementary coverage, not guaranteed per-pin
+coverage.** The security objective — that a node paid/credited for a commitment
+it cannot prove is caught — is met by the *ongoing* gossip-lottery and periodic
+responsible audits (ADR-0002), which are unchanged. The monetised first audit is
+now an *additional, bounded* early probe. Concretely:
+
+- **Hard global budgets.** A token-bucket launch-rate budget and a global
+  concurrency limit (one permit held across round-one proof *and* round-two byte
+  challenges) bound fleet-wide first-audit work independently of the settlement
+  (enqueue) rate. Both are `ReplicationConfig` fields
+  (`first_audit_launch_burst` / `first_audit_launch_refill_interval`,
+  `first_audit_max_concurrency`), so a testnet tunes them without a rebuild.
+- **Bounded, coalescing, newest-per-peer pending state.** The durable work queue
+  is a bounded LRU keyed by peer (`first_audit_pending_capacity`); the ingest
+  channel is now a *bounded* mpsc (`first_audit_ingest_capacity`) whose sender
+  `try_send`s best-effort on the payment path — a full/closed channel drops the
+  event (`first_audit_outcome=ingest_dropped`, with `reason`) rather than growing
+  an unbounded queue. At most the newest eligible pin per peer is retained.
+- **Explicit, distinct admission/eviction/expiry, never silent.** Every departure
+  from pending is accounted with a *distinct* cause (no ambiguous single metric):
+  `superseded` (a newer same-peer pin replaces an older pending pin — the older is
+  discarded and its metadata reset for the fresh pin), `capacity_evicted` (a
+  different peer's least-recently-monetised pin is evicted to admit a newer one at
+  global capacity), and `expired` (a pin that left the answerability window, or
+  exhausted its bounded retry count / maximum residence). Replacement and eviction
+  apply **only to pending, not-started work** — an audit already in flight is
+  never cancelled because a newer event arrived.
+- **Bounded retry with de-synchronising jitter.** Cooldown-, rate-, or
+  concurrency-blocked pins are deferred with a jittered back-off
+  (`first_audit_retry_jitter`) and a bounded retry count
+  (`first_audit_max_retries`) / residence cap (`first_audit_max_residence`), so a
+  fleet of peers whose cooldown windows expire together does not release a
+  synchronised launch burst, and no pin is retried indefinitely.
+
+### Preserved
+
+Unchanged from PR #149 / Amendment 1: payment-verification enforcement; the
+signed quote-binding and commitment verification; responder validation and
+retention guarantees; the **gossip-lottery audit path** (the clock-skew-immune
+backstop); the per-peer cooldown (retained as an **additional** bound, not the
+only one); and the signed quote-time answerability-window screen. No confirmed
+proof failure is weakened.
+
+### No trust penalty for local capacity exhaustion
+
+Dropping, coalescing or expiring pending work because *local* scheduler capacity
+was exhausted **never** produces a trust event. Trust penalties remain reserved
+for confirmed proof failures (digest mismatch / absent committed key / rejection
+/ malformed response, surfaced as `first_audit_outcome=proof_failed`). V2-624
+also splits the non-response lane: a genuine response-deadline `timeout` is now
+distinct from a retryable local `transport_failed` (peer unavailable / dial /
+connection failure) — both graced identically (no penalty, no holder-credit
+revocation, no bootstrap-claim clearing) but separately observable.
+
+### Observability
+
+Nodes expose no metrics server, so the scheduler emits Elasticsearch-aggregatable
+structured logs. Per-event lines carry a stable `audit_trigger=first_monetized`
+tag, a `first_audit_outcome=<...>` (queued / superseded / capacity_evicted /
+duplicate / cooldown_deferred / rate_limited[reason=rate|concurrency] / expired
+[reason=answerability_window|residence|retry_exhausted] / launched / passed /
+timeout / transport_failed / proof_failed / bootstrap_claim / idle /
+insufficient_keys), and fields where applicable (`peer`, `pin`, `key_count`,
+`queue_depth`, `queue_capacity`, `pending_age_ms`, `retry_count`, `elapsed_ms`,
+`global_inflight`, `global_limit`). A low-frequency (`FIRST_AUDIT_SUMMARY_INTERVAL`,
+5 min) cumulative summary line avoids recreating the high-volume logging load the
+comparison measured.
+
+### Known limitation / follow-up: admission fairness under peer-id churn
+
+Global oldest-pending eviction (`capacity_evicted`) can be churned by many peer
+identities: a flood of fresh peer-ids could, in principle, keep evicting an
+established peer's pending pin before it is ever launched. This is bounded (no
+unbounded queue; the global rate/concurrency limits still cap total work) and the
+per-event logs are keyed by peer so per-peer admission/eviction pressure is
+observable in aggregation. It is **not** fully solved here: if churn-driven
+eviction of established peers proves material in practice, admission fairness
+(e.g. per-peer-class reservations) is a follow-up design — deliberately **not** a
+reversion to an unbounded queue.
+
+### Tests
+
+Unit tests cover the queue bounds and coalescing (`superseded`) / capacity
+eviction, the pure launch/defer/expire disposition (residence + retry budgets),
+the jittered next-retry scheduler, the token-bucket rate limiter's burst/refill/
+cap behaviour (deterministic over an injected clock), and duplicate-ingest
+non-eviction. The time-dependent logic is factored into pure helpers taking an
+injected `now`, matching the existing pure-helper test style, so no async clock
+is required.

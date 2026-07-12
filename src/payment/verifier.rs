@@ -289,9 +289,21 @@ pub struct PaymentVerifier {
     /// `None` until [`Self::attach_monetized_pin_sender`] (unit tests, or
     /// pre-replication startup), in which case no first audit is scheduled.
     monetized_pin_tx:
-        RwLock<Option<tokio::sync::mpsc::UnboundedSender<crate::replication::MonetizedPinEvent>>>,
+        RwLock<Option<tokio::sync::mpsc::Sender<crate::replication::MonetizedPinEvent>>>,
     /// Configuration.
     config: PaymentVerifierConfig,
+}
+
+/// V2-624: classify a bounded monetized-pin `try_send` failure for the
+/// best-effort ingest-drop log. `Full` means the drainer is momentarily behind
+/// (backpressure); `Closed` means the replication engine's drainer is gone.
+fn first_audit_ingest_drop_reason<T>(
+    err: &tokio::sync::mpsc::error::TrySendError<T>,
+) -> &'static str {
+    match err {
+        tokio::sync::mpsc::error::TrySendError::Full(_) => "channel_full",
+        tokio::sync::mpsc::error::TrySendError::Closed(_) => "channel_closed",
+    }
 }
 
 /// Shared state for an inflight closeness verification. The leader publishes
@@ -427,7 +439,7 @@ impl PaymentVerifier {
     /// absent (unit tests / pre-replication) no first audit is scheduled.
     pub fn attach_monetized_pin_sender(
         &self,
-        tx: tokio::sync::mpsc::UnboundedSender<crate::replication::MonetizedPinEvent>,
+        tx: tokio::sync::mpsc::Sender<crate::replication::MonetizedPinEvent>,
     ) {
         *self.monetized_pin_tx.write() = Some(tx);
         debug!("PaymentVerifier: ADR-0004 monetized-pin sender attached");
@@ -1395,15 +1407,22 @@ impl PaymentVerifier {
 
             // ADR-0004: this commitment backed a payment — route it for a
             // deterministic first audit (the drainer dedups by pin and respects
-            // the cooldown). Best-effort: a closed channel just means no first
-            // audit is scheduled, never an error on the payment path.
+            // the cooldown). V2-624: best-effort `try_send` on the BOUNDED
+            // channel — a full or closed channel drops the event (with a debug
+            // log) rather than blocking or erroring the payment path; first
+            // audits are best-effort supplementary coverage.
             if let Some(ref tx) = monetized_pin_tx {
-                let _ = tx.send(crate::replication::MonetizedPinEvent {
+                if let Err(e) = tx.try_send(crate::replication::MonetizedPinEvent {
                     peer: peer_id,
                     pin,
                     key_count: quote.committed_key_count,
                     quote_ts: quote.timestamp,
-                });
+                }) {
+                    debug!(
+                        "PaymentVerifier: dropping monetized pin (first_audit_outcome=ingest_dropped peer={peer_id} reason={}): first audits are best-effort",
+                        first_audit_ingest_drop_reason(&e),
+                    );
+                }
             }
             // Resolution order: sidecar (synchronous, no state) -> gossip cache
             // (fresh within TTL) -> fetch fallback (collected as unresolved).
@@ -2502,7 +2521,9 @@ impl PaymentVerifier {
             let peer_id = PeerId::from_bytes(*blake3::hash(&candidate.pub_key).as_bytes());
 
             if let Some(ref tx) = monetized_pin_tx {
-                let _ = tx.send(crate::replication::MonetizedPinEvent {
+                // V2-624: best-effort `try_send` on the BOUNDED channel (see the
+                // single-node path above).
+                if let Err(e) = tx.try_send(crate::replication::MonetizedPinEvent {
                     peer: peer_id,
                     pin,
                     key_count: candidate.committed_key_count,
@@ -2511,7 +2532,12 @@ impl PaymentVerifier {
                             candidate.merkle_payment_timestamp,
                         ))
                         .unwrap_or(std::time::UNIX_EPOCH),
-                });
+                }) {
+                    debug!(
+                        "PaymentVerifier: dropping monetized pin (first_audit_outcome=ingest_dropped peer={peer_id} reason={}): first audits are best-effort",
+                        first_audit_ingest_drop_reason(&e),
+                    );
+                }
             }
 
             let resolved = match sidecar_map.get(&(peer_id, pin)) {

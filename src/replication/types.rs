@@ -264,6 +264,15 @@ pub enum FailureEvidence {
 pub enum AuditFailureReason {
     /// Peer timed out (no response within deadline).
     Timeout,
+    /// A local transport/send failure prevented the challenge from being
+    /// delivered (peer unavailable, dial/connection failure, channel closed).
+    ///
+    /// V2-624: distinct from [`Timeout`](Self::Timeout) so the first-audit
+    /// scheduler can tell a retryable transport failure apart from a genuine
+    /// response deadline. Trust-wise it is graced identically to `Timeout` — a
+    /// transport failure is never the responder's fault, so it carries no
+    /// penalty and does not revoke holder credit or clear a bootstrap claim.
+    Transport,
     /// Response was malformed.
     MalformedResponse,
     /// One or more per-key digest mismatches.

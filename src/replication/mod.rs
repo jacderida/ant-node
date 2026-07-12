@@ -83,13 +83,27 @@ use saorsa_core::{DhtNetworkEvent, P2PEvent, P2PNode, TrustEvent};
 struct FirstAuditObservability {
     received: AtomicU64,
     queued: AtomicU64,
+    /// Same-peer newest-replaces-older coalescing events (per-event outcome:
+    /// `superseded`). Distinct from `capacity_evicted` (different-peer global
+    /// eviction) — V2-624 keeps these causes as separate counters.
     coalesced: AtomicU64,
     duplicates: AtomicU64,
     capacity_evicted: AtomicU64,
     cooldown_deferred_attempts: AtomicU64,
+    /// V2-624: pending entries dropped for leaving the answerability window,
+    /// exhausting the retry budget, or exceeding max residence (`expired`).
+    expired: AtomicU64,
+    /// V2-624: launch attempts blocked by the global launch-rate token bucket or
+    /// the global concurrency limit (`rate_limited`; the log line carries the
+    /// distinguishing `reason=rate|concurrency`). The pin stays pending.
+    rate_limited: AtomicU64,
     launched: AtomicU64,
     passed: AtomicU64,
     timed_out: AtomicU64,
+    /// V2-624: retryable transport/send failures, distinct from `timed_out`.
+    transport_failed: AtomicU64,
+    /// Confirmed proof failures (digest mismatch / absent / rejected / malformed);
+    /// per-event outcome `proof_failed`.
     failed: AtomicU64,
     bootstrap_claims: AtomicU64,
     idle: AtomicU64,
@@ -102,7 +116,14 @@ struct FirstAuditObservability {
 enum FirstAuditTerminalOutcome {
     Passed,
     Timeout,
-    Failed,
+    /// V2-624: retryable transport/send failure (graced, no penalty), distinct
+    /// from a genuine response deadline (`Timeout`) and a confirmed proof
+    /// failure (`ProofFailed`).
+    TransportFailed,
+    /// A confirmed storage/proof failure (digest mismatch, absent committed key,
+    /// rejection, malformed response). Penalised immediately by the result
+    /// handler. Logged as `proof_failed` in the scheduler taxonomy.
+    ProofFailed,
     BootstrapClaim,
     Idle,
     InsufficientKeys,
@@ -114,7 +135,8 @@ impl FirstAuditTerminalOutcome {
         match self {
             Self::Passed => "passed",
             Self::Timeout => "timeout",
-            Self::Failed => "failed",
+            Self::TransportFailed => "transport_failed",
+            Self::ProofFailed => "proof_failed",
             Self::BootstrapClaim => "bootstrap_claim",
             Self::Idle => "idle",
             Self::InsufficientKeys => "insufficient_keys",
@@ -132,7 +154,14 @@ fn first_audit_terminal_outcome(result: &AuditTickResult) -> FirstAuditTerminalO
                     ..
                 },
         } => FirstAuditTerminalOutcome::Timeout,
-        AuditTickResult::Failed { .. } => FirstAuditTerminalOutcome::Failed,
+        AuditTickResult::Failed {
+            evidence:
+                FailureEvidence::AuditFailure {
+                    reason: AuditFailureReason::Transport,
+                    ..
+                },
+        } => FirstAuditTerminalOutcome::TransportFailed,
+        AuditTickResult::Failed { .. } => FirstAuditTerminalOutcome::ProofFailed,
         AuditTickResult::BootstrapClaim { .. } => FirstAuditTerminalOutcome::BootstrapClaim,
         AuditTickResult::Idle => FirstAuditTerminalOutcome::Idle,
         AuditTickResult::InsufficientKeys => FirstAuditTerminalOutcome::InsufficientKeys,
@@ -142,25 +171,264 @@ fn first_audit_terminal_outcome(result: &AuditTickResult) -> FirstAuditTerminalO
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FirstAuditQueueOutcome {
     Queued,
-    Coalesced,
+    /// Same-peer newest-replaces-older coalescing: `superseded_pin` is the older
+    /// pin that was discarded (per-event outcome `superseded`).
+    Superseded { superseded_pin: [u8; 32] },
+    /// Different-peer eviction forced by the global pending capacity
+    /// (per-event outcome `capacity_evicted`). Distinct cause from `Superseded`.
     CapacityEvicted { peer: PeerId, pin: [u8; 32] },
 }
 
 /// Insert newest-per-peer work while exposing the bounded LRU's otherwise
-/// silent capacity eviction. This preserves `LruCache::put` semantics exactly.
+/// silent capacity eviction. Preserves `LruCache::push` semantics exactly:
+/// same-key insert returns the replaced value (coalescing / supersede);
+/// capacity overflow returns the evicted different-key entry.
+///
+/// V2-624: a fresher pin for a peer resets the scheduling metadata (a new pin is
+/// fresh work with its own residence/retry budget).
 fn queue_first_audit_event(
-    pending: &mut LruCache<PeerId, MonetizedPinEvent>,
+    pending: &mut LruCache<PeerId, PendingFirstAudit>,
     event: MonetizedPinEvent,
+    now: Instant,
 ) -> FirstAuditQueueOutcome {
-    match pending.push(event.peer, event) {
+    let entry = PendingFirstAudit::new(event, now);
+    match pending.push(event.peer, entry) {
         None => FirstAuditQueueOutcome::Queued,
-        Some((replaced_peer, _)) if replaced_peer == event.peer => {
-            FirstAuditQueueOutcome::Coalesced
+        Some((replaced_peer, replaced)) if replaced_peer == event.peer => {
+            FirstAuditQueueOutcome::Superseded {
+                superseded_pin: replaced.event.pin,
+            }
         }
         Some((evicted_peer, evicted)) => FirstAuditQueueOutcome::CapacityEvicted {
             peer: evicted_peer,
-            pin: evicted.pin,
+            pin: evicted.event.pin,
         },
+    }
+}
+
+/// V2-624: a pending first-audit entry plus the bounded-scheduling metadata the
+/// drainer needs to expire, retry and rate-limit it. Newest-per-peer: a fresher
+/// pin for the same peer replaces this entry (resetting `enqueued`/`retry_count`
+/// via [`PendingFirstAudit::new`]).
+#[derive(Debug, Clone, Copy)]
+struct PendingFirstAudit {
+    event: MonetizedPinEvent,
+    /// When this `(peer, pin)` first entered pending. Bounds total residence.
+    enqueued: Instant,
+    /// Deferred-launch attempts so far (cooldown / rate / concurrency blocked).
+    retry_count: u32,
+    /// Earliest instant to reattempt launch. Jittered on each defer so a fleet of
+    /// peers whose cooldowns expire together do not release one synchronized
+    /// launch burst.
+    next_retry_at: Instant,
+}
+
+impl PendingFirstAudit {
+    fn new(event: MonetizedPinEvent, now: Instant) -> Self {
+        Self {
+            event,
+            enqueued: now,
+            retry_count: 0,
+            next_retry_at: now,
+        }
+    }
+}
+
+/// V2-624: pure per-pass disposition for a pending first audit. `Ready` means
+/// eligible to attempt a launch (cooldown / rate / concurrency are still checked
+/// downstream); `Defer` means it is not yet time to reattempt; `Expire` means the
+/// bounded retry/residence budget is spent and the entry must be dropped.
+///
+/// Testable with an injected `now`, mirroring the existing pure-helper style
+/// (the scheduler keeps no async clock).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FirstAuditDisposition {
+    Ready,
+    Defer,
+    Expire(FirstAuditExpiry),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FirstAuditExpiry {
+    /// Exceeded the maximum time allowed in pending.
+    Residence,
+    /// Exceeded the maximum number of deferred retries.
+    RetryExhausted,
+}
+
+impl FirstAuditExpiry {
+    #[cfg(any(feature = "logging", test))]
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Residence => "residence",
+            Self::RetryExhausted => "retry_exhausted",
+        }
+    }
+}
+
+fn first_audit_pending_disposition(
+    entry: &PendingFirstAudit,
+    now: Instant,
+    max_retries: u32,
+    max_residence: Duration,
+) -> FirstAuditDisposition {
+    if now.saturating_duration_since(entry.enqueued) > max_residence {
+        return FirstAuditDisposition::Expire(FirstAuditExpiry::Residence);
+    }
+    if entry.retry_count > max_retries {
+        return FirstAuditDisposition::Expire(FirstAuditExpiry::RetryExhausted);
+    }
+    if now < entry.next_retry_at {
+        return FirstAuditDisposition::Defer;
+    }
+    FirstAuditDisposition::Ready
+}
+
+/// Pure next-retry scheduler: base retry interval plus a caller-supplied jitter
+/// (production passes a random `0..=jitter_cap`; tests pass a fixed value). Uses
+/// checked arithmetic so an extreme misconfiguration cannot panic.
+fn first_audit_next_retry(now: Instant, base: Duration, jitter: Duration) -> Instant {
+    let delay = base.checked_add(jitter).unwrap_or(base);
+    now.checked_add(delay).unwrap_or(now)
+}
+
+/// V2-624: token-bucket rate limiter for the global first-audit launch budget.
+/// Pure over an injected `now` so the refill/consume logic is unit-testable
+/// without a real clock.
+struct LaunchRateLimiter {
+    tokens: u32,
+    capacity: u32,
+    refill_interval: Duration,
+    last_refill: Instant,
+}
+
+impl LaunchRateLimiter {
+    fn new(capacity: u32, refill_interval: Duration, now: Instant) -> Self {
+        Self {
+            tokens: capacity,
+            capacity,
+            refill_interval,
+            last_refill: now,
+        }
+    }
+
+    fn refill(&mut self, now: Instant) {
+        if self.tokens >= self.capacity {
+            // Already full: keep `last_refill` anchored to now so idle time does
+            // not later over-credit the bucket.
+            self.last_refill = now;
+            return;
+        }
+        let interval = self.refill_interval.as_nanos();
+        if interval == 0 {
+            // Rejected by config validation; guard against div-by-zero anyway.
+            return;
+        }
+        let elapsed = now.saturating_duration_since(self.last_refill).as_nanos();
+        let gained = elapsed / interval;
+        if gained == 0 {
+            return;
+        }
+        if gained >= u128::from(self.capacity) {
+            self.tokens = self.capacity;
+            self.last_refill = now;
+        } else {
+            // gained < capacity <= u32::MAX here, so this conversion never
+            // saturates; the fallback is a safe guard, not a real case.
+            let gained = u32::try_from(gained).unwrap_or(self.capacity);
+            self.tokens = self.tokens.saturating_add(gained).min(self.capacity);
+            if let Some(advance) = self.refill_interval.checked_mul(gained) {
+                self.last_refill = self.last_refill.checked_add(advance).unwrap_or(now);
+            }
+        }
+    }
+
+    /// Consume one launch token if available (refilling first).
+    fn try_acquire(&mut self, now: Instant) -> bool {
+        self.refill(now);
+        if self.tokens > 0 {
+            self.tokens -= 1;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// V2-624: random jitter in `[0, cap]` for de-synchronising deferred retries.
+fn random_first_audit_jitter(cap: Duration) -> Duration {
+    let cap_ms = cap.as_millis();
+    if cap_ms == 0 {
+        return Duration::ZERO;
+    }
+    // Cap at u64 range; `first_audit_retry_jitter` defaults to 30s.
+    let cap_ms = u64::try_from(cap_ms).unwrap_or(u64::MAX);
+    Duration::from_millis(rand::thread_rng().gen_range(0..=cap_ms))
+}
+
+/// V2-624: admit one monetized-pin event into the newest-per-peer pending state,
+/// recording the distinct admission outcome (`queued` / `superseded` /
+/// `duplicate` / `capacity_evicted`). A pin already given its deterministic first
+/// audit is a duplicate and never overwrites an unaudited pending pin for the
+/// same peer.
+fn ingest_first_audit_event(
+    pending: &mut LruCache<PeerId, PendingFirstAudit>,
+    first_audited: &LruCache<[u8; 32], ()>,
+    observability: &FirstAuditObservability,
+    event: MonetizedPinEvent,
+    now: Instant,
+    queue_capacity: usize,
+) {
+    observability.received.fetch_add(1, Ordering::Relaxed);
+    if first_audited.contains(&event.pin) {
+        observability.duplicates.fetch_add(1, Ordering::Relaxed);
+        debug!(
+            "First-audit scheduler: audit_trigger=first_monetized first_audit_outcome=duplicate peer={} pin={} key_count={} queue_depth={} queue_capacity={queue_capacity}",
+            event.peer,
+            hex::encode(event.pin),
+            event.key_count,
+            pending.len(),
+        );
+        return;
+    }
+    match queue_first_audit_event(pending, event, now) {
+        FirstAuditQueueOutcome::Queued => {
+            observability.queued.fetch_add(1, Ordering::Relaxed);
+            debug!(
+                "First-audit scheduler: audit_trigger=first_monetized first_audit_outcome=queued peer={} pin={} key_count={} queue_depth={} queue_capacity={queue_capacity}",
+                event.peer,
+                hex::encode(event.pin),
+                event.key_count,
+                pending.len(),
+            );
+        }
+        FirstAuditQueueOutcome::Superseded { superseded_pin } => {
+            // Same-peer newest-replaces-older: distinct cause from capacity
+            // eviction, kept as its own counter (`coalesced`).
+            observability.coalesced.fetch_add(1, Ordering::Relaxed);
+            debug!(
+                "First-audit scheduler: audit_trigger=first_monetized first_audit_outcome=superseded peer={} superseded_pin={} pin={} key_count={} queue_depth={} queue_capacity={queue_capacity}",
+                event.peer,
+                hex::encode(superseded_pin),
+                hex::encode(event.pin),
+                event.key_count,
+                pending.len(),
+            );
+        }
+        FirstAuditQueueOutcome::CapacityEvicted { peer, pin } => {
+            // Different-peer global eviction: the newer pin is admitted; the
+            // least-recently-monetized peer's pin is dropped. Distinct counter.
+            observability.queued.fetch_add(1, Ordering::Relaxed);
+            observability.capacity_evicted.fetch_add(1, Ordering::Relaxed);
+            debug!(
+                "First-audit scheduler: audit_trigger=first_monetized first_audit_outcome=capacity_evicted evicted_peer={peer} evicted_pin={} replacement_peer={} replacement_pin={} key_count={} queue_depth={} queue_capacity={queue_capacity}",
+                hex::encode(pin),
+                event.peer,
+                hex::encode(event.pin),
+                event.key_count,
+                pending.len(),
+            );
+        }
     }
 }
 
@@ -447,11 +715,13 @@ pub struct ReplicationEngine {
     possession_check_rx: Option<mpsc::UnboundedReceiver<possession::PossessionCheckEvent>>,
     /// ADR-0004: sender the payment verifier clones to surface monetized pins
     /// for a deterministic first audit. The matching receiver is drained by
-    /// `start_first_audit_drainer`.
-    monetized_pin_tx: mpsc::UnboundedSender<MonetizedPinEvent>,
+    /// `start_first_audit_drainer`. V2-624: BOUNDED — the verifier `try_send`s
+    /// best-effort so a stalled drainer drops (with accounting) rather than
+    /// growing an unbounded queue.
+    monetized_pin_tx: mpsc::Sender<MonetizedPinEvent>,
     /// ADR-0004: receiver half of the monetized-pin channel, taken by
     /// `start_first_audit_drainer`.
-    monetized_pin_rx: Option<mpsc::UnboundedReceiver<MonetizedPinEvent>>,
+    monetized_pin_rx: Option<mpsc::Receiver<MonetizedPinEvent>>,
     /// Shutdown token.
     shutdown: CancellationToken,
     /// Background task handles.
@@ -489,7 +759,10 @@ impl ReplicationEngine {
         let (possession_check_tx, possession_check_rx) = mpsc::unbounded_channel();
 
         // ADR-0004: monetized-pin channel (verifier -> first-audit drainer).
-        let (monetized_pin_tx, monetized_pin_rx) = mpsc::unbounded_channel();
+        // V2-624: BOUNDED — a hard backstop so the ingest path is not an
+        // unbounded queue; the drainer empties it promptly into the newest-per-
+        // peer pending state (the authoritative keep-newest layer).
+        let (monetized_pin_tx, monetized_pin_rx) = mpsc::channel(config.first_audit_ingest_capacity);
 
         let engine = Self {
             config: Arc::clone(&config),
@@ -537,7 +810,7 @@ impl ReplicationEngine {
     /// (commitments that backed a payment) for a deterministic first audit.
     /// Cloneable; the engine drains the matching receiver.
     #[must_use]
-    pub fn monetized_pin_sender(&self) -> mpsc::UnboundedSender<MonetizedPinEvent> {
+    pub fn monetized_pin_sender(&self) -> mpsc::Sender<MonetizedPinEvent> {
         self.monetized_pin_tx.clone()
     }
 
@@ -909,147 +1182,110 @@ impl ReplicationEngine {
             cooldown: Arc::clone(&self.audit_on_gossip_cooldown),
         };
         let shutdown = self.shutdown.clone();
+        let config = Arc::clone(&self.config);
         let observability = Arc::new(FirstAuditObservability::default());
+        // V2-624: global first-audit concurrency budget. One permit is held for
+        // the WHOLE audit (round-one proof AND round-two byte challenges), so a
+        // large paid-upload workload cannot spawn unbounded audits and consume
+        // all audit/transport capacity.
+        let concurrency = Arc::new(Semaphore::new(config.first_audit_max_concurrency));
 
         let handle = tokio::spawn(async move {
+            let pending_capacity = config.first_audit_pending_capacity;
+            let global_limit = config.first_audit_max_concurrency as u64;
             // Bounded dedup of pins that have ALREADY been given their
             // deterministic first audit. A pin is inserted ONLY when an audit is
-            // actually launched (never on a cooldown skip), so a pin skipped now
-            // can still be first-audited later.
+            // actually launched (never on a defer), so a pin skipped now can
+            // still be first-audited later.
             let mut first_audited: LruCache<[u8; 32], ()> = LruCache::new(
                 NonZeroUsize::new(MAX_LAST_COMMITMENT_BY_PEER).unwrap_or(NonZeroUsize::MIN),
             );
-            // PERSISTENT pending queue: the most-recently-monetized pin per peer
-            // that has NOT yet been first-audited. A pin stays here until it is
-            // ACTUALLY first-audited (enters `first_audited`) — never removed for
-            // any weaker reason (e.g. a cooldown stamp), so an unaudited monetized
-            // pin is never silently forgotten. Newest-per-peer: a fresher pin for
-            // the same peer replaces the older one. Memory is bounded by an LRU:
-            // each entry needs a SETTLED on-chain payment, so the realistic count
-            // is tiny; the LRU is a pure DoS backstop that, only under an absurd
-            // flood, evicts the LEAST-RECENTLY-MONETIZED peer (the one most likely
-            // already superseded) — never the newest.
-            let mut pending: LruCache<PeerId, MonetizedPinEvent> = LruCache::new(
-                NonZeroUsize::new(MAX_LAST_COMMITMENT_BY_PEER).unwrap_or(NonZeroUsize::MIN),
+            // PERSISTENT pending state: the most-recently-monetized pin per peer
+            // that has NOT yet been first-audited. V2-624 makes this the bounded,
+            // newest-per-peer durable work queue (the unbounded event stream no
+            // longer is): a pin leaves ONLY when it is launched, superseded by a
+            // newer same-peer pin, evicted at global capacity, or expired
+            // (answerability window / retry / residence). Every departure is
+            // accounted; nothing is silently forgotten.
+            let mut pending: LruCache<PeerId, PendingFirstAudit> = LruCache::new(
+                NonZeroUsize::new(pending_capacity).unwrap_or(NonZeroUsize::MIN),
             );
-            // Periodic retry tick for pending (cooldown-blocked) pins. Created
-            // once; `Skip` so a backlog of missed ticks collapses to one.
+            // V2-624: global launch-rate budget (token bucket). Decouples the
+            // audit-launch rate from the enqueue rate so a settlement burst
+            // cannot dictate task-creation rate.
+            let mut rate = LaunchRateLimiter::new(
+                config.first_audit_launch_burst,
+                config.first_audit_launch_refill_interval,
+                Instant::now(),
+            );
+            // V2-624: tracks spawned audit tasks so a clean shutdown drains them
+            // and none are orphaned. Bounded by the concurrency semaphore.
+            let mut audits: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+            // Periodic retry tick for deferred pins. Created once; `Skip` so a
+            // backlog of missed ticks collapses to one.
             let mut tick = tokio::time::interval(config::FIRST_AUDIT_RETRY_INTERVAL);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut last_summary = Instant::now();
             loop {
-                // Wake on: shutdown, a new monetized pin, OR a periodic tick so
-                // pending (cooldown-blocked) pins get retried once their window
-                // reopens even if no new pin arrives.
-                let drained_new = tokio::select! {
+                // Wake on: shutdown, a new monetized pin, a periodic tick (so
+                // deferred pins get retried once their window reopens), OR a
+                // finished audit task (reaped to keep the JoinSet bounded).
+                tokio::select! {
                     () = shutdown.cancelled() => break,
                     event = rx.recv() => match event {
                         Some(e) => {
-                            observability.received.fetch_add(1, Ordering::Relaxed);
-                            // Newest-per-peer: a fresher pin replaces the older one,
-                            // BUT only if it is not already first-audited — an
-                            // already-audited duplicate must never overwrite an
-                            // unaudited pending pin for the same peer (it would then
-                            // be dropped as "done" and the unaudited pin lost). Cap
-                            // the per-wake batch drain (FIRST_AUDIT_DRAIN_BATCH) so a
-                            // sustained flood can't starve the audit-launch phase.
-                            if first_audited.contains(&e.pin) {
-                                observability.duplicates.fetch_add(1, Ordering::Relaxed);
-                                debug!(
-                                    "First-audit scheduler: audit_trigger=first_monetized outcome=duplicate peer={} pin={} key_count={} pending={}",
-                                    e.peer, hex::encode(e.pin), e.key_count, pending.len()
-                                );
-                            } else {
-                                match queue_first_audit_event(&mut pending, e) {
-                                    FirstAuditQueueOutcome::Queued => {
-                                        observability.queued.fetch_add(1, Ordering::Relaxed);
-                                        debug!(
-                                            "First-audit scheduler: audit_trigger=first_monetized outcome=queued peer={} pin={} key_count={} pending={}",
-                                            e.peer, hex::encode(e.pin), e.key_count, pending.len()
-                                        );
-                                    }
-                                    FirstAuditQueueOutcome::Coalesced => {
-                                        observability.coalesced.fetch_add(1, Ordering::Relaxed);
-                                        debug!(
-                                            "First-audit scheduler: audit_trigger=first_monetized outcome=coalesced peer={} pin={} key_count={} pending={}",
-                                            e.peer, hex::encode(e.pin), e.key_count, pending.len()
-                                        );
-                                    }
-                                    FirstAuditQueueOutcome::CapacityEvicted { peer, pin } => {
-                                        observability.queued.fetch_add(1, Ordering::Relaxed);
-                                        observability
-                                            .capacity_evicted
-                                            .fetch_add(1, Ordering::Relaxed);
-                                        debug!(
-                                            "First-audit scheduler: audit_trigger=first_monetized outcome=queued capacity_evicted=true evicted_peer={peer} evicted_pin={} replacement_peer={} replacement_pin={} pending={}",
-                                            hex::encode(pin), e.peer, hex::encode(e.pin), pending.len()
-                                        );
-                                    }
-                                }
-                            }
+                            // Cap the per-wake batch drain (FIRST_AUDIT_DRAIN_BATCH)
+                            // so a sustained flood can't starve the launch phase.
+                            ingest_first_audit_event(
+                                &mut pending, &first_audited, &observability,
+                                e, Instant::now(), pending_capacity,
+                            );
                             let mut drained = 1usize;
                             while drained < config::FIRST_AUDIT_DRAIN_BATCH {
                                 match rx.try_recv() {
                                     Ok(e) => {
-                                        observability.received.fetch_add(1, Ordering::Relaxed);
-                                        if first_audited.contains(&e.pin) {
-                                            observability
-                                                .duplicates
-                                                .fetch_add(1, Ordering::Relaxed);
-                                        } else {
-                                            match queue_first_audit_event(&mut pending, e) {
-                                                FirstAuditQueueOutcome::Queued => {
-                                                    observability
-                                                        .queued
-                                                        .fetch_add(1, Ordering::Relaxed);
-                                                }
-                                                FirstAuditQueueOutcome::Coalesced => {
-                                                    observability
-                                                        .coalesced
-                                                        .fetch_add(1, Ordering::Relaxed);
-                                                }
-                                                FirstAuditQueueOutcome::CapacityEvicted { .. } => {
-                                                    observability
-                                                        .queued
-                                                        .fetch_add(1, Ordering::Relaxed);
-                                                    observability
-                                                        .capacity_evicted
-                                                        .fetch_add(1, Ordering::Relaxed);
-                                                }
-                                            }
-                                        }
+                                        ingest_first_audit_event(
+                                            &mut pending, &first_audited, &observability,
+                                            e, Instant::now(), pending_capacity,
+                                        );
                                         drained += 1;
                                     }
                                     Err(_) => break,
                                 }
                             }
-                            true
                         }
                         None => break,
                     },
-                    _ = tick.tick() => false,
-                };
-                let _ = drained_new;
+                    _ = tick.tick() => {},
+                    // Reap a finished audit task. Guarded so `join_next` is never
+                    // polled on an empty set (it would return `None` and busy-spin).
+                    Some(_res) = audits.join_next(), if !audits.is_empty() => {},
+                }
 
                 if last_summary.elapsed() >= config::FIRST_AUDIT_SUMMARY_INTERVAL {
                     info!(
-                        "First-audit scheduler summary: audit_trigger=first_monetized received={} queued={} coalesced={} duplicates={} capacity_evicted={} cooldown_deferred_attempts={} launched={} passed={} timeout={} failed={} bootstrap_claims={} idle={} insufficient_keys={} outside_answerability_window={} pending={} inflight={}",
+                        "First-audit scheduler summary: audit_trigger=first_monetized received={} queued={} coalesced={} duplicates={} capacity_evicted={} cooldown_deferred_attempts={} rate_limited={} expired={} outside_answerability_window={} launched={} passed={} timeout={} transport_failed={} failed={} bootstrap_claims={} idle={} insufficient_keys={} pending={} queue_capacity={} inflight={} global_limit={}",
                         observability.received.load(Ordering::Relaxed),
                         observability.queued.load(Ordering::Relaxed),
                         observability.coalesced.load(Ordering::Relaxed),
                         observability.duplicates.load(Ordering::Relaxed),
                         observability.capacity_evicted.load(Ordering::Relaxed),
                         observability.cooldown_deferred_attempts.load(Ordering::Relaxed),
+                        observability.rate_limited.load(Ordering::Relaxed),
+                        observability.expired.load(Ordering::Relaxed),
+                        observability.outside_answerability_window.load(Ordering::Relaxed),
                         observability.launched.load(Ordering::Relaxed),
                         observability.passed.load(Ordering::Relaxed),
                         observability.timed_out.load(Ordering::Relaxed),
+                        observability.transport_failed.load(Ordering::Relaxed),
                         observability.failed.load(Ordering::Relaxed),
                         observability.bootstrap_claims.load(Ordering::Relaxed),
                         observability.idle.load(Ordering::Relaxed),
                         observability.insufficient_keys.load(Ordering::Relaxed),
-                        observability.outside_answerability_window.load(Ordering::Relaxed),
                         pending.len(),
+                        pending_capacity,
                         observability.inflight.load(Ordering::Relaxed),
+                        global_limit,
                     );
                     last_summary = Instant::now();
                 }
@@ -1058,73 +1294,183 @@ impl ReplicationEngine {
                     continue;
                 }
 
-                // Try to launch an audit for each pending peer; keep the ones
-                // still blocked by cooldown for the next tick. Drain into a vec
-                // first so we can re-insert the still-blocked ones afterwards
-                // (LruCache has no drain). `iter()` yields most- to least-recently-
-                // used; we reverse so re-inserting blocked entries below restores
-                // their relative recency (oldest re-put first → stays the eviction
-                // victim, newest stays most-recently-used).
-                let snapshot: Vec<(PeerId, MonetizedPinEvent)> =
+                // Launch phase. Drain into a vec so we can re-insert the still-
+                // pending entries afterwards (LruCache has no drain). `iter()`
+                // yields most- to least-recently-used; we reverse so re-inserting
+                // deferred entries restores their relative recency (oldest re-put
+                // first → stays the eviction victim, newest stays MRU). `now` is
+                // captured once for the whole pass (the pass is fast).
+                let now = Instant::now();
+                let snapshot: Vec<(PeerId, PendingFirstAudit)> =
                     pending.iter().rev().map(|(p, e)| (*p, *e)).collect();
                 pending.clear();
-                for (peer, event) in snapshot {
+                for (peer, mut entry) in snapshot {
+                    let pin = entry.event.pin;
+                    let key_count = entry.event.key_count;
                     // Dedup: a pin already first-audited is dropped (done).
-                    if first_audited.contains(&event.pin) {
+                    if first_audited.contains(&pin) {
                         observability.duplicates.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
-                    // ADR-0004 A1 (guardrail A): only first-audit a pin whose SIGNED
-                    // quote_ts lands inside the answerability window. With grace
-                    // removed, auditing an out-of-window pin the responder may have
-                    // aged out would false-convict, so a stale OR far-future/skewed
-                    // quote is skipped. Legit first-audits fire moments after
-                    // payment (quote_ts ≈ now); a skipped pin can still be
-                    // gossip-lottery audited.
-                    if !quote_within_audit_window(event.quote_ts, SystemTime::now()) {
+                    // ADR-0004 A1 (guardrail A): only first-audit a pin whose
+                    // SIGNED quote_ts lands inside the answerability window.
+                    // Auditing an out-of-window pin the responder may have aged
+                    // out would false-convict. A pin that has LEFT the window is
+                    // expired (distinct cause: reason=answerability_window); it can
+                    // still be gossip-lottery audited later.
+                    if !quote_within_audit_window(entry.event.quote_ts, SystemTime::now()) {
                         observability
                             .outside_answerability_window
                             .fetch_add(1, Ordering::Relaxed);
                         debug!(
-                            "First-audit scheduler: audit_trigger=first_monetized outcome=outside_answerability_window peer={peer} pin={} key_count={} pending={}",
-                            hex::encode(event.pin), event.key_count, pending.len()
+                            "First-audit scheduler: audit_trigger=first_monetized first_audit_outcome=expired reason=answerability_window peer={peer} pin={} key_count={key_count} pending_age_ms={} retry_count={} queue_depth={}",
+                            hex::encode(pin),
+                            now.saturating_duration_since(entry.enqueued).as_millis(),
+                            entry.retry_count,
+                            pending.len(),
                         );
                         continue;
                     }
-                    // Cooldown: if the peer's per-peer audit window is closed, keep
-                    // this pin pending and retry on a later tick once it reopens.
-                    // We do NOT treat "cooldown closed" as "already audited" (a
-                    // losing gossip lottery can stamp the window without auditing),
-                    // so the pin stays pending until it gets a REAL first audit; it
-                    // is only ever evicted by the LRU memory backstop above, which
-                    // drops the least-recently-monetized peer, not this newest one.
+                    // Bounded retry / residence: a pin that never becomes
+                    // launchable is expired rather than retried indefinitely.
+                    match first_audit_pending_disposition(
+                        &entry,
+                        now,
+                        config.first_audit_max_retries,
+                        config.first_audit_max_residence,
+                    ) {
+                        FirstAuditDisposition::Expire(reason) => {
+                            observability.expired.fetch_add(1, Ordering::Relaxed);
+                            debug!(
+                                "First-audit scheduler: audit_trigger=first_monetized first_audit_outcome=expired reason={} peer={peer} pin={} key_count={key_count} pending_age_ms={} retry_count={} queue_depth={}",
+                                reason.as_str(),
+                                hex::encode(pin),
+                                now.saturating_duration_since(entry.enqueued).as_millis(),
+                                entry.retry_count,
+                                pending.len(),
+                            );
+                            continue;
+                        }
+                        FirstAuditDisposition::Defer => {
+                            // Not yet time to reattempt (jittered back-off) — keep
+                            // pending without spending a retry.
+                            pending.put(peer, entry);
+                            continue;
+                        }
+                        FirstAuditDisposition::Ready => {}
+                    }
+                    // Cooldown (early, NON-stamping peek): if the peer's audit
+                    // window is closed, defer WITHOUT consuming a launch token or
+                    // stamping the SHARED gossip-cooldown map. Only an actual
+                    // launch stamps it (final check below), so a bounded / blocked
+                    // first audit never suppresses the gossip-lottery path. A
+                    // losing gossip lottery can stamp the window without auditing,
+                    // so a closed window is NOT treated as "already audited".
                     {
-                        let now = Instant::now();
-                        let mut map = gossip_audit.cooldown.write().await;
-                        if !cooldown_allows_audit(&mut map, &peer, now) {
-                            pending.put(peer, event);
+                        let open = {
+                            let map = gossip_audit.cooldown.read().await;
+                            cooldown_is_open(&map, &peer, now)
+                        };
+                        if !open {
+                            entry.retry_count += 1;
+                            entry.next_retry_at = first_audit_next_retry(
+                                now,
+                                config::FIRST_AUDIT_RETRY_INTERVAL,
+                                random_first_audit_jitter(config.first_audit_retry_jitter),
+                            );
                             observability
                                 .cooldown_deferred_attempts
                                 .fetch_add(1, Ordering::Relaxed);
                             debug!(
-                                "First-audit scheduler: audit_trigger=first_monetized outcome=cooldown_deferred peer={peer} pin={} key_count={} pending={}",
-                                hex::encode(event.pin), event.key_count, pending.len()
+                                "First-audit scheduler: audit_trigger=first_monetized first_audit_outcome=cooldown_deferred peer={peer} pin={} key_count={key_count} retry_count={} queue_depth={}",
+                                hex::encode(pin), entry.retry_count, pending.len(),
                             );
+                            pending.put(peer, entry);
                             continue;
                         }
                     }
-                    // Audit is launching: now mark the pin first-audited.
-                    first_audited.put(event.pin, ());
+                    // Global launch-rate budget: out of tokens → rate_limited
+                    // (reason=rate), defer with a jittered back-off.
+                    if !rate.try_acquire(now) {
+                        entry.retry_count += 1;
+                        entry.next_retry_at = first_audit_next_retry(
+                            now,
+                            config::FIRST_AUDIT_RETRY_INTERVAL,
+                            random_first_audit_jitter(config.first_audit_retry_jitter),
+                        );
+                        observability.rate_limited.fetch_add(1, Ordering::Relaxed);
+                        debug!(
+                            "First-audit scheduler: audit_trigger=first_monetized first_audit_outcome=rate_limited reason=rate peer={peer} pin={} key_count={key_count} retry_count={} queue_depth={}",
+                            hex::encode(pin), entry.retry_count, pending.len(),
+                        );
+                        pending.put(peer, entry);
+                        continue;
+                    }
+                    // Global concurrency budget: no permit → rate_limited
+                    // (reason=concurrency), defer. The permit is held for the
+                    // whole audit below, covering round-one and round-two.
+                    let Ok(permit) = Arc::clone(&concurrency).try_acquire_owned() else {
+                        entry.retry_count += 1;
+                        entry.next_retry_at = first_audit_next_retry(
+                            now,
+                            config::FIRST_AUDIT_RETRY_INTERVAL,
+                            random_first_audit_jitter(config.first_audit_retry_jitter),
+                        );
+                        observability.rate_limited.fetch_add(1, Ordering::Relaxed);
+                        debug!(
+                            "First-audit scheduler: audit_trigger=first_monetized first_audit_outcome=rate_limited reason=concurrency peer={peer} pin={} key_count={key_count} global_inflight={} global_limit={global_limit} retry_count={} queue_depth={}",
+                            hex::encode(pin),
+                            observability.inflight.load(Ordering::Relaxed),
+                            entry.retry_count, pending.len(),
+                        );
+                        pending.put(peer, entry);
+                        continue;
+                    };
+                    // Cooldown (final check-and-stamp): stamp the shared window
+                    // ONLY now that rate + concurrency have admitted the launch, so
+                    // a stamp always corresponds to an actual audit and never
+                    // suppresses the gossip path for blocked work. A rare race with
+                    // a concurrent gossip audit (peek open → stamp closed) defers,
+                    // releasing the just-acquired permit.
+                    {
+                        let mut map = gossip_audit.cooldown.write().await;
+                        if !cooldown_allows_audit(&mut map, &peer, now) {
+                            drop(map);
+                            drop(permit);
+                            entry.retry_count += 1;
+                            entry.next_retry_at = first_audit_next_retry(
+                                now,
+                                config::FIRST_AUDIT_RETRY_INTERVAL,
+                                random_first_audit_jitter(config.first_audit_retry_jitter),
+                            );
+                            observability
+                                .cooldown_deferred_attempts
+                                .fetch_add(1, Ordering::Relaxed);
+                            debug!(
+                                "First-audit scheduler: audit_trigger=first_monetized first_audit_outcome=cooldown_deferred reason=race peer={peer} pin={} key_count={key_count} retry_count={} queue_depth={}",
+                                hex::encode(pin), entry.retry_count, pending.len(),
+                            );
+                            pending.put(peer, entry);
+                            continue;
+                        }
+                    }
+                    // Launch: mark the pin first-audited and spawn the audit.
+                    first_audited.put(pin, ());
                     observability.launched.fetch_add(1, Ordering::Relaxed);
                     observability.inflight.fetch_add(1, Ordering::Relaxed);
                     debug!(
-                        "First-audit scheduler: audit_trigger=first_monetized outcome=launched peer={peer} pin={} key_count={} pending={} inflight={}",
-                        hex::encode(event.pin), event.key_count, pending.len(),
-                        observability.inflight.load(Ordering::Relaxed)
+                        "First-audit scheduler: audit_trigger=first_monetized first_audit_outcome=launched peer={peer} pin={} key_count={key_count} global_inflight={} global_limit={global_limit} queue_depth={}",
+                        hex::encode(pin),
+                        observability.inflight.load(Ordering::Relaxed),
+                        pending.len(),
                     );
                     let trigger = gossip_audit.clone();
                     let audit_observability = Arc::clone(&observability);
-                    tokio::spawn(async move {
+                    let event = entry.event;
+                    audits.spawn(async move {
+                        // Hold the concurrency permit for the whole audit so both
+                        // rounds count against the global budget.
+                        let _permit = permit;
                         let started = Instant::now();
                         let credit = storage_commitment_audit::AuditCredit {
                             recent_provers: &trigger.recent_provers,
@@ -1144,11 +1490,14 @@ impl ReplicationEngine {
                                 audit_observability.passed.fetch_add(1, Ordering::Relaxed);
                             }
                             FirstAuditTerminalOutcome::Timeout => {
+                                audit_observability.timed_out.fetch_add(1, Ordering::Relaxed);
+                            }
+                            FirstAuditTerminalOutcome::TransportFailed => {
                                 audit_observability
-                                    .timed_out
+                                    .transport_failed
                                     .fetch_add(1, Ordering::Relaxed);
                             }
-                            FirstAuditTerminalOutcome::Failed => {
+                            FirstAuditTerminalOutcome::ProofFailed => {
                                 audit_observability.failed.fetch_add(1, Ordering::Relaxed);
                             }
                             FirstAuditTerminalOutcome::BootstrapClaim => {
@@ -1167,11 +1516,11 @@ impl ReplicationEngine {
                         }
                         audit_observability.inflight.fetch_sub(1, Ordering::Relaxed);
                         debug!(
-                            "First-audit scheduler: audit_trigger=first_monetized outcome={} peer={} pin={} key_count={} elapsed_ms={} inflight={}",
+                            "First-audit scheduler: audit_trigger=first_monetized first_audit_outcome={} peer={} pin={} key_count={} elapsed_ms={} global_inflight={} global_limit={global_limit}",
                             outcome.as_str(),
                             event.peer, hex::encode(event.pin), event.key_count,
                             started.elapsed().as_millis(),
-                            audit_observability.inflight.load(Ordering::Relaxed)
+                            audit_observability.inflight.load(Ordering::Relaxed),
                         );
                         handle_subtree_audit_result(
                             &result,
@@ -1184,7 +1533,10 @@ impl ReplicationEngine {
                     });
                 }
             }
-            debug!("First-audit drainer shut down");
+            // Clean shutdown: abort and await any in-flight audit tasks so none
+            // are orphaned past the drainer's lifetime.
+            audits.shutdown().await;
+            debug!("First-audit drainer shut down (in-flight audits drained)");
         });
         self.task_handles.push(handle);
     }
@@ -4340,10 +4692,15 @@ async fn handle_subtree_failed_audit(
     sync_state: &Arc<RwLock<NeighborSyncState>>,
     recent_provers: &Arc<RwLock<RecentProvers>>,
 ) {
-    if matches!(reason, AuditFailureReason::Timeout) {
+    // V2-624: Transport failures are graced exactly like Timeout — a local
+    // transport/send failure is never the responder's fault.
+    if matches!(
+        reason,
+        AuditFailureReason::Timeout | AuditFailureReason::Transport
+    ) {
         debug!(
-            "Audit timeout for {challenged_peer} fully graced \
-             (subtree audit does not evict on timeout)"
+            "Audit {reason:?} for {challenged_peer} fully graced \
+             (subtree audit does not evict on timeout/transport)"
         );
         return;
     }
@@ -4480,7 +4837,13 @@ async fn handle_subtree_audit_result(
 /// the bootstrap claim but are still reported as audit failures, matching the
 /// pre-ADR-0002 behaviour.
 fn audit_failure_clears_bootstrap_claim(reason: &AuditFailureReason) -> bool {
-    !matches!(reason, AuditFailureReason::Timeout)
+    // V2-624: Transport joins Timeout in the non-confirming lane — neither clears
+    // an active bootstrap claim (the peer may still be legitimately bootstrapping
+    // or simply unreachable).
+    !matches!(
+        reason,
+        AuditFailureReason::Timeout | AuditFailureReason::Transport
+    )
 }
 
 /// Handle the result of a responsible-chunk audit tick (audit #2): emit trust
@@ -4597,7 +4960,12 @@ async fn handle_audit_result(
 /// dropped packet must not strip an honest peer; the 40-min TTL is the
 /// deliberate liveness cushion there.
 fn audit_failure_revokes_holder_credit(reason: &AuditFailureReason) -> bool {
-    !matches!(reason, AuditFailureReason::Timeout)
+    // V2-624: Transport is graced like Timeout — a transport/send failure never
+    // proves the peer stopped holding, so it must not strip holder credit.
+    !matches!(
+        reason,
+        AuditFailureReason::Timeout | AuditFailureReason::Transport
+    )
 }
 
 /// Apply the holder-credit revocation decision for a confirmed audit
@@ -4673,6 +5041,26 @@ pub struct MonetizedPinEvent {
 /// peers. Pure over the passed map so the flood/cooldown behaviour is testable
 /// without a live node: a burst of gossips from one peer yields at most one
 /// `true` per cooldown window.
+/// V2-624: non-stamping companion to [`cooldown_allows_audit`] — whether
+/// `peer`'s cooldown window is currently open, WITHOUT recording a stamp.
+///
+/// The cooldown map is shared with the gossip-lottery path, and
+/// `cooldown_allows_audit` is check-and-stamp: a stamp suppresses BOTH paths for
+/// the window. So the first-audit scheduler must stamp only when it actually
+/// launches. This read-only peek lets the scheduler cheaply defer a
+/// cooldown-blocked pin as an early filter (before it consumes a launch token or
+/// touches the shared map); the real check-and-stamp stays the final gate before
+/// launch, preserving the invariant "a stamp corresponds to an actual audit".
+fn cooldown_is_open(map: &HashMap<PeerId, Instant>, peer: &PeerId, now: Instant) -> bool {
+    match map.get(peer) {
+        Some(&last) => {
+            now.saturating_duration_since(last)
+                >= Duration::from_secs(config::AUDIT_ON_GOSSIP_COOLDOWN_SECS)
+        }
+        None => true,
+    }
+}
+
 fn cooldown_allows_audit(map: &mut HashMap<PeerId, Instant>, peer: &PeerId, now: Instant) -> bool {
     let cooldown = Duration::from_secs(config::AUDIT_ON_GOSSIP_COOLDOWN_SECS);
     let known = match map.get(peer) {
@@ -5308,9 +5696,12 @@ mod tests {
     use super::{
         apply_audit_failure_credit_revocation, audit_failure_clears_bootstrap_claim,
         audit_failure_revokes_holder_credit, audit_launch_decision, config, cooldown_allows_audit,
-        first_audit_terminal_outcome, first_failed_key_label, fresh_offer_payment_context,
+        cooldown_is_open, first_audit_next_retry, first_audit_pending_disposition,
+        first_audit_terminal_outcome,
+        first_failed_key_label, fresh_offer_payment_context, ingest_first_audit_event,
         paid_notify_payment_context, queue_first_audit_event, quote_within_audit_window,
-        FirstAuditQueueOutcome, FirstAuditTerminalOutcome, MonetizedPinEvent,
+        FirstAuditDisposition, FirstAuditExpiry, FirstAuditObservability, FirstAuditQueueOutcome,
+        FirstAuditTerminalOutcome, LaunchRateLimiter, MonetizedPinEvent, PendingFirstAudit,
         MONETIZED_AUDIT_SKEW_MARGIN,
     };
     use crate::payment::VerificationContext;
@@ -5344,13 +5735,13 @@ mod tests {
             challenged_peer: peer,
             keys_checked: 1,
         };
-        let timed_out = AuditTickResult::Failed {
+        let failure = |reason: AuditFailureReason| AuditTickResult::Failed {
             evidence: FailureEvidence::AuditFailure {
                 challenge_id: 1,
                 challenged_peer: peer,
                 confirmed_failed_keys: vec![test_key(1)],
                 summary: AuditFailureSummary::default(),
-                reason: AuditFailureReason::Timeout,
+                reason,
             },
         };
 
@@ -5359,8 +5750,18 @@ mod tests {
             FirstAuditTerminalOutcome::Passed
         );
         assert_eq!(
-            first_audit_terminal_outcome(&timed_out),
+            first_audit_terminal_outcome(&failure(AuditFailureReason::Timeout)),
             FirstAuditTerminalOutcome::Timeout
+        );
+        // V2-624: transport failures map to their own terminal outcome, distinct
+        // from a response deadline and from a confirmed proof failure.
+        assert_eq!(
+            first_audit_terminal_outcome(&failure(AuditFailureReason::Transport)),
+            FirstAuditTerminalOutcome::TransportFailed
+        );
+        assert_eq!(
+            first_audit_terminal_outcome(&failure(AuditFailureReason::DigestMismatch)),
+            FirstAuditTerminalOutcome::ProofFailed
         );
         assert_eq!(
             first_audit_terminal_outcome(&AuditTickResult::Idle),
@@ -5368,7 +5769,11 @@ mod tests {
         );
         assert_eq!(FirstAuditTerminalOutcome::Passed.as_str(), "passed");
         assert_eq!(FirstAuditTerminalOutcome::Timeout.as_str(), "timeout");
-        assert_eq!(FirstAuditTerminalOutcome::Failed.as_str(), "failed");
+        assert_eq!(
+            FirstAuditTerminalOutcome::TransportFailed.as_str(),
+            "transport_failed"
+        );
+        assert_eq!(FirstAuditTerminalOutcome::ProofFailed.as_str(), "proof_failed");
         assert_eq!(FirstAuditTerminalOutcome::Idle.as_str(), "idle");
         assert_eq!(
             FirstAuditTerminalOutcome::InsufficientKeys.as_str(),
@@ -5382,6 +5787,7 @@ mod tests {
 
     #[test]
     fn first_audit_queue_exposes_coalescing_and_capacity_eviction() {
+        let now = Instant::now();
         let mut pending = LruCache::new(NonZeroUsize::new(1).unwrap());
         let first = MonetizedPinEvent {
             peer: test_peer(1),
@@ -5400,15 +5806,19 @@ mod tests {
         };
 
         assert_eq!(
-            queue_first_audit_event(&mut pending, first),
+            queue_first_audit_event(&mut pending, first, now),
             FirstAuditQueueOutcome::Queued
         );
+        // Same-peer newer pin coalesces, reporting the superseded older pin.
         assert_eq!(
-            queue_first_audit_event(&mut pending, replacement),
-            FirstAuditQueueOutcome::Coalesced
+            queue_first_audit_event(&mut pending, replacement, now),
+            FirstAuditQueueOutcome::Superseded {
+                superseded_pin: first.pin,
+            }
         );
+        // Different peer at capacity evicts the least-recently-monetized entry.
         assert_eq!(
-            queue_first_audit_event(&mut pending, other_peer),
+            queue_first_audit_event(&mut pending, other_peer, now),
             FirstAuditQueueOutcome::CapacityEvicted {
                 peer: first.peer,
                 pin: replacement.pin,
@@ -5416,9 +5826,182 @@ mod tests {
         );
         assert_eq!(pending.len(), 1);
         assert_eq!(
-            pending.peek(&other_peer.peer).map(|event| event.pin),
+            pending.peek(&other_peer.peer).map(|entry| entry.event.pin),
             Some([3; 32])
         );
+    }
+
+    fn test_event(peer: u8, pin: u8) -> MonetizedPinEvent {
+        MonetizedPinEvent {
+            peer: test_peer(peer),
+            pin: [pin; 32],
+            key_count: 1,
+            quote_ts: SystemTime::now(),
+        }
+    }
+
+    // V2-624: a fresher same-peer pin resets the pending scheduling metadata so
+    // it gets its own residence/retry budget (it is fresh work).
+    #[test]
+    fn coalescing_resets_pending_metadata() {
+        let t0 = Instant::now();
+        let mut pending = LruCache::new(NonZeroUsize::new(4).unwrap());
+        assert_eq!(
+            queue_first_audit_event(&mut pending, test_event(1, 1), t0),
+            FirstAuditQueueOutcome::Queued
+        );
+        let later = t0 + Duration::from_secs(120);
+        assert_eq!(
+            queue_first_audit_event(&mut pending, test_event(1, 2), later),
+            FirstAuditQueueOutcome::Superseded {
+                superseded_pin: [1; 32],
+            }
+        );
+        let entry = pending.peek(&test_peer(1)).copied().unwrap();
+        assert_eq!(entry.event.pin, [2; 32]);
+        assert_eq!(entry.retry_count, 0);
+        assert_eq!(entry.enqueued, later, "enqueue clock resets to the new pin");
+    }
+
+    // V2-624: the pure disposition helper drives launch / defer / expire without
+    // an async clock (injected `now`), matching the existing pure-helper style.
+    #[test]
+    fn pending_disposition_launch_defer_expire() {
+        let t0 = Instant::now();
+        let max_retries = 3;
+        let max_residence = Duration::from_secs(1800);
+        let base = PendingFirstAudit::new(test_event(1, 1), t0);
+
+        // Ready: within budgets and next_retry_at has arrived.
+        assert_eq!(
+            first_audit_pending_disposition(&base, t0, max_retries, max_residence),
+            FirstAuditDisposition::Ready
+        );
+
+        // Defer: next_retry_at is in the future.
+        let deferred = PendingFirstAudit {
+            next_retry_at: t0 + Duration::from_secs(30),
+            ..base
+        };
+        assert_eq!(
+            first_audit_pending_disposition(&deferred, t0, max_retries, max_residence),
+            FirstAuditDisposition::Defer
+        );
+        // ...and becomes Ready once that instant passes.
+        assert_eq!(
+            first_audit_pending_disposition(
+                &deferred,
+                t0 + Duration::from_secs(31),
+                max_retries,
+                max_residence
+            ),
+            FirstAuditDisposition::Ready
+        );
+
+        // Expire on residence: enqueued longer ago than max_residence.
+        assert_eq!(
+            first_audit_pending_disposition(
+                &base,
+                t0 + max_residence + Duration::from_secs(1),
+                max_retries,
+                max_residence
+            ),
+            FirstAuditDisposition::Expire(FirstAuditExpiry::Residence)
+        );
+
+        // Expire on retry budget: retry_count exceeds max_retries.
+        let exhausted = PendingFirstAudit {
+            retry_count: max_retries + 1,
+            ..base
+        };
+        assert_eq!(
+            first_audit_pending_disposition(&exhausted, t0, max_retries, max_residence),
+            FirstAuditDisposition::Expire(FirstAuditExpiry::RetryExhausted)
+        );
+    }
+
+    #[test]
+    fn next_retry_adds_base_and_jitter() {
+        let t0 = Instant::now();
+        let at = first_audit_next_retry(t0, Duration::from_secs(60), Duration::from_secs(5));
+        assert_eq!(at, t0 + Duration::from_secs(65));
+        // Zero jitter is exactly the base interval.
+        assert_eq!(
+            first_audit_next_retry(t0, Duration::from_secs(60), Duration::ZERO),
+            t0 + Duration::from_secs(60)
+        );
+    }
+
+    // V2-624: the token bucket bounds the global launch rate independently of the
+    // enqueue rate. Deterministic over an injected clock.
+    #[test]
+    fn launch_rate_limiter_bounds_and_refills() {
+        let t0 = Instant::now();
+        let mut rate = LaunchRateLimiter::new(3, Duration::from_secs(1), t0);
+        // Burst of 3 tokens, then empty.
+        assert!(rate.try_acquire(t0));
+        assert!(rate.try_acquire(t0));
+        assert!(rate.try_acquire(t0));
+        assert!(!rate.try_acquire(t0), "bucket is empty after the burst");
+        // No time passed -> still empty.
+        assert!(!rate.try_acquire(t0));
+        // One interval later -> exactly one token refilled.
+        let t1 = t0 + Duration::from_secs(1);
+        assert!(rate.try_acquire(t1));
+        assert!(!rate.try_acquire(t1));
+        // A long idle refills only up to capacity (no unbounded banking).
+        let t2 = t1 + Duration::from_secs(10_000);
+        assert!(rate.try_acquire(t2));
+        assert!(rate.try_acquire(t2));
+        assert!(rate.try_acquire(t2));
+        assert!(!rate.try_acquire(t2), "capped at capacity=3");
+    }
+
+    // V2-624: the peek must NOT stamp the shared cooldown map — only an actual
+    // launch (via cooldown_allows_audit) does. Otherwise a blocked first audit
+    // would suppress the gossip-lottery path for the whole window.
+    #[test]
+    fn cooldown_peek_is_non_stamping() {
+        let t0 = Instant::now();
+        let peer = test_peer(1);
+        let mut map = HashMap::new();
+        // Fresh peer: window is open, and repeated peeks leave it open (no stamp).
+        assert!(cooldown_is_open(&map, &peer, t0));
+        assert!(cooldown_is_open(&map, &peer, t0));
+        assert!(map.is_empty(), "peek recorded no stamp");
+        // A real launch stamps it, closing the window for the cooldown period.
+        assert!(cooldown_allows_audit(&mut map, &peer, t0));
+        assert!(!cooldown_is_open(&map, &peer, t0));
+        // Reopens once the cooldown window elapses.
+        let later = t0 + Duration::from_secs(config::AUDIT_ON_GOSSIP_COOLDOWN_SECS);
+        assert!(cooldown_is_open(&map, &peer, later));
+    }
+
+    // V2-624: an already-first-audited pin is a duplicate and must never
+    // overwrite an unaudited pending pin for the same peer.
+    #[test]
+    fn ingest_duplicate_does_not_evict_pending() {
+        let now = Instant::now();
+        let obs = FirstAuditObservability::default();
+        let mut pending = LruCache::new(NonZeroUsize::new(4).unwrap());
+        let mut first_audited: LruCache<[u8; 32], ()> =
+            LruCache::new(NonZeroUsize::new(4).unwrap());
+
+        // Queue an unaudited pin for peer 1.
+        ingest_first_audit_event(&mut pending, &first_audited, &obs, test_event(1, 1), now, 4);
+        assert_eq!(pending.len(), 1);
+
+        // A pin already first-audited arrives for the same peer: dropped as a
+        // duplicate, leaving the pending pin intact.
+        first_audited.put([9; 32], ());
+        ingest_first_audit_event(&mut pending, &first_audited, &obs, test_event(1, 9), now, 4);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending.peek(&test_peer(1)).map(|e| e.event.pin),
+            Some([1; 32]),
+            "the unaudited pending pin is preserved"
+        );
+        assert_eq!(obs.duplicates.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     #[test]

@@ -38,7 +38,7 @@ use tokio::sync::RwLock;
 // The gossip-triggered auditor shares the engine's [`AuditTickResult`] outcome
 // type with the responsible-chunk audit (defined in [`super::audit`]), so the
 // engine can dispatch both audits' results through one match.
-use crate::replication::audit::AuditTickResult;
+use crate::replication::audit::{classify_audit_send_error, AuditTickResult};
 
 // ---------------------------------------------------------------------------
 // Auditor side
@@ -202,8 +202,23 @@ pub async fn run_subtree_audit(
     {
         Ok(resp) => resp,
         Err(e) => {
-            debug!("Audit: subtree challenge to {challenged_peer} timed out / failed: {e}");
-            return failed(challenged_peer, challenge_id, AuditFailureReason::Timeout);
+            // V2-624: distinguish a genuine response-deadline timeout from a
+            // retryable local transport/send failure so the first-audit
+            // scheduler can classify the outcome. Both are graced identically
+            // (no trust penalty) — this only refines observability and the
+            // scheduler's terminal-outcome taxonomy.
+            let err_str = e.to_string();
+            let reason = if classify_audit_send_error(&err_str) == "timeout" {
+                AuditFailureReason::Timeout
+            } else {
+                AuditFailureReason::Transport
+            };
+            debug!(
+                "Audit: subtree challenge to {challenged_peer} failed \
+                 (class={}, reason={reason:?}): {e}",
+                classify_audit_send_error(&err_str)
+            );
+            return failed(challenged_peer, challenge_id, reason);
         }
     };
 
@@ -863,7 +878,9 @@ fn subtree_failure_summary(reason: &AuditFailureReason) -> AuditFailureSummary {
         ..AuditFailureSummary::default()
     };
     match reason {
-        AuditFailureReason::Timeout => {}
+        // V2-624: Transport joins the non-response lane — it is not a confirmed
+        // storage failure, so it rolls up as zero confirmed failures like Timeout.
+        AuditFailureReason::Timeout | AuditFailureReason::Transport => {}
         AuditFailureReason::DigestMismatch => {
             summary.failed_keys = 1;
             summary.digest_mismatch_keys = 1;

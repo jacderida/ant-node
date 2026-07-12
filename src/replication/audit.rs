@@ -68,7 +68,7 @@ fn first_challenged_key_label(keys: &[XorName]) -> String {
 /// The current core networking layer can wrap request deadline timeouts inside
 /// display strings, so this deliberately remains a bounded heuristic for logs
 /// rather than protocol/trust semantics.
-fn classify_audit_send_error(error: &str) -> &'static str {
+pub(crate) fn classify_audit_send_error(error: &str) -> &'static str {
     let lower = error.to_ascii_lowercase();
     if lower.contains("timed out") || lower.contains("timeout") {
         "timeout"

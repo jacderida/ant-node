@@ -3,6 +3,8 @@
 //! All messages use postcard serialization for compact, fast encoding.
 //! Peer IDs are transmitted as raw `[u8; 32]` byte arrays.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use serde::{Deserialize, Serialize};
 
 use crate::ant_protocol::XorName;
@@ -49,6 +51,10 @@ impl ReplicationMessage {
             });
         }
 
+        // V2-623: cumulative per-variant tx accounting. Every replication send
+        // funnels through here, so this is the single tx choke point.
+        record_tx(&self.body, bytes.len());
+
         Ok(bytes)
     }
 
@@ -70,8 +76,14 @@ impl ReplicationMessage {
                 max_size: MAX_REPLICATION_MESSAGE_SIZE,
             });
         }
-        postcard::from_bytes(data)
-            .map_err(|e| ReplicationProtocolError::DeserializationFailed(e.to_string()))
+        let message: Self = postcard::from_bytes(data)
+            .map_err(|e| ReplicationProtocolError::DeserializationFailed(e.to_string()))?;
+
+        // V2-623: cumulative per-variant rx accounting. Every replication
+        // receive funnels through here, so this is the single rx choke point.
+        record_rx(&message.body, data.len());
+
+        Ok(message)
     }
 }
 
@@ -138,6 +150,148 @@ pub enum ReplicationMessageBody {
     GetCommitmentByPin(GetCommitmentByPin),
     /// Response to [`Self::GetCommitmentByPin`].
     GetCommitmentByPinResponse(GetCommitmentByPinResponse),
+}
+
+// ---------------------------------------------------------------------------
+// Cumulative per-variant traffic accounting (V2-623)
+// ---------------------------------------------------------------------------
+//
+// Process-global relaxed-atomic counter table, indexed by variant. The
+// encode/decode choke points bump these on every replication tx/rx; a periodic
+// task in the replication engine emits them as `replication traffic summary
+// (cumulative)` INFO lines. Values are monotonic since process start — rates
+// are computed as deltas at query time, so a dropped/delayed log line cannot
+// corrupt the data.
+//
+// A process-global static (rather than engine-owned state) is used because the
+// encode/decode call sites are free functions scattered across the replication
+// modules that do not carry any shared engine handle.
+
+/// Number of [`ReplicationMessageBody`] variants (the counter-table width).
+const N_REPLICATION_VARIANTS: usize = 17;
+
+static REPL_TX_BYTES: [AtomicU64; N_REPLICATION_VARIANTS] =
+    [const { AtomicU64::new(0) }; N_REPLICATION_VARIANTS];
+static REPL_TX_COUNT: [AtomicU64; N_REPLICATION_VARIANTS] =
+    [const { AtomicU64::new(0) }; N_REPLICATION_VARIANTS];
+static REPL_RX_BYTES: [AtomicU64; N_REPLICATION_VARIANTS] =
+    [const { AtomicU64::new(0) }; N_REPLICATION_VARIANTS];
+static REPL_RX_COUNT: [AtomicU64; N_REPLICATION_VARIANTS] =
+    [const { AtomicU64::new(0) }; N_REPLICATION_VARIANTS];
+
+impl ReplicationMessageBody {
+    /// Stable counter-table index for this variant.
+    ///
+    /// Matches declaration order. The last two variants were deliberately
+    /// appended (see the enum comment) so this order is postcard-stable.
+    pub(crate) fn variant_index(&self) -> usize {
+        match self {
+            Self::FreshReplicationOffer(_) => 0,
+            Self::FreshReplicationResponse(_) => 1,
+            Self::PaidNotify(_) => 2,
+            Self::NeighborSyncRequest(_) => 3,
+            Self::NeighborSyncResponse(_) => 4,
+            Self::VerificationRequest(_) => 5,
+            Self::VerificationResponse(_) => 6,
+            Self::FetchRequest(_) => 7,
+            Self::FetchResponse(_) => 8,
+            Self::AuditChallenge(_) => 9,
+            Self::AuditResponse(_) => 10,
+            Self::SubtreeAuditChallenge(_) => 11,
+            Self::SubtreeAuditResponse(_) => 12,
+            Self::SubtreeByteChallenge(_) => 13,
+            Self::SubtreeByteResponse(_) => 14,
+            Self::GetCommitmentByPin(_) => 15,
+            Self::GetCommitmentByPinResponse(_) => 16,
+        }
+    }
+}
+
+/// Record an encoded (tx) replication message against its variant.
+fn record_tx(body: &ReplicationMessageBody, bytes: usize) {
+    let i = body.variant_index();
+    REPL_TX_BYTES[i].fetch_add(bytes as u64, Ordering::Relaxed);
+    REPL_TX_COUNT[i].fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a decoded (rx) replication message against its variant.
+fn record_rx(body: &ReplicationMessageBody, bytes: usize) {
+    let i = body.variant_index();
+    REPL_RX_BYTES[i].fetch_add(bytes as u64, Ordering::Relaxed);
+    REPL_RX_COUNT[i].fetch_add(1, Ordering::Relaxed);
+}
+
+/// Emit the cumulative per-variant replication traffic as INFO summary lines
+/// (V2-623), target `ant_node::replication::traffic`.
+///
+/// The fields are flat snake-case keys (`<stem>_tx_bytes`, `<stem>_rx_count`,
+/// …) so the telegraf→Elasticsearch pipeline lifts each into a first-class
+/// `tail.*` field and the acceptance query (`max` per field per hour → delta)
+/// yields per-variant MB/h directly.
+///
+/// 17 variants × 4 fields = 68 flat keys. `tracing` caps an event at 32 fields,
+/// so the keys are split across three lines that share the same `target` and
+/// message and are distinguished by a `group` field — telegraf still lifts
+/// every key into its own ES field, so the split is transparent at query time.
+pub(crate) fn log_traffic_summary() {
+    // Relaxed loads — a slightly skewed read across counters is fine because
+    // rates are computed as deltas over many intervals at query time.
+    let tb = |i: usize| REPL_TX_BYTES[i].load(Ordering::Relaxed);
+    let tc = |i: usize| REPL_TX_COUNT[i].load(Ordering::Relaxed);
+    let rb = |i: usize| REPL_RX_BYTES[i].load(Ordering::Relaxed);
+    let rc = |i: usize| REPL_RX_COUNT[i].load(Ordering::Relaxed);
+
+    crate::logging::info!(
+        target: "ant_node::replication::traffic",
+        group = 1,
+        fresh_offer_tx_bytes = tb(0), fresh_offer_tx_count = tc(0),
+        fresh_offer_rx_bytes = rb(0), fresh_offer_rx_count = rc(0),
+        fresh_response_tx_bytes = tb(1), fresh_response_tx_count = tc(1),
+        fresh_response_rx_bytes = rb(1), fresh_response_rx_count = rc(1),
+        paid_notify_tx_bytes = tb(2), paid_notify_tx_count = tc(2),
+        paid_notify_rx_bytes = rb(2), paid_notify_rx_count = rc(2),
+        neighbor_sync_request_tx_bytes = tb(3), neighbor_sync_request_tx_count = tc(3),
+        neighbor_sync_request_rx_bytes = rb(3), neighbor_sync_request_rx_count = rc(3),
+        neighbor_sync_response_tx_bytes = tb(4), neighbor_sync_response_tx_count = tc(4),
+        neighbor_sync_response_rx_bytes = rb(4), neighbor_sync_response_rx_count = rc(4),
+        verification_request_tx_bytes = tb(5), verification_request_tx_count = tc(5),
+        verification_request_rx_bytes = rb(5), verification_request_rx_count = rc(5),
+        "replication traffic summary (cumulative)"
+    );
+    crate::logging::info!(
+        target: "ant_node::replication::traffic",
+        group = 2,
+        verification_response_tx_bytes = tb(6), verification_response_tx_count = tc(6),
+        verification_response_rx_bytes = rb(6), verification_response_rx_count = rc(6),
+        fetch_request_tx_bytes = tb(7), fetch_request_tx_count = tc(7),
+        fetch_request_rx_bytes = rb(7), fetch_request_rx_count = rc(7),
+        fetch_response_tx_bytes = tb(8), fetch_response_tx_count = tc(8),
+        fetch_response_rx_bytes = rb(8), fetch_response_rx_count = rc(8),
+        audit_challenge_tx_bytes = tb(9), audit_challenge_tx_count = tc(9),
+        audit_challenge_rx_bytes = rb(9), audit_challenge_rx_count = rc(9),
+        audit_response_tx_bytes = tb(10), audit_response_tx_count = tc(10),
+        audit_response_rx_bytes = rb(10), audit_response_rx_count = rc(10),
+        subtree_audit_challenge_tx_bytes = tb(11), subtree_audit_challenge_tx_count = tc(11),
+        subtree_audit_challenge_rx_bytes = rb(11), subtree_audit_challenge_rx_count = rc(11),
+        "replication traffic summary (cumulative)"
+    );
+    crate::logging::info!(
+        target: "ant_node::replication::traffic",
+        group = 3,
+        subtree_audit_response_tx_bytes = tb(12), subtree_audit_response_tx_count = tc(12),
+        subtree_audit_response_rx_bytes = rb(12), subtree_audit_response_rx_count = rc(12),
+        subtree_byte_challenge_tx_bytes = tb(13), subtree_byte_challenge_tx_count = tc(13),
+        subtree_byte_challenge_rx_bytes = rb(13), subtree_byte_challenge_rx_count = rc(13),
+        subtree_byte_response_tx_bytes = tb(14), subtree_byte_response_tx_count = tc(14),
+        subtree_byte_response_rx_bytes = rb(14), subtree_byte_response_rx_count = rc(14),
+        get_commitment_by_pin_tx_bytes = tb(15), get_commitment_by_pin_tx_count = tc(15),
+        get_commitment_by_pin_rx_bytes = rb(15), get_commitment_by_pin_rx_count = rc(15),
+        get_commitment_by_pin_response_tx_bytes = tb(16),
+        get_commitment_by_pin_response_tx_count = tc(16),
+        get_commitment_by_pin_response_rx_bytes = rb(16),
+        get_commitment_by_pin_response_rx_count = rc(16),
+        "replication traffic summary (cumulative)"
+    );
 }
 
 // ---------------------------------------------------------------------------

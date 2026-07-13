@@ -57,7 +57,7 @@ use crate::payment::{PaymentVerifier, VerificationContext};
 use crate::replication::audit::AuditTickResult;
 use crate::replication::commitment::{commitment_hash, StorageCommitment};
 use crate::replication::commitment_state::{
-    PeerCommitmentRecord, PersistedRetention, ResponderCommitmentState,
+    PeerCommitmentRecord, PersistedRetention, ResponderCommitmentState, GOSSIP_ANSWERABILITY_TTL,
 };
 use crate::replication::config::{
     max_parallel_fetch, storage_admission_width, ReplicationConfig, MAX_AUDIT_RESPONSES_PER_PEER,
@@ -78,6 +78,7 @@ use crate::replication::types::{
 use crate::storage::LmdbStorage;
 use saorsa_core::identity::{NodeIdentity, PeerId};
 use saorsa_core::{DhtNetworkEvent, P2PEvent, P2PNode, TrustEvent};
+use saorsa_pqc::api::sig::{MlDsaSecretKey, MlDsaVariant};
 
 #[derive(Default)]
 struct FirstAuditObservability {
@@ -280,8 +281,7 @@ fn quote_within_audit_window(quote_ts: SystemTime, now: SystemTime) -> bool {
     let too_future = quote_ts
         .duration_since(now)
         .is_ok_and(|ahead| ahead > MONETIZED_AUDIT_SKEW_MARGIN);
-    let audit_cutoff = crate::replication::commitment_state::GOSSIP_ANSWERABILITY_TTL
-        .saturating_sub(MONETIZED_AUDIT_SKEW_MARGIN);
+    let audit_cutoff = GOSSIP_ANSWERABILITY_TTL.saturating_sub(MONETIZED_AUDIT_SKEW_MARGIN);
     let too_old = now
         .duration_since(quote_ts)
         .is_ok_and(|age| age >= audit_cutoff);
@@ -3239,15 +3239,15 @@ async fn run_neighbor_sync_round(
                 record.cycles_since_sync = record.cycles_since_sync.saturating_add(1);
             }
         }
-        let current_sync_epoch = {
+        {
             let mut epoch = sync_cycle_epoch.write().await;
             *epoch = epoch.saturating_add(1);
-            *epoch
-        };
+        }
 
         // Post-cycle pruning (Section 11) — runs without holding sync_state.
-        // Remote prune-confirmation audits are storage-proof audits and only
-        // run after bootstrap has drained.
+        // Prune candidacy is unconditional once the hysteresis elapses;
+        // bootstrap state only defers the remote prune-confirmation audits
+        // until bootstrap has drained.
         let allow_remote_prune_audits = !bootstrapping && bootstrap_state.read().await.is_drained();
         pruning::run_prune_pass_with_context(pruning::PrunePassContext {
             self_id: &self_id,
@@ -3257,9 +3257,6 @@ async fn run_neighbor_sync_round(
             config,
             sync_state,
             repair_proofs,
-            current_sync_epoch,
-            #[cfg(any(test, feature = "test-utils"))]
-            repair_proof_now: None,
             allow_remote_prune_audits,
             commitment_state: Some(commitment_state),
         })
@@ -4859,8 +4856,7 @@ async fn handle_commitment_downgrade(
             }
             let last = rec.last_commitment()?;
             let pin = rec.commitment_hash()?;
-            let fresh = now.saturating_duration_since(rec.received_at)
-                < crate::replication::commitment_state::GOSSIP_ANSWERABILITY_TTL;
+            let fresh = now.saturating_duration_since(rec.received_at) < GOSSIP_ANSWERABILITY_TTL;
             Some((pin, last.key_count, fresh))
         })
     };
@@ -4883,8 +4879,8 @@ async fn handle_commitment_downgrade(
             // from this peer may have refreshed `received_at` in the gap between
             // our read and write locks; if so, leave its fresh commitment intact.
             if let Some(rec) = last_commitment_by_peer.write().await.get_mut(source) {
-                let still_stale = now.saturating_duration_since(rec.received_at)
-                    >= crate::replication::commitment_state::GOSSIP_ANSWERABILITY_TTL;
+                let still_stale =
+                    now.saturating_duration_since(rec.received_at) >= GOSSIP_ANSWERABILITY_TTL;
                 if still_stale {
                     rec.clear_commitment();
                     debug!(
@@ -5158,8 +5154,6 @@ async fn rebuild_and_rotate_commitment(
     p2p: &Arc<P2PNode>,
     config: &Arc<ReplicationConfig>,
 ) -> Result<()> {
-    use saorsa_pqc::api::sig::{MlDsaSecretKey, MlDsaVariant};
-
     let stored_keys = storage
         .all_keys()
         .await
@@ -5305,25 +5299,7 @@ async fn rebuild_and_rotate_commitment(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{
-        apply_audit_failure_credit_revocation, audit_failure_clears_bootstrap_claim,
-        audit_failure_revokes_holder_credit, audit_launch_decision, config, cooldown_allows_audit,
-        first_audit_terminal_outcome, first_failed_key_label, fresh_offer_payment_context,
-        paid_notify_payment_context, queue_first_audit_event, quote_within_audit_window,
-        FirstAuditQueueOutcome, FirstAuditTerminalOutcome, MonetizedPinEvent,
-        MONETIZED_AUDIT_SKEW_MARGIN,
-    };
-    use crate::payment::VerificationContext;
-    use crate::replication::audit::AuditTickResult;
-    use crate::replication::recent_provers::RecentProvers;
-    use crate::replication::types::{AuditFailureReason, AuditFailureSummary, FailureEvidence};
-    use lru::LruCache;
-    use saorsa_core::identity::PeerId;
-    use std::collections::HashMap;
-    use std::num::NonZeroUsize;
-    use std::time::Duration;
-    use std::time::Instant;
-    use std::time::SystemTime;
+    use super::*;
 
     fn test_peer(b: u8) -> PeerId {
         let mut bytes = [0u8; 32];
@@ -5349,7 +5325,7 @@ mod tests {
                 challenge_id: 1,
                 challenged_peer: peer,
                 confirmed_failed_keys: vec![test_key(1)],
-                summary: AuditFailureSummary::default(),
+                summary: crate::replication::types::AuditFailureSummary::default(),
                 reason: AuditFailureReason::Timeout,
             },
         };
@@ -5442,7 +5418,6 @@ mod tests {
     /// stale or future/skewed client-forwarded quote cannot frame an honest node.
     #[test]
     fn monetized_quote_audit_window_fails_closed_both_ends() {
-        use crate::replication::commitment_state::GOSSIP_ANSWERABILITY_TTL;
         let now = SystemTime::now();
         // Fresh (just quoted) and small future/past skew -> audited.
         assert!(quote_within_audit_window(now, now));

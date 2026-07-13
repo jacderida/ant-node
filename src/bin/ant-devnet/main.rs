@@ -87,74 +87,8 @@ async fn main() -> color_eyre::Result<()> {
     }
 
     config.advertise_ip = cli.host;
-
-    // External EVM network (e.g. Arbitrum Sepolia): nodes verify payments
-    // against the real deployed contracts — no Anvil, and no embedded wallet
-    // key (bring your own funded wallet via an external signer). Falls through
-    // to the local-Anvil path (`--enable-evm`) when unset.
-    let evm_info = if let Some(net_name) = cli.evm_network.as_deref() {
-        let network = match net_name {
-            "arbitrum-sepolia" => evmlib::Network::ArbitrumSepoliaTest,
-            other => {
-                return Err(color_eyre::eyre::eyre!(
-                    "Unsupported --evm-network {other} (supported: arbitrum-sepolia)"
-                ))
-            }
-        };
-        let rpc_url = network.rpc_url().to_string();
-        let token_addr = format!("{:?}", network.payment_token_address());
-        let vault_addr = format!("{:?}", network.payment_vault_address());
-        ant_node::logging::info!(
-            "Using external EVM network {net_name}: rpc={rpc_url} token={token_addr} vault={vault_addr}"
-        );
-        config.evm_network = Some(network);
-        Some(DevnetEvmInfo {
-            rpc_url,
-            wallet_private_key: String::new(),
-            payment_token_address: token_addr,
-            payment_vault_address: vault_addr,
-        })
-    } else if cli.enable_evm {
-        ant_node::logging::info!("Starting local Anvil blockchain for EVM payment enforcement...");
-        let testnet = evmlib::testnet::Testnet::new()
-            .await
-            .map_err(|e| color_eyre::eyre::eyre!("Failed to start Anvil testnet: {e}"))?;
-        let network = testnet.to_network();
-        let wallet_key = testnet
-            .default_wallet_private_key()
-            .map_err(|e| color_eyre::eyre::eyre!("Failed to get wallet key: {e}"))?;
-
-        let (rpc_url, token_addr, vault_addr) = match &network {
-            evmlib::Network::Custom(custom) => (
-                custom.rpc_url_http.to_string(),
-                format!("{:?}", custom.payment_token_address),
-                format!("{:?}", custom.payment_vault_address),
-            ),
-            _ => {
-                return Err(color_eyre::eyre::eyre!(
-                    "Anvil testnet returned non-Custom network"
-                ))
-            }
-        };
-
-        config.evm_network = Some(network);
-
-        ant_node::logging::info!("Anvil blockchain running at {rpc_url}");
-        ant_node::logging::info!("Funded wallet private key: {wallet_key}");
-
-        // Keep testnet alive by leaking it (it will be cleaned up on process exit)
-        // This is necessary because AnvilInstance stops Anvil when dropped
-        std::mem::forget(testnet);
-
-        Some(DevnetEvmInfo {
-            rpc_url,
-            wallet_private_key: wallet_key,
-            payment_token_address: token_addr,
-            payment_vault_address: vault_addr,
-        })
-    } else {
-        None
-    };
+    let evm_info =
+        resolve_evm_info(cli.evm_network.as_deref(), cli.enable_evm, &mut config).await?;
 
     let mut devnet = Devnet::new(config).await?;
     devnet.start().await?;
@@ -187,6 +121,80 @@ async fn main() -> color_eyre::Result<()> {
 
     devnet.shutdown().await?;
     Ok(())
+}
+
+/// Resolve which EVM backing the devnet uses, updating `config` accordingly:
+/// an **external** network (`--evm-network`, e.g. Arbitrum Sepolia verified
+/// against the real deployed contracts, no embedded wallet key); a **local
+/// Anvil** chain (`--enable-evm`); or **none**. External takes precedence.
+async fn resolve_evm_info(
+    evm_network: Option<&str>,
+    enable_evm: bool,
+    config: &mut DevnetConfig,
+) -> color_eyre::Result<Option<DevnetEvmInfo>> {
+    if let Some(net_name) = evm_network {
+        let network = match net_name {
+            "arbitrum-sepolia" => evmlib::Network::ArbitrumSepoliaTest,
+            other => {
+                return Err(color_eyre::eyre::eyre!(
+                    "Unsupported --evm-network {other} (supported: arbitrum-sepolia)"
+                ))
+            }
+        };
+        let rpc_url = network.rpc_url().to_string();
+        let token_addr = format!("{:?}", network.payment_token_address());
+        let vault_addr = format!("{:?}", network.payment_vault_address());
+        ant_node::logging::info!(
+            "Using external EVM network {net_name}: rpc={rpc_url} token={token_addr} vault={vault_addr}"
+        );
+        config.evm_network = Some(network);
+        Ok(Some(DevnetEvmInfo {
+            rpc_url,
+            wallet_private_key: String::new(),
+            payment_token_address: token_addr,
+            payment_vault_address: vault_addr,
+        }))
+    } else if enable_evm {
+        ant_node::logging::info!("Starting local Anvil blockchain for EVM payment enforcement...");
+        let testnet = evmlib::testnet::Testnet::new()
+            .await
+            .map_err(|e| color_eyre::eyre::eyre!("Failed to start Anvil testnet: {e}"))?;
+        let network = testnet.to_network();
+        let wallet_key = testnet
+            .default_wallet_private_key()
+            .map_err(|e| color_eyre::eyre::eyre!("Failed to get wallet key: {e}"))?;
+
+        let (rpc_url, token_addr, vault_addr) = match &network {
+            evmlib::Network::Custom(custom) => (
+                custom.rpc_url_http.to_string(),
+                format!("{:?}", custom.payment_token_address),
+                format!("{:?}", custom.payment_vault_address),
+            ),
+            _ => {
+                return Err(color_eyre::eyre::eyre!(
+                    "Anvil testnet returned non-Custom network"
+                ))
+            }
+        };
+
+        config.evm_network = Some(network);
+
+        ant_node::logging::info!("Anvil blockchain running at {rpc_url}");
+        ant_node::logging::info!("Funded wallet private key: {wallet_key}");
+
+        // Keep testnet alive by leaking it (it will be cleaned up on process exit)
+        // This is necessary because AnvilInstance stops Anvil when dropped
+        std::mem::forget(testnet);
+
+        Ok(Some(DevnetEvmInfo {
+            rpc_url,
+            wallet_private_key: wallet_key,
+            payment_token_address: token_addr,
+            payment_vault_address: vault_addr,
+        }))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Build the `/api/info` payload for `manifest` and start the read-only HTTP

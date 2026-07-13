@@ -165,6 +165,10 @@ pub struct DevnetConfig {
     /// When `Some`, nodes will use this network (e.g. Anvil testnet) for
     /// on-chain verification. Defaults to Arbitrum One when `None`.
     pub evm_network: Option<EvmNetwork>,
+
+    /// Optional IPv4 to advertise to peers/clients (LAN devnet). When `Some`,
+    /// nodes bind 0.0.0.0 and advertise this IP instead of 127.0.0.1.
+    pub advertise_ip: Option<Ipv4Addr>,
 }
 
 impl Default for DevnetConfig {
@@ -186,6 +190,7 @@ impl Default for DevnetConfig {
             enable_node_logging: false,
             cleanup_data_dir: true,
             evm_network: None,
+            advertise_ip: None,
         }
     }
 }
@@ -436,7 +441,12 @@ impl Devnet {
         self.nodes
             .iter()
             .take(self.config.bootstrap_count)
-            .map(|n| MultiAddr::quic(SocketAddr::from((Ipv4Addr::LOCALHOST, n.port))))
+            .map(|n| {
+                MultiAddr::quic(SocketAddr::from((
+                    self.config.advertise_ip.unwrap_or(Ipv4Addr::LOCALHOST),
+                    n.port,
+                )))
+            })
             .collect()
     }
 
@@ -471,7 +481,12 @@ impl Devnet {
                 ))
             })?
             .iter()
-            .map(|n| MultiAddr::quic(SocketAddr::from((Ipv4Addr::LOCALHOST, n.port))))
+            .map(|n| {
+                MultiAddr::quic(SocketAddr::from((
+                    self.config.advertise_ip.unwrap_or(Ipv4Addr::LOCALHOST),
+                    n.port,
+                )))
+            })
             .collect();
 
         for i in self.config.bootstrap_count..self.config.node_count {
@@ -582,7 +597,7 @@ impl Devnet {
 
         let mut core_config = CoreNodeConfig::builder()
             .port(node.port)
-            .local(true)
+            .local(self.config.advertise_ip.is_none())
             .max_message_size(crate::ant_protocol::MAX_WIRE_MESSAGE_SIZE)
             .build()
             .map_err(|e| DevnetError::Core(format!("Failed to create core config: {e}")))?;
@@ -772,5 +787,19 @@ impl Drop for Devnet {
         if let Some(handle) = self.health_monitor.take() {
             handle.abort();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Backward-compatibility contract: a default config advertises no LAN IP,
+    /// so nodes bind loopback (`.local(advertise_ip.is_none())` → `.local(true)`)
+    /// and stamp `127.0.0.1` into the manifest bootstrap addresses — exactly as
+    /// before the `--host` flag existed.
+    #[test]
+    fn default_config_has_no_advertise_ip() {
+        assert!(DevnetConfig::default().advertise_ip.is_none());
     }
 }

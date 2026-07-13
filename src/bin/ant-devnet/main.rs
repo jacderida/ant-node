@@ -86,6 +86,14 @@ async fn main() -> color_eyre::Result<()> {
         config.stabilization_timeout = std::time::Duration::from_secs(timeout_secs);
     }
 
+    // A loopback/unspecified --host would stamp unreachable bootstrap addresses
+    // into the manifest (LAN mode would fail non-obviously), so reject it early.
+    if let Some(host) = cli.host.filter(|h| h.is_loopback() || h.is_unspecified()) {
+        return Err(color_eyre::eyre::eyre!(
+            "--host must be a routable LAN IPv4 (got {host}); loopback/0.0.0.0 would \
+             advertise unreachable bootstrap addresses"
+        ));
+    }
     config.advertise_ip = cli.host;
     let evm_info =
         resolve_evm_info(cli.evm_network.as_deref(), cli.enable_evm, &mut config).await?;
@@ -264,23 +272,37 @@ fn spawn_manifest_server(port: u16, manifest_json: String, info_json: String) {
         use std::io::{Read, Write};
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
+            // Cap how long a slow/idle client can hold a handler thread — the
+            // listener binds 0.0.0.0, so an unbounded blocking read is a trivial
+            // resource-exhaustion vector.
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
             let manifest = manifest_json.clone();
             let info = info_json.clone();
             std::thread::spawn(move || {
                 let mut buf = [0u8; 2048];
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let req = String::from_utf8_lossy(&buf[..n]);
-                let raw = req.split_whitespace().nth(1).unwrap_or("/");
+                let mut tokens = req.split_whitespace();
+                let method = tokens.next().unwrap_or("");
+                let raw = tokens.next().unwrap_or("/");
                 let path = raw.split('?').next().unwrap_or("/").trim_end_matches('/');
-                let (status, body) = match path {
-                    "/api/devnet-manifest.json" => ("200 OK", manifest.as_str()),
-                    "/api/info" => ("200 OK", info.as_str()),
-                    "" | "/api" => (
-                        "200 OK",
-                        "{\"service\":\"ant-devnet manifest API\",\
-                         \"endpoints\":[\"/api/devnet-manifest.json\",\"/api/info\"]}",
-                    ),
-                    _ => ("404 Not Found", "{\"error\":\"not found\"}"),
+                // Read-only API — only GET is allowed; anything else is 405.
+                let (status, body) = if method == "GET" {
+                    match path {
+                        "/api/devnet-manifest.json" => ("200 OK", manifest.as_str()),
+                        "/api/info" => ("200 OK", info.as_str()),
+                        "" | "/api" => (
+                            "200 OK",
+                            "{\"service\":\"ant-devnet manifest API\",\
+                             \"endpoints\":[\"/api/devnet-manifest.json\",\"/api/info\"]}",
+                        ),
+                        _ => ("404 Not Found", "{\"error\":\"not found\"}"),
+                    }
+                } else {
+                    (
+                        "405 Method Not Allowed",
+                        "{\"error\":\"method not allowed\"}",
+                    )
                 };
                 let resp = format!(
                     "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\

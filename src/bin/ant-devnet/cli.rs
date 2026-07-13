@@ -73,8 +73,8 @@ pub struct Cli {
     /// nodes verify against the real deployed Arbitrum Sepolia contracts —
     /// no local Anvil and no embedded wallet key (bring your own funded
     /// wallet via an external signer). Omit for the local-Anvil devnet
-    /// (`--enable-evm`).
-    #[arg(long)]
+    /// (`--enable-evm`). Mutually exclusive with `--enable-evm`.
+    #[arg(long, conflicts_with = "enable_evm")]
     pub evm_network: Option<String>,
 
     /// Serve the manifest over a read-only HTTP API on this port (binds

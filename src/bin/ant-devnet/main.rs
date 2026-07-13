@@ -86,12 +86,15 @@ async fn main() -> color_eyre::Result<()> {
         config.stabilization_timeout = std::time::Duration::from_secs(timeout_secs);
     }
 
-    // A loopback/unspecified --host would stamp unreachable bootstrap addresses
-    // into the manifest (LAN mode would fail non-obviously), so reject it early.
-    if let Some(host) = cli.host.filter(|h| h.is_loopback() || h.is_unspecified()) {
+    // A non-unicast --host would stamp unreachable bootstrap addresses into the
+    // manifest (LAN mode would fail non-obviously), so reject it early.
+    if let Some(host) = cli
+        .host
+        .filter(|h| h.is_loopback() || h.is_unspecified() || h.is_multicast() || h.is_broadcast())
+    {
         return Err(color_eyre::eyre::eyre!(
-            "--host must be a routable LAN IPv4 (got {host}); loopback/0.0.0.0 would \
-             advertise unreachable bootstrap addresses"
+            "--host must be a routable unicast LAN IPv4 (got {host}); \
+             loopback/unspecified/multicast/broadcast are not reachable bootstrap addresses"
         ));
     }
     config.advertise_ip = cli.host;
@@ -232,15 +235,25 @@ fn serve_manifest_api(
             },
         })
     });
+    let bootstrap = serde_json::to_value(&manifest.bootstrap)?;
     let info = serde_json::json!({
         "host_ip": host_ip,
         "manifest_url": format!("http://{host_ip}:{port}/api/devnet-manifest.json"),
         "node_count": manifest.node_count as u64,
-        "bootstrap": serde_json::to_value(&manifest.bootstrap).unwrap_or(serde_json::Value::Null),
+        "bootstrap": bootstrap,
         "evm": evm_block,
     });
     let info_json = serde_json::to_string_pretty(&info)?;
-    spawn_manifest_server(port, manifest_json, info_json);
+    // Bind synchronously so a failure (e.g. the port is already in use)
+    // propagates to the caller instead of the devnet silently coming up
+    // without its manifest API.
+    let listener = std::net::TcpListener::bind(("0.0.0.0", port)).map_err(|e| {
+        color_eyre::eyre::eyre!("failed to bind manifest API on 0.0.0.0:{port}: {e}")
+    })?;
+    ant_node::logging::info!(
+        "manifest API on http://0.0.0.0:{port}/api/devnet-manifest.json (+ /api/info)"
+    );
+    spawn_manifest_server(listener, manifest_json, info_json);
     Ok(())
 }
 
@@ -254,64 +267,55 @@ fn local_ip_guess() -> String {
         .unwrap_or_else(|_| "127.0.0.1".to_string())
 }
 
-/// Spawn a tiny read-only HTTP server (its own thread) exposing the manifest
-/// over the LAN. GET-only, open CORS; hand-rolled HTTP/1.1 so there's no new
-/// dependency. Threads are detached and die when the process exits on Ctrl+C.
-fn spawn_manifest_server(port: u16, manifest_json: String, info_json: String) {
-    let listener = match std::net::TcpListener::bind(("0.0.0.0", port)) {
-        Ok(l) => l,
-        Err(e) => {
-            ant_node::logging::warn!("manifest API: failed to bind 0.0.0.0:{port}: {e}");
-            return;
-        }
-    };
-    ant_node::logging::info!(
-        "manifest API on http://0.0.0.0:{port}/api/devnet-manifest.json (+ /api/info)"
-    );
+/// Run a tiny read-only HTTP server on `listener` (its own thread) exposing the
+/// manifest over the LAN. GET-only, open CORS; hand-rolled HTTP/1.1 so there's
+/// no new dependency. Connections are handled **inline, one at a time** — the
+/// payloads are tiny and a devnet serves a handful of LAN devices, so a single
+/// thread bounds resource use (no per-connection thread to exhaust). Each
+/// connection gets a read timeout so a slow/idle client can't stall the loop.
+/// The thread is detached and dies when the process exits on Ctrl+C.
+fn spawn_manifest_server(
+    listener: std::net::TcpListener,
+    manifest_json: String,
+    info_json: String,
+) {
     std::thread::spawn(move || {
         use std::io::{Read, Write};
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
-            // Cap how long a slow/idle client can hold a handler thread — the
-            // listener binds 0.0.0.0, so an unbounded blocking read is a trivial
-            // resource-exhaustion vector.
             let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
-            let manifest = manifest_json.clone();
-            let info = info_json.clone();
-            std::thread::spawn(move || {
-                let mut buf = [0u8; 2048];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                let req = String::from_utf8_lossy(&buf[..n]);
-                let mut tokens = req.split_whitespace();
-                let method = tokens.next().unwrap_or("");
-                let raw = tokens.next().unwrap_or("/");
-                let path = raw.split('?').next().unwrap_or("/").trim_end_matches('/');
-                // Read-only API — only GET is allowed; anything else is 405.
-                let (status, body) = if method == "GET" {
-                    match path {
-                        "/api/devnet-manifest.json" => ("200 OK", manifest.as_str()),
-                        "/api/info" => ("200 OK", info.as_str()),
-                        "" | "/api" => (
-                            "200 OK",
-                            "{\"service\":\"ant-devnet manifest API\",\
-                             \"endpoints\":[\"/api/devnet-manifest.json\",\"/api/info\"]}",
-                        ),
-                        _ => ("404 Not Found", "{\"error\":\"not found\"}"),
-                    }
-                } else {
-                    (
-                        "405 Method Not Allowed",
-                        "{\"error\":\"method not allowed\"}",
-                    )
-                };
-                let resp = format!(
-                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
-                     Access-Control-Allow-Origin: *\r\nCache-Control: no-store\r\n\
-                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.write_all(resp.as_bytes());
-            });
+            let mut buf = [0u8; 2048];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]);
+            let mut tokens = req.split_whitespace();
+            let method = tokens.next().unwrap_or("");
+            let raw = tokens.next().unwrap_or("/");
+            let path = raw.split('?').next().unwrap_or("/").trim_end_matches('/');
+            // Read-only API — only GET is allowed; anything else is 405.
+            let (status, body) = if method == "GET" {
+                match path {
+                    "/api/devnet-manifest.json" => ("200 OK", manifest_json.as_str()),
+                    "/api/info" => ("200 OK", info_json.as_str()),
+                    "" | "/api" => (
+                        "200 OK",
+                        "{\"service\":\"ant-devnet manifest API\",\
+                         \"endpoints\":[\"/api/devnet-manifest.json\",\"/api/info\"]}",
+                    ),
+                    _ => ("404 Not Found", "{\"error\":\"not found\"}"),
+                }
+            } else {
+                (
+                    "405 Method Not Allowed",
+                    "{\"error\":\"method not allowed\"}",
+                )
+            };
+            let resp = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\
+                 Access-Control-Allow-Origin: *\r\nCache-Control: no-store\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
         }
     });
 }

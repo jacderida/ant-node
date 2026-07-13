@@ -80,8 +80,9 @@ pub struct Cli {
     /// Serve the manifest over a read-only HTTP API on this port (binds
     /// 0.0.0.0). Any LAN device can then GET
     /// `http://<host>:<port>/api/devnet-manifest.json` (and `/api/info`) —
-    /// no file copying. Open CORS. Suggested: 8088.
-    #[arg(long)]
+    /// no file copying. Open CORS. Suggested: 8088. Requires `--host` (the API
+    /// advertises a LAN URL, so a loopback-only devnet would be misleading).
+    #[arg(long, requires = "host", value_parser = clap::value_parser!(u16).range(1..))]
     pub serve_port: Option<u16>,
 }
 
@@ -121,5 +122,20 @@ mod tests {
     #[test]
     fn host_rejects_non_ipv4() {
         assert!(Cli::try_parse_from(["ant-devnet", "--host", "not-an-ip"]).is_err());
+    }
+
+    /// `--serve-port` requires `--host` (it advertises a LAN URL).
+    #[test]
+    fn serve_port_requires_host() {
+        assert!(Cli::try_parse_from(["ant-devnet", "--serve-port", "8088"]).is_err());
+    }
+
+    /// `--serve-port 0` is rejected (an ephemeral port would be advertised as `:0`).
+    #[test]
+    fn serve_port_rejects_zero() {
+        assert!(
+            Cli::try_parse_from(["ant-devnet", "--host", "192.168.1.5", "--serve-port", "0"])
+                .is_err()
+        );
     }
 }

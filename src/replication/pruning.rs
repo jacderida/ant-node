@@ -2751,14 +2751,14 @@ mod tests {
     }
 
     fn graded_status(peer: &PeerId, key: &XorName, msg: ReplicationMessage) -> PruneAuditStatus {
-        prune_audit_response_status(
-            msg,
-            TEST_CHALLENGE_ID,
-            peer,
-            key,
-            &TEST_NONCE,
-            TEST_RECORD_BYTES,
-        )
+        let expected = compute_audit_digest(&TEST_NONCE, peer.as_bytes(), key, TEST_RECORD_BYTES);
+        let statuses =
+            prune_audit_response_statuses(msg, TEST_CHALLENGE_ID, peer, &[(*key, expected)]);
+        statuses
+            .into_iter()
+            .next()
+            .map(|(_, status)| status)
+            .expect("single-key batch returns exactly one status")
     }
 
     #[test]

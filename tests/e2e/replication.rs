@@ -10,7 +10,7 @@ use super::TestHarness;
 use ant_node::client::compute_address;
 use ant_node::replication::commitment_state::{BuiltCommitment, ResponderCommitmentState};
 use ant_node::replication::config::{
-    storage_admission_width, K_BUCKET_SIZE, REPAIR_HINT_MIN_AGE, REPLICATION_PROTOCOL_ID,
+    storage_admission_width, K_BUCKET_SIZE, REPLICATION_PROTOCOL_ID,
 };
 use ant_node::replication::protocol::{
     compute_audit_digest, AuditChallenge, AuditResponse, FetchRequest, FetchResponse,
@@ -24,9 +24,8 @@ use ant_node::ReplicationConfig;
 use saorsa_core::identity::PeerId;
 use saorsa_core::{P2PNode, TrustEvent};
 use serial_test::serial;
-use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::RwLock;
 
 /// Maximum time to wait for replication propagation in tests.
@@ -162,42 +161,6 @@ async fn store_record_on_peers(
     for peer in peers {
         store_record_on_peer(harness, peer, address, content).await;
     }
-}
-
-async fn record_repair_proofs_for_peers(
-    repair_proofs: &Arc<RwLock<RepairProofs>>,
-    p2p_node: &Arc<P2PNode>,
-    config: &ReplicationConfig,
-    peers: &[PeerId],
-    key: &[u8; 32],
-    hinted_at_epoch: u64,
-) -> Instant {
-    let close_peers: HashSet<PeerId> = p2p_node
-        .dht_manager()
-        .find_closest_nodes_local_with_self(key, config.close_group_size)
-        .await
-        .iter()
-        .map(|node| node.peer_id)
-        .collect();
-    let mut proofs = repair_proofs.write().await;
-    let hinted_at = Instant::now();
-    let repair_proof_now = hinted_at
-        .checked_add(REPAIR_HINT_MIN_AGE)
-        .unwrap_or(hinted_at);
-    for peer in peers {
-        assert!(
-            proofs.record_replica_hint_sent_at(
-                *peer,
-                *key,
-                &close_peers,
-                hinted_at_epoch,
-                hinted_at
-            ),
-            "test target should be in close group for repair-proof recording"
-        );
-    }
-    drop(proofs);
-    repair_proof_now
 }
 
 /// Fresh write happy path (Section 18 #1).
@@ -940,13 +903,12 @@ async fn test_audit_absent_key_returns_sentinel() {
 /// Prune pass requires remote storage proofs before deleting local records.
 ///
 /// This drives `run_prune_pass` against live nodes so prune-confirmation audits
-/// travel over the real replication request/response path.
+/// travel over the real replication request/response path. The repair-proof
+/// table stays EMPTY throughout: prune candidacy and prune-audit target
+/// selection must not depend on prior neighbor-sync repair hints.
 #[tokio::test]
 #[serial]
 async fn test_prune_pass_requires_remote_confirmation_before_delete() {
-    const HINT_EPOCH: u64 = 7;
-    const CURRENT_EPOCH: u64 = HINT_EPOCH + 1;
-
     let harness = TestHarness::setup_minimal().await.expect("setup");
     harness.warmup_dht().await.expect("warmup");
 
@@ -970,7 +932,8 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
     let pruner_peer = *pruner_p2p.peer_id();
 
     // Even with all target peers storing the record, pruning must be blocked
-    // while remote prune audits are not allowed during bootstrap/drain.
+    // while remote prune audits are not allowed during bootstrap/drain — but
+    // the deferral must preserve candidacy and the first-seen timestamp.
     let (gate_content, gate_address, gate_targets) =
         find_remote_prune_candidate(&harness, pruner_idx, close_group_size, "bootstrap-gate").await;
     pruner_storage
@@ -978,15 +941,6 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
         .await
         .expect("put gate record on pruner");
     store_record_on_peers(&harness, &gate_targets, &gate_address, &gate_content).await;
-    let gate_repair_proof_now = record_repair_proofs_for_peers(
-        &repair_proofs,
-        &pruner_p2p,
-        &config,
-        &gate_targets,
-        &gate_address,
-        HINT_EPOCH,
-    )
-    .await;
 
     let blocked = pruning::run_prune_pass_with_context(pruning::PrunePassContext {
         self_id: &pruner_peer,
@@ -996,16 +950,42 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
         config: &config,
         sync_state: &sync_state,
         repair_proofs: &repair_proofs,
-        current_sync_epoch: CURRENT_EPOCH,
-        repair_proof_now: Some(gate_repair_proof_now),
         allow_remote_prune_audits: false,
         commitment_state: None,
     })
     .await;
     assert_eq!(blocked.records_pruned, 0);
+    assert_eq!(
+        blocked.records_candidates, 1,
+        "the bootstrap gate must not remove candidate status"
+    );
+    assert_eq!(blocked.records_bootstrap_deferred, 1);
     assert!(
         pruner_storage.exists(&gate_address).expect("exists"),
         "record must not be pruned before remote audits are allowed"
+    );
+    let first_seen = pruner_paid_list
+        .record_out_of_range_since(&gate_address)
+        .expect("bootstrap-deferred record keeps its out-of-range timestamp");
+
+    // A second blocked pass must not restart the hysteresis clock.
+    let blocked_again = pruning::run_prune_pass_with_context(pruning::PrunePassContext {
+        self_id: &pruner_peer,
+        storage: &pruner_storage,
+        paid_list: &pruner_paid_list,
+        p2p_node: &pruner_p2p,
+        config: &config,
+        sync_state: &sync_state,
+        repair_proofs: &repair_proofs,
+        allow_remote_prune_audits: false,
+        commitment_state: None,
+    })
+    .await;
+    assert_eq!(blocked_again.records_pruned, 0);
+    assert_eq!(
+        pruner_paid_list.record_out_of_range_since(&gate_address),
+        Some(first_seen),
+        "repeated deferrals must preserve the original first-seen time"
     );
 
     let confirmed = pruning::run_prune_pass_with_context(pruning::PrunePassContext {
@@ -1016,12 +996,11 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
         config: &config,
         sync_state: &sync_state,
         repair_proofs: &repair_proofs,
-        current_sync_epoch: CURRENT_EPOCH,
-        repair_proof_now: Some(gate_repair_proof_now),
         allow_remote_prune_audits: true,
         commitment_state: None,
     })
     .await;
+    assert_eq!(confirmed.records_audits_attempted, 1);
     assert_eq!(confirmed.records_pruned, 1);
     assert!(
         !pruner_storage.exists(&gate_address).expect("exists"),
@@ -1043,15 +1022,6 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
         &missing_content,
     )
     .await;
-    let missing_repair_proof_now = record_repair_proofs_for_peers(
-        &repair_proofs,
-        &pruner_p2p,
-        &config,
-        &missing_targets,
-        &missing_address,
-        HINT_EPOCH,
-    )
-    .await;
 
     let incomplete = pruning::run_prune_pass_with_context(pruning::PrunePassContext {
         self_id: &pruner_peer,
@@ -1061,13 +1031,15 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
         config: &config,
         sync_state: &sync_state,
         repair_proofs: &repair_proofs,
-        current_sync_epoch: CURRENT_EPOCH,
-        repair_proof_now: Some(missing_repair_proof_now),
         allow_remote_prune_audits: true,
         commitment_state: None,
     })
     .await;
     assert_eq!(incomplete.records_pruned, 0);
+    assert_eq!(
+        incomplete.records_audit_below_threshold, 1,
+        "a below-threshold audit must be reported as such, not silently dropped"
+    );
     assert!(
         pruner_storage.exists(&missing_address).expect("exists"),
         "record must remain local while any target peer lacks proof"
@@ -1089,8 +1061,6 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
         config: &config,
         sync_state: &sync_state,
         repair_proofs: &repair_proofs,
-        current_sync_epoch: CURRENT_EPOCH,
-        repair_proof_now: Some(missing_repair_proof_now),
         allow_remote_prune_audits: true,
         commitment_state: None,
     })
@@ -1108,16 +1078,14 @@ async fn test_prune_pass_requires_remote_confirmation_before_delete() {
 /// for, but which is still committed under a recently-gossiped commitment, must
 /// NOT be deleted — the storage-commitment audit's round-2 byte challenge could
 /// still demand it, and deleting would turn an honest node's reply into an
-/// `Absent` confirmed failure. Once it is no longer committed (e.g. it has aged
-/// out of the retention window, simulated here by passing `None`), the same
-/// out-of-range record becomes prunable. Drives the real `run_prune_pass`
-/// against live nodes.
+/// `Absent` confirmed failure. The veto applies to DELETION only: the
+/// out-of-range timer starts immediately even while the key is held. Once it is
+/// no longer committed (e.g. it has aged out of the retention window, simulated
+/// here by passing `None`), the same out-of-range record becomes prunable.
+/// Drives the real `run_prune_pass` against live nodes.
 #[tokio::test]
 #[serial]
 async fn test_prune_veto_for_committed_out_of_range_key() {
-    const HINT_EPOCH: u64 = 7;
-    const CURRENT_EPOCH: u64 = HINT_EPOCH + 1;
-
     let harness = TestHarness::setup_minimal().await.expect("setup");
     harness.warmup_dht().await.expect("warmup");
 
@@ -1148,18 +1116,6 @@ async fn test_prune_veto_for_committed_out_of_range_key() {
         .await
         .expect("put record on pruner");
     store_record_on_peers(&harness, &targets, &address, &content).await;
-    // Mature repair proofs (hinted_at + REPAIR_HINT_MIN_AGE) so main's prune-proof
-    // gate treats the record as fully prunable — leaving the retention veto as the
-    // ONLY thing that can keep it. Same pattern as the prune-threshold tests below.
-    let repair_proof_now = record_repair_proofs_for_peers(
-        &repair_proofs,
-        &pruner_p2p,
-        &config,
-        &targets,
-        &address,
-        HINT_EPOCH,
-    )
-    .await;
 
     // A retained commitment that COMMITS to the out-of-range key (as if we
     // gossiped it just before the key left our range). A throwaway keypair is
@@ -1182,7 +1138,7 @@ async fn test_prune_veto_for_committed_out_of_range_key() {
     assert!(committed.is_held(&address), "test setup: key must be held");
 
     // With the key still committed, an otherwise-fully-prunable out-of-range
-    // record is VETOED.
+    // record is VETOED — but the out-of-range timer still starts.
     let vetoed = pruning::run_prune_pass_with_context(pruning::PrunePassContext {
         self_id: &pruner_peer,
         storage: &pruner_storage,
@@ -1191,15 +1147,21 @@ async fn test_prune_veto_for_committed_out_of_range_key() {
         config: &config,
         sync_state: &sync_state,
         repair_proofs: &repair_proofs,
-        current_sync_epoch: CURRENT_EPOCH,
         allow_remote_prune_audits: true,
-        repair_proof_now: Some(repair_proof_now),
         commitment_state: Some(&committed),
     })
     .await;
     assert_eq!(
         vetoed.records_pruned, 0,
         "a key still committed under a recent commitment must not be pruned"
+    );
+    assert_eq!(vetoed.records_marked_out_of_range, 1);
+    assert_eq!(vetoed.records_held_by_commitment, 1);
+    assert!(
+        pruner_paid_list
+            .record_out_of_range_since(&address)
+            .is_some(),
+        "a retained commitment must not prevent the out-of-range timer from starting"
     );
     assert!(
         pruner_storage.exists(&address).expect("exists"),
@@ -1216,9 +1178,7 @@ async fn test_prune_veto_for_committed_out_of_range_key() {
         config: &config,
         sync_state: &sync_state,
         repair_proofs: &repair_proofs,
-        current_sync_epoch: CURRENT_EPOCH,
         allow_remote_prune_audits: true,
-        repair_proof_now: Some(repair_proof_now),
         commitment_state: None,
     })
     .await;
@@ -1234,32 +1194,26 @@ async fn test_prune_veto_for_committed_out_of_range_key() {
     harness.teardown().await.expect("teardown");
 }
 
-/// The prune proof gate tolerates exactly one lagging close-group peer, at
-/// production parameters (close group 7, 6 proofs required).
+/// Production-width prune liveness: close group 7, storage-retention width 9
+/// (7 + `STORAGE_ADMISSION_MARGIN`), and a chunk the pruner holds (as if
+/// admitted under the wider client-PUT gate) that is now outside width 9.
 ///
-/// Fresh replication is fire-and-forget and uploads/repair succeed at
-/// `QUORUM_THRESHOLD` (4 of 7), so a record's placement routinely sits below
-/// full unanimity. When the prune gate demanded unanimous proofs, such
-/// records were audited every pass, failed (absent peers answer
-/// `ABSENT_KEY_DIGEST`), and were never deleted — the production "pruning is
-/// hardly taking place" incident. The all-but-one threshold keeps a single
-/// absent peer from vetoing deletion while still demanding near-full
-/// placement before the local copy is dropped.
+/// The prune-confirmation audit must reach the CURRENT key-nearest close
+/// group directly from the routing table, with a completely EMPTY
+/// `RepairProofs` table: no overlap between the pruner's neighbor-sync set
+/// (self-nearest peers) and the key-nearest close group may be assumed. The
+/// old repair-proof gate silently deferred candidacy here forever — the
+/// production "pruning is hardly taking place" incident.
 ///
-/// This test pins both sides of the gate:
+/// This test also pins both sides of the 6-of-7 possession threshold:
 /// - below the threshold (5 of 7 proofs) the record must never be deleted,
-///   no matter how many passes run;
+///   no matter how many passes run (absent peers answer
+///   `ABSENT_KEY_DIGEST`, which never counts positively);
 /// - at the threshold (6 of 7 proofs) the record prunes even though one
 ///   peer still lacks the bytes.
-///
-/// Repair proofs are recorded only for the eventual holders: the
-/// never-hinted peer must reduce the audit pool rather than veto the prune
-/// at the repair-proof gate.
 #[tokio::test]
 #[serial]
 async fn prune_deletes_at_proof_threshold_and_retains_below_it() {
-    const HINT_EPOCH: u64 = 7;
-    const CURRENT_EPOCH: u64 = HINT_EPOCH + 1;
     /// Production close-group size (`CLOSE_GROUP_SIZE` in ant-protocol).
     const PROD_CLOSE_GROUP_SIZE: usize = 7;
     /// Prune proof threshold at production parameters: all but one, 6 of 7.
@@ -1276,6 +1230,8 @@ async fn prune_deletes_at_proof_threshold_and_retains_below_it() {
         ..ReplicationConfig::default()
     };
     let sync_state = Arc::new(RwLock::new(NeighborSyncState::new_cycle(vec![])));
+    // Deliberately empty and never populated: candidacy and target selection
+    // must not depend on neighbor-sync repair hints.
     let repair_proofs = Arc::new(RwLock::new(RepairProofs::new()));
 
     let pruner = harness.test_node(pruner_idx).expect("pruner");
@@ -1291,6 +1247,8 @@ async fn prune_deletes_at_proof_threshold_and_retains_below_it() {
     );
     let pruner_peer = *pruner_p2p.peer_id();
 
+    // `find_remote_prune_candidate` guarantees the pruner is outside the
+    // width-9 storage-retention group for the key (and outside the strict 7).
     let (content, address, targets) =
         find_remote_prune_candidate(&harness, pruner_idx, PROD_CLOSE_GROUP_SIZE, "quorum-stored")
             .await;
@@ -1300,8 +1258,6 @@ async fn prune_deletes_at_proof_threshold_and_retains_below_it() {
         .expect("put record on pruner");
 
     // Replicate below the threshold: only 5 of 7 peers hold the bytes.
-    // Repair proofs cover only the eventual holders; the remaining
-    // close-group peer was never hinted and stays outside the audit pool.
     store_record_on_peers(
         &harness,
         &targets[..PRUNE_PROOFS_NEEDED - 1],
@@ -1309,19 +1265,10 @@ async fn prune_deletes_at_proof_threshold_and_retains_below_it() {
         &content,
     )
     .await;
-    let repair_proof_now = record_repair_proofs_for_peers(
-        &repair_proofs,
-        &pruner_p2p,
-        &config,
-        &targets[..PRUNE_PROOFS_NEEDED],
-        &address,
-        HINT_EPOCH,
-    )
-    .await;
 
     // Below the threshold the local copy is load-bearing: deleting it would
     // shrink the proven replica set past the prune safety bar, so every
-    // pass must retain it.
+    // pass must retain it — while still ATTEMPTING the audit each pass.
     for pass in 0..3 {
         let result = pruning::run_prune_pass_with_context(pruning::PrunePassContext {
             self_id: &pruner_peer,
@@ -1331,15 +1278,21 @@ async fn prune_deletes_at_proof_threshold_and_retains_below_it() {
             config: &config,
             sync_state: &sync_state,
             repair_proofs: &repair_proofs,
-            current_sync_epoch: CURRENT_EPOCH,
             allow_remote_prune_audits: true,
-            repair_proof_now: Some(repair_proof_now),
             commitment_state: None,
         })
         .await;
         assert_eq!(
+            result.records_audits_attempted, 1,
+            "pass {pass}: the candidate must be audited despite the empty repair-proof table",
+        );
+        assert_eq!(
             result.records_pruned, 0,
             "pass {pass}: a record below the proof threshold must never prune",
+        );
+        assert_eq!(
+            result.records_audit_below_threshold, 1,
+            "pass {pass}: the failed confirmation must surface in telemetry",
         );
         assert!(
             pruner_storage.exists(&address).expect("exists"),
@@ -1367,15 +1320,128 @@ async fn prune_deletes_at_proof_threshold_and_retains_below_it() {
         config: &config,
         sync_state: &sync_state,
         repair_proofs: &repair_proofs,
-        current_sync_epoch: CURRENT_EPOCH,
         allow_remote_prune_audits: true,
-        repair_proof_now: Some(repair_proof_now),
         commitment_state: None,
     })
     .await;
     assert_eq!(
         at_threshold.records_pruned, 1,
         "a record proven on all but one of the close group must prune",
+    );
+    assert!(!pruner_storage.exists(&address).expect("exists"));
+
+    harness.teardown().await.expect("teardown");
+}
+
+/// Hysteresis lifecycle against live nodes: a record outside the retention
+/// width is marked immediately, is NOT a candidate while the hysteresis is
+/// running, and becomes a candidate that prunes — with an empty
+/// `RepairProofs` table — once continuously out of range for the full
+/// (test-shortened) hysteresis.
+#[tokio::test]
+#[serial]
+async fn prune_marks_immediately_and_candidacy_waits_for_hysteresis() {
+    /// Test stand-in for the 3-day production hysteresis. Long enough that the
+    /// two pre-maturity prune passes reliably run inside the window, short
+    /// enough to keep the test fast.
+    const TEST_HYSTERESIS: Duration = Duration::from_secs(2);
+
+    let harness = TestHarness::setup_minimal().await.expect("setup");
+    harness.warmup_dht().await.expect("warmup");
+
+    let pruner_idx = 3;
+    let close_group_size = 2;
+    let config = ReplicationConfig {
+        prune_hysteresis_duration: TEST_HYSTERESIS,
+        ..prune_test_config(close_group_size)
+    };
+    let sync_state = Arc::new(RwLock::new(NeighborSyncState::new_cycle(vec![])));
+    let repair_proofs = Arc::new(RwLock::new(RepairProofs::new()));
+
+    let pruner = harness.test_node(pruner_idx).expect("pruner");
+    let pruner_p2p = Arc::clone(pruner.p2p_node.as_ref().expect("pruner p2p"));
+    let pruner_storage = pruner.ant_protocol.as_ref().expect("protocol").storage();
+    let pruner_paid_list = Arc::clone(
+        pruner
+            .replication_engine
+            .as_ref()
+            .expect("engine")
+            .paid_list(),
+    );
+    let pruner_peer = *pruner_p2p.peer_id();
+
+    let (content, address, targets) =
+        find_remote_prune_candidate(&harness, pruner_idx, close_group_size, "hysteresis").await;
+    pruner_storage
+        .put(&address, &content)
+        .await
+        .expect("put record on pruner");
+    store_record_on_peers(&harness, &targets, &address, &content).await;
+
+    // Pass 1: the record is marked out-of-range immediately, but the running
+    // hysteresis keeps it from candidacy.
+    let marked = pruning::run_prune_pass_with_context(pruning::PrunePassContext {
+        self_id: &pruner_peer,
+        storage: &pruner_storage,
+        paid_list: &pruner_paid_list,
+        p2p_node: &pruner_p2p,
+        config: &config,
+        sync_state: &sync_state,
+        repair_proofs: &repair_proofs,
+        allow_remote_prune_audits: true,
+        commitment_state: None,
+    })
+    .await;
+    assert_eq!(marked.records_marked_out_of_range, 1);
+    assert_eq!(marked.records_hysteresis_pending, 1);
+    assert_eq!(marked.records_candidates, 0);
+    assert_eq!(marked.records_pruned, 0);
+    let first_seen = pruner_paid_list
+        .record_out_of_range_since(&address)
+        .expect("out-of-range timestamp set on first observation");
+
+    // Pass 2 (immediately after): still pending, timer NOT restarted.
+    let pending = pruning::run_prune_pass_with_context(pruning::PrunePassContext {
+        self_id: &pruner_peer,
+        storage: &pruner_storage,
+        paid_list: &pruner_paid_list,
+        p2p_node: &pruner_p2p,
+        config: &config,
+        sync_state: &sync_state,
+        repair_proofs: &repair_proofs,
+        allow_remote_prune_audits: true,
+        commitment_state: None,
+    })
+    .await;
+    assert_eq!(pending.records_marked_out_of_range, 0);
+    assert_eq!(pending.records_hysteresis_pending, 1);
+    assert_eq!(pending.records_pruned, 0);
+    assert_eq!(
+        pruner_paid_list.record_out_of_range_since(&address),
+        Some(first_seen),
+        "continuously out-of-range records keep their original first-seen time"
+    );
+
+    // Pass 3 (after the hysteresis): candidate, audited, and pruned — with an
+    // empty repair-proof table.
+    tokio::time::sleep(TEST_HYSTERESIS + Duration::from_millis(100)).await;
+    let matured = pruning::run_prune_pass_with_context(pruning::PrunePassContext {
+        self_id: &pruner_peer,
+        storage: &pruner_storage,
+        paid_list: &pruner_paid_list,
+        p2p_node: &pruner_p2p,
+        config: &config,
+        sync_state: &sync_state,
+        repair_proofs: &repair_proofs,
+        allow_remote_prune_audits: true,
+        commitment_state: None,
+    })
+    .await;
+    assert_eq!(matured.records_candidates, 1);
+    assert_eq!(matured.records_audits_attempted, 1);
+    assert_eq!(
+        matured.records_pruned, 1,
+        "the matured candidate must prune without any repair-hint history"
     );
     assert!(!pruner_storage.exists(&address).expect("exists"));
 
@@ -1441,9 +1507,7 @@ async fn paid_prune_requires_paid_close_group_confirmations() {
         config: &config,
         sync_state: &sync_state,
         repair_proofs: &repair_proofs,
-        current_sync_epoch: 1,
         allow_remote_prune_audits: true,
-        repair_proof_now: None,
         commitment_state: None,
     })
     .await;
@@ -1477,9 +1541,7 @@ async fn paid_prune_requires_paid_close_group_confirmations() {
         config: &config,
         sync_state: &sync_state,
         repair_proofs: &repair_proofs,
-        current_sync_epoch: 1,
         allow_remote_prune_audits: true,
-        repair_proof_now: None,
         commitment_state: None,
     })
     .await;

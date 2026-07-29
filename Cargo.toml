@@ -177,6 +177,9 @@ logging = ["tracing", "tracing-subscriber", "tracing-appender"]
 # integration tests and downstream test harnesses.
 test-utils = []
 
+[patch.crates-io]
+saorsa-core = { git = "https://github.com/mickvandijke/saorsa-core.git", branch = "feat/relay-canary-gate-rc-2026.6.2" }
+
 [profile.release]
 lto = true
 codegen-units = 1

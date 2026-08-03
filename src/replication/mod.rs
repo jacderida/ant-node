@@ -2105,7 +2105,10 @@ impl ReplicationEngine {
                     dht_event = dht_events.recv() => {
                         let Ok(dht_event) = dht_event else { continue };
                         match dht_event {
-                            DhtNetworkEvent::KClosestPeersChanged { old, new } => {
+                            // saorsa-core also surfaces unscoped `added`/`removed`
+                            // sets here, but we intentionally ignore them and derive
+                            // entrants scoped to `neighbor_sync_scope` below.
+                            DhtNetworkEvent::KClosestPeersChanged { old, new, .. } => {
                                 let old_peers = old
                                     .iter()
                                     .take(config.neighbor_sync_scope)

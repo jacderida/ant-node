@@ -212,3 +212,10 @@ unused_async = "allow"
 cognitive_complexity = "allow"
 # Allow non-const functions during initial development (may need runtime features later)
 missing_const_for_fn = "allow"
+
+# V2-1085 testnet build: saorsa-core #153 (runtime re-bootstrap recovery,
+# V2-1036) pinned to the PR head. saorsa-core declares 0.27.1, matching this
+# release's requirement, so this single workspace patch also replaces
+# ant-protocol's transitive copy.
+[patch.crates-io]
+saorsa-core = { git = "https://github.com/WithAutonomi/saorsa-core", rev = "a07b87a" }

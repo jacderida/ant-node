@@ -4921,8 +4921,7 @@ dependencies = [
 [[package]]
 name = "saorsa-core"
 version = "0.27.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd39dc71cd6ca7ec999ad4285a323fb5fbffc1b1c0554ff1dbf77176a68cf1db"
+source = "git+https://github.com/jacderida/saorsa-core.git?rev=9027a3916493395489448a4563d0e1eb2720c581#9027a3916493395489448a4563d0e1eb2720c581"
 dependencies = [
  "anyhow",
  "async-trait",

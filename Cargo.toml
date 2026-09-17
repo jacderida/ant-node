@@ -244,3 +244,9 @@ cognitive_complexity = "allow"
 # Allow non-const functions during initial development (may need runtime features later)
 missing_const_for_fn = "allow"
 
+
+# Testnet-only pins for V2-834 (do not merge): build against the unreleased
+# saorsa-transport #169 and saorsa-core #165 heads.
+[patch.crates-io]
+saorsa-transport = { git = "https://github.com/jacderida/saorsa-transport.git", rev = "bef0fd625422b6a4477c758919b47e05ce97fdf8" }  # branch: chrisoneil/v2-834-traffic-accounting-final-ground-truth-instrumentation
+saorsa-core = { git = "https://github.com/jacderida/saorsa-core.git", rev = "62d58790ff19a0caf8910a597a41d075040421bd" }  # branch: chrisoneil/v2-834-traffic-accounting-final-ground-truth-instrumentation

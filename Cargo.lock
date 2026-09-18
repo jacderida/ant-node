@@ -4958,7 +4958,7 @@ dependencies = [
 [[package]]
 name = "saorsa-transport"
 version = "0.36.4"
-source = "git+https://github.com/jacderida/saorsa-transport.git?rev=4b13fec248bdad74f4b25b07a1982e2003f6eda7#4b13fec248bdad74f4b25b07a1982e2003f6eda7"
+source = "git+https://github.com/jacderida/saorsa-transport.git?rev=69cc8761e9c0073ff3a9ae0fe65ea0a5d33885d4#69cc8761e9c0073ff3a9ae0fe65ea0a5d33885d4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6329,7 +6329,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
